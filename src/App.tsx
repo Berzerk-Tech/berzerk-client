@@ -9,8 +9,12 @@ import { BatchBrowser } from "./components/BatchBrowser";
 import { HomeMenu, type Screen } from "./components/HomeMenu";
 import { NotaFiscalPlaceholder } from "./components/NotaFiscalPlaceholder";
 import { PieceTrace } from "./components/PieceTrace";
+import { Separacao } from "./components/Separacao";
+import { SeparacaoMistos } from "./components/SeparacaoMistos";
+import { RequireOpsAuth } from "./components/RequireOpsAuth";
 import { SettingsPlaceholder } from "./components/SettingsPlaceholder";
 import { UpdateBanner } from "./components/UpdateBanner";
+import { RfidProvider } from "./contexts/RfidContext";
 
 export default function App() {
   const [session, setSession] = useState<Session | null>(null);
@@ -52,16 +56,6 @@ export default function App() {
     };
   }, []);
 
-  if (loading) {
-    return (
-      <div style={loadingPage}>
-        <div style={{ color: "var(--text-muted)", fontSize: 13 }}>
-          Carregando…
-        </div>
-      </div>
-    );
-  }
-
   const banner =
     update && !updateDismissed ? (
       <UpdateBanner update={update} onDismiss={() => setUpdateDismissed(true)} />
@@ -74,31 +68,44 @@ export default function App() {
     </div>
   );
 
-  if (!session) return withBanner(<Login />);
-
-  const email = session.user.email ?? "(sem email)";
-  const stationShortId = getStationShortId();
   const back = () => setScreen("home");
 
-  if (screen === "rfid") {
-    return withBanner(<BatchBrowser session={session} onBack={back} />);
+  let content: ReactNode;
+  if (loading) {
+    content = (
+      <div style={loadingPage}>
+        <div style={{ color: "var(--text-muted)", fontSize: 13 }}>Carregando…</div>
+      </div>
+    );
+  } else if (!session) {
+    content = withBanner(<Login />);
+  } else {
+    const email = session.user.email ?? "(sem email)";
+    const stationShortId = getStationShortId();
+    if (screen === "rfid") content = withBanner(<BatchBrowser session={session} onBack={back} />);
+    else if (screen === "nf") content = withBanner(<NotaFiscalPlaceholder onBack={back} />);
+    else if (screen === "rastreio") content = withBanner(<PieceTrace onBack={back} />);
+    else if (screen === "separacao")
+      content = withBanner(
+        <RequireOpsAuth onBack={back}>
+          <Separacao onBack={back} />
+        </RequireOpsAuth>,
+      );
+    else if (screen === "separacao-mistos")
+      content = withBanner(
+        <RequireOpsAuth onBack={back}>
+          <SeparacaoMistos onBack={back} />
+        </RequireOpsAuth>,
+      );
+    else if (screen === "settings") content = withBanner(<SettingsPlaceholder onBack={back} />);
+    else
+      content = withBanner(
+        <HomeMenu email={email} stationShortId={stationShortId} onEnter={setScreen} />,
+      );
   }
-  if (screen === "nf") {
-    return withBanner(<NotaFiscalPlaceholder onBack={back} />);
-  }
-  if (screen === "rastreio") {
-    return withBanner(<PieceTrace onBack={back} />);
-  }
-  if (screen === "settings") {
-    return withBanner(<SettingsPlaceholder onBack={back} />);
-  }
-  return withBanner(
-    <HomeMenu
-      email={email}
-      stationShortId={stationShortId}
-      onEnter={setScreen}
-    />,
-  );
+
+  // RfidProvider acima da sessão: a conexão da mesa sobrevive a logout/troca de operadora.
+  return <RfidProvider>{content}</RfidProvider>;
 }
 
 const loadingPage: CSSProperties = {

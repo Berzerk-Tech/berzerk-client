@@ -9,10 +9,18 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import { supabase } from "../lib/supabase";
 import { getStoredTheme, setTheme, type Theme } from "../lib/theme";
 import { getDeviceConfig } from "../lib/devices";
+import { getMe, canOperateSeparacao } from "../services/orders";
 import { BerzerkLogo } from "./BerzerkLogo";
 import { AmbientBackground } from "./AmbientBackground";
 
-export type Screen = "home" | "rfid" | "nf" | "rastreio" | "settings";
+export type Screen =
+  | "home"
+  | "rfid"
+  | "nf"
+  | "rastreio"
+  | "separacao"
+  | "separacao-mistos"
+  | "settings";
 
 type Props = {
   email: string;
@@ -23,7 +31,24 @@ type Props = {
 export function HomeMenu({ email, stationShortId, onEnter }: Props) {
   const [theme, setThemeLocal] = useState<Theme>(getStoredTheme());
   const [isFullscreen, setIsFullscreen] = useState(false);
+  // Gating da Separação: mostra o card a menos que o backend negue explicitamente
+  // a permissão. Falha de rede (API fora) NÃO esconde — segue mostrando (dev).
+  const [separacaoAllowed, setSeparacaoAllowed] = useState(true);
   const devices = getDeviceConfig();
+
+  useEffect(() => {
+    let alive = true;
+    getMe()
+      .then((me) => {
+        if (alive) setSeparacaoAllowed(canOperateSeparacao(me));
+      })
+      .catch(() => {
+        /* API indisponível: mantém visível pra não travar o operador */
+      });
+    return () => {
+      alive = false;
+    };
+  }, []);
 
   useEffect(() => {
     (async () => {
@@ -131,6 +156,30 @@ export function HomeMenu({ email, stationShortId, onEnter }: Props) {
             onClick={() => onEnter("rfid")}
             status="ready"
           />
+          {separacaoAllowed && (
+            <ModuleCard
+              label="Separação"
+              tagline="Separar pedidos"
+              description="Escolhe o tamanho, puxa o próximo pedido da fila e confere as peças pelo leitor RFID"
+              icon={<IconBox />}
+              iconBg="var(--info-bg)"
+              iconColor="var(--info-text)"
+              onClick={() => onEnter("separacao")}
+              status="preview"
+            />
+          )}
+          {separacaoAllowed && (
+            <ModuleCard
+              label="Mistos"
+              tagline="Pedidos de grade mista"
+              description="Fila separada pros pedidos com tamanhos misturados, com atribuição estável"
+              icon={<IconLayers />}
+              iconBg="var(--warning-bg)"
+              iconColor="var(--warning-text)"
+              onClick={() => onEnter("separacao-mistos")}
+              status="preview"
+            />
+          )}
           <ModuleCard
             label="Expedição"
             tagline="Despachar pedidos"
@@ -342,6 +391,26 @@ function IconSearch(props: SVGProps<SVGSVGElement>) {
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" {...props}>
       <circle cx="11" cy="11" r="7" />
       <line x1="21" y1="21" x2="16.65" y2="16.65" />
+    </svg>
+  );
+}
+
+function IconBox(props: SVGProps<SVGSVGElement>) {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" {...props}>
+      <path d="M21 8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z" />
+      <polyline points="3.27 6.96 12 12.01 20.73 6.96" />
+      <line x1="12" y1="22.08" x2="12" y2="12" />
+    </svg>
+  );
+}
+
+function IconLayers(props: SVGProps<SVGSVGElement>) {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" {...props}>
+      <polygon points="12 2 2 7 12 12 22 7 12 2" />
+      <polyline points="2 17 12 22 22 17" />
+      <polyline points="2 12 12 17 22 12" />
     </svg>
   );
 }

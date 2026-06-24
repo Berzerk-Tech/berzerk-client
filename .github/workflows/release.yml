@@ -75,6 +75,11 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ""
           VITE_SUPABASE_URL: ${{ secrets.VITE_SUPABASE_URL }}
           VITE_SUPABASE_PUBLISHABLE_KEY: ${{ secrets.VITE_SUPABASE_PUBLISHABLE_KEY }}
+          # Separação (nexus): base da API + client Cognito do pool ops. Sem
+          # esses secrets o módulo cai no default localhost e não conecta.
+          VITE_SEPARACAO_API_URL: ${{ secrets.VITE_SEPARACAO_API_URL }}
+          VITE_COGNITO_OPS_CLIENT_ID: ${{ secrets.VITE_COGNITO_OPS_CLIENT_ID }}
+          VITE_COGNITO_REGION: ${{ secrets.VITE_COGNITO_REGION }}
         with:
           tagName: ${{ github.ref_name }}
           releaseName: "Berzerk RFID v__VERSION__"
