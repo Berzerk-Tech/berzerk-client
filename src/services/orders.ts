@@ -23,6 +23,8 @@ export type OrderItem = {
   nome: string | null;
   tamanho: string | null;
   quantidade: number;
+  /** URL da imagem do produto (catálogo do nexus, via Shopify). null = sem match. */
+  imagemUrl: string | null;
 };
 
 export type Order = {
@@ -58,6 +60,15 @@ export type Me = {
   email: string | null;
   permissions: string[];
 };
+
+export type QueueCounts = {
+  sizes: Record<string, number>;
+  mixed: number;
+};
+
+export function getQueueCounts(): Promise<QueueCounts> {
+  return apiRequest<QueueCounts>("/separacao/queues");
+}
 
 export function getMe(): Promise<Me> {
   return apiRequest<Me>("/separacao/me");

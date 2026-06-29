@@ -26,6 +26,23 @@ export async function listSerialPorts(): Promise<SerialPortInfo[]> {
   return invoke<SerialPortInfo[]>("list_serial_ports");
 }
 
+export type SniffResult = {
+  port: string;
+  baud: number;
+  byte_count: number;
+  hex: string;
+  text: string;
+  lines: string[];
+};
+
+/** Abre a porta serial no baud dado e captura `ms` ms de bytes crus da mesa. */
+export async function serialSniff(port: string, baud: number, ms: number): Promise<SniffResult> {
+  return invoke<SniffResult>("serial_sniff", { port, baud, ms });
+}
+
+/** Bauds comuns em leitores RFID UHF seriais. */
+export const COMMON_BAUDS = [9600, 19200, 38400, 57600, 115200, 230400, 460800, 921600];
+
 /**
  * Constrói um label legível pro device baseado nos campos disponíveis.
  * "Elgin L42DT (COM3)" — manufacturer + product preenchidos

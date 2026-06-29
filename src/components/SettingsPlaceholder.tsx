@@ -14,6 +14,7 @@ import {
 } from "../lib/devices";
 import { pingItag, type ConnectionStatus } from "../lib/rfid";
 import { listSerialPorts, describePort, type SerialPortInfo } from "../lib/usb";
+import { SerialSniffer } from "./SerialSniffer";
 import {
   getIprintConfig,
   setIprintConfig,
@@ -366,39 +367,32 @@ function ReaderCard({
         </div>
       </Field>
 
-      {draft.mode === "via-proxy" && (
-        <Field label="Endereço do proxy HTTPS" hint="rfid-proxy rodando no PC (legado)">
-          <input
-            style={input}
-            className="berzerk-input"
-            value={draft.proxyHost}
-            onChange={(e) => setDraft({ ...draft, proxyHost: e.target.value })}
-          />
+      {draft.mode === "direct-usb" && <SerialSniffer />}
+
+      {draft.mode === "direct-itag" && (
+        <Field
+          label="Endereço do iTAG Monitor"
+          hint="App fala HTTP direto — sem proxy"
+        >
+          <div style={inputWithButton}>
+            <input
+              style={{ ...input, flex: 1 }}
+              className="berzerk-input"
+              value={draft.itagHost}
+              onChange={(e) => setDraft({ ...draft, itagHost: e.target.value })}
+            />
+            <button
+              type="button"
+              style={btnGhost}
+              className="berzerk-btn-ghost"
+              onClick={handleTest}
+              disabled={testing}
+            >
+              {testing ? "Testando…" : "Testar conexão"}
+            </button>
+          </div>
         </Field>
       )}
-
-      <Field
-        label="Endereço do iTAG Monitor"
-        hint="App fala HTTP direto — sem proxy"
-      >
-        <div style={inputWithButton}>
-          <input
-            style={{ ...input, flex: 1 }}
-            className="berzerk-input"
-            value={draft.itagHost}
-            onChange={(e) => setDraft({ ...draft, itagHost: e.target.value })}
-          />
-          <button
-            type="button"
-            style={btnGhost}
-            className="berzerk-btn-ghost"
-            onClick={handleTest}
-            disabled={testing}
-          >
-            {testing ? "Testando…" : "Testar conexão"}
-          </button>
-        </div>
-      </Field>
 
       {testResult && (
         <div

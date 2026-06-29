@@ -10,7 +10,6 @@ import { HomeMenu, type Screen } from "./components/HomeMenu";
 import { NotaFiscalPlaceholder } from "./components/NotaFiscalPlaceholder";
 import { PieceTrace } from "./components/PieceTrace";
 import { Separacao } from "./components/Separacao";
-import { SeparacaoMistos } from "./components/SeparacaoMistos";
 import { RequireOpsAuth } from "./components/RequireOpsAuth";
 import { SettingsPlaceholder } from "./components/SettingsPlaceholder";
 import { UpdateBanner } from "./components/UpdateBanner";
@@ -89,12 +88,6 @@ export default function App() {
       content = withBanner(
         <RequireOpsAuth onBack={back}>
           <Separacao onBack={back} />
-        </RequireOpsAuth>,
-      );
-    else if (screen === "separacao-mistos")
-      content = withBanner(
-        <RequireOpsAuth onBack={back}>
-          <SeparacaoMistos onBack={back} />
         </RequireOpsAuth>,
       );
     else if (screen === "settings") content = withBanner(<SettingsPlaceholder onBack={back} />);

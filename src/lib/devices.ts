@@ -35,9 +35,11 @@ const STORAGE_KEY = "berzerk_devices_v1";
 const DEFAULT_CONFIG: DeviceConfig = {
   printer: null,
   reader: {
-    name: "Leitor RFID local",
+    name: "Mesa RFID",
     itagHost: "http://localhost:9093",
-    mode: "via-proxy",
+    // Proxy aposentado. Default fala direto com o iTAG Monitor (HTTP local);
+    // "direct-usb" é o alvo (serial USB sem middleware) — ver protocolo.
+    mode: "direct-itag",
     proxyHost: "https://127.0.0.1:3443",
   },
 };
@@ -88,8 +90,9 @@ function parsePrinter(p: unknown): ThermalPrinter | null {
 function parseReader(r: unknown): RfidReader {
   if (!r || typeof r !== "object") return DEFAULT_CONFIG.reader;
   const obj = r as Partial<RfidReader>;
+  // Proxy aposentado: qualquer config legada cai pro iTAG Monitor direto.
   const mode: RfidReader["mode"] =
-    obj.mode === "direct-itag" || obj.mode === "direct-usb" ? obj.mode : "via-proxy";
+    obj.mode === "direct-usb" ? "direct-usb" : "direct-itag";
   return {
     name: obj.name || DEFAULT_CONFIG.reader.name,
     itagHost: obj.itagHost || DEFAULT_CONFIG.reader.itagHost,
@@ -112,21 +115,15 @@ export const READER_MODES: Array<{
   available: boolean;
 }> = [
   {
-    value: "via-proxy",
-    label: "Via proxy HTTPS (atual)",
-    description: "rfid-proxy.exe rodando na máquina como sidecar HTTPS",
+    value: "direct-usb",
+    label: "Direto via USB",
+    description: "App fala serial USB direto com a mesa — sem iTAG Monitor",
     available: true,
   },
   {
     value: "direct-itag",
-    label: "Direto pro iTAG Monitor",
-    description: "Tauri chama localhost:9093 sem proxy (próxima versão)",
-    available: false,
-  },
-  {
-    value: "direct-usb",
-    label: "Direto via USB",
-    description: "Sem iTAG Monitor — driver embarcado (fase futura)",
-    available: false,
+    label: "Via iTAG Monitor (HTTP)",
+    description: "App chama localhost:9093 — o iTAG Monitor fala USB com a mesa",
+    available: true,
   },
 ];

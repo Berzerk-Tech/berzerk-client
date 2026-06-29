@@ -36,3 +36,6 @@ src-tauri/gen/schemas/
 .dev-pid.txt
 .dev-out.log
 .dev-err.log
+
+# Docs de integração (referência, não versionar)
+*.pdf

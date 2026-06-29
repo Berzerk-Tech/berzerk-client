@@ -1,50 +1,69 @@
-import { useCallback, useState, type CSSProperties } from "react";
+import { useCallback, useEffect, useState, type CSSProperties } from "react";
 import { BackButton } from "./BackButton";
 import { AmbientBackground } from "./AmbientBackground";
 import { SeparacaoRunner } from "./SeparacaoRunner";
-import { claimNext } from "../services/orders";
+import { useRfid } from "../contexts/RfidContext";
+import { claimNext, claimNextMixed, getQueueCounts, type QueueCounts } from "../services/orders";
 
 type Props = { onBack: () => void };
 
 /** Tamanhos atendidos pela fila normal. */
 const SIZES = ["PP", "P", "M", "G", "GG", "XG", "XXG"];
+const MISTOS = "mistos";
+
+/** Fila escolhida: um tamanho OU mistos (uma fila por vez). */
+type Selected = string | null;
 
 export function Separacao({ onBack }: Props) {
-  const [selected, setSelected] = useState<Set<string>>(new Set());
-  const [confirmedSizes, setConfirmedSizes] = useState<string[] | null>(null);
+  const rfid = useRfid();
+  const [selected, setSelected] = useState<Selected>(null);
+  const [confirmed, setConfirmed] = useState<Selected>(null);
+  const [counts, setCounts] = useState<QueueCounts | null>(null);
 
-  // Estável: o runner usa isso em efeitos; função nova a cada render causaria
-  // re-claim em loop.
+  // Contagem das filas, atualizada periodicamente.
+  useEffect(() => {
+    let alive = true;
+    const load = () => {
+      getQueueCounts()
+        .then((c) => {
+          if (alive) setCounts(c);
+        })
+        .catch(() => {
+          /* API fora: mostra sem contador */
+        });
+    };
+    load();
+    const id = setInterval(load, 5000);
+    return () => {
+      alive = false;
+      clearInterval(id);
+    };
+  }, []);
+
   const claim = useCallback(
-    () => claimNext(confirmedSizes ?? []),
-    [confirmedSizes],
+    () => (confirmed === MISTOS ? claimNextMixed() : claimNext([confirmed ?? ""])),
+    [confirmed],
   );
 
-  if (confirmedSizes) {
+  if (confirmed) {
+    const isMixed = confirmed === MISTOS;
     return (
       <SeparacaoRunner
-        title="Separação"
-        kicker={`Fila ${confirmedSizes.join(" · ")}`}
-        emptyHint="Nenhum pedido pronto pros tamanhos selecionados. Tente outro tamanho ou aguarde a sincronização."
+        title={isMixed ? "Separação — Mistos" : "Separação"}
+        kicker={isMixed ? "Fila de mistos" : `Fila ${confirmed}`}
+        emptyHint={
+          isMixed
+            ? "Nenhum pedido misto pronto no momento."
+            : "Nenhum pedido pronto nessa fila. Tente outra ou aguarde a sincronização."
+        }
         claim={claim}
-        onBack={() => setConfirmedSizes(null)}
+        onBack={() => setConfirmed(null)}
       />
     );
   }
 
-  const toggle = (s: string) => {
-    setSelected((prev) => {
-      const next = new Set(prev);
-      if (next.has(s)) next.delete(s);
-      else next.add(s);
-      return next;
-    });
-  };
-
-  const start = () => {
-    if (selected.size === 0) return;
-    setConfirmedSizes(SIZES.filter((s) => selected.has(s)));
-  };
+  const countFor = (q: string): number =>
+    q === MISTOS ? counts?.mixed ?? 0 : counts?.sizes?.[q] ?? 0;
 
   return (
     <div style={page}>
@@ -53,32 +72,88 @@ export function Separacao({ onBack }: Props) {
         <BackButton onClick={onBack} />
         <div style={titleWrap}>
           <span style={kicker}>― Separação ―</span>
-          <h1 style={title}>Escolha os tamanhos</h1>
+          <h1 style={title}>Escolha a fila</h1>
         </div>
+        <button style={mesaChip} onClick={() => void rfid.reconnect()} title={rfid.host}>
+          <span
+            style={{
+              ...mesaDot,
+              background: rfid.connected ? "var(--success-dot)" : "var(--danger-text)",
+            }}
+          />
+          <span style={mesaText}>{rfid.connected ? "Mesa conectada" : "Mesa offline"}</span>
+        </button>
       </header>
+
+      {!rfid.connected && (
+        <div style={mesaDownBanner}>
+          Mesa RFID desconectada ({rfid.host}). Configure/ligue a mesa antes de começar.{" "}
+          <button style={inlineReconnect} onClick={() => void rfid.reconnect()}>
+            tentar agora
+          </button>
+        </div>
+      )}
 
       <main style={main}>
         <p style={lead}>
-          Selecione o(s) tamanho(s) que você vai separar. Você puxa os pedidos da
-          fila desses tamanhos — nada fica pré-atribuído.
+          Você entra em <strong>uma fila por vez</strong>. Escolha um tamanho ou a
+          fila de mistos — o número é quantos pedidos estão prontos agora.
         </p>
 
         <div style={grid}>
-          {SIZES.map((s) => {
-            const on = selected.has(s);
-            return (
-              <button key={s} onClick={() => toggle(s)} style={on ? chipOn : chip}>
-                {s}
-              </button>
-            );
-          })}
+          {SIZES.map((s) => (
+            <QueueTile
+              key={s}
+              label={s}
+              count={countFor(s)}
+              selected={selected === s}
+              onClick={() => setSelected((p) => (p === s ? null : s))}
+            />
+          ))}
+          <QueueTile
+            label="Mistos"
+            count={countFor(MISTOS)}
+            selected={selected === MISTOS}
+            onClick={() => setSelected((p) => (p === MISTOS ? null : MISTOS))}
+          />
         </div>
 
-        <button onClick={start} disabled={selected.size === 0} style={selected.size === 0 ? startBtnDisabled : startBtn}>
+        <button
+          onClick={() => selected && setConfirmed(selected)}
+          disabled={!selected}
+          style={!selected ? startBtnDisabled : startBtn}
+        >
           Começar a separar
         </button>
       </main>
     </div>
+  );
+}
+
+function QueueTile({
+  label,
+  count,
+  selected,
+  onClick,
+  wide,
+}: {
+  label: string;
+  count: number;
+  selected: boolean;
+  onClick: () => void;
+  wide?: boolean;
+}) {
+  return (
+    <button
+      onClick={onClick}
+      style={{
+        ...(selected ? tileOn : tile),
+        ...(wide ? { gridColumn: "span 2" } : null),
+      }}
+    >
+      <span style={tileLabel}>{label}</span>
+      <span style={count > 0 ? countBadge : countBadgeZero}>{count}</span>
+    </button>
   );
 }
 
@@ -101,7 +176,41 @@ const topBar: CSSProperties = {
   borderBottom: "1px solid var(--border)",
 };
 
-const titleWrap: CSSProperties = { display: "flex", flexDirection: "column", gap: 2 };
+const titleWrap: CSSProperties = { display: "flex", flexDirection: "column", gap: 2, flex: 1 };
+
+const mesaChip: CSSProperties = {
+  display: "inline-flex",
+  alignItems: "center",
+  gap: 8,
+  padding: "7px 12px",
+  background: "var(--bg-card)",
+  border: "1px solid var(--border)",
+  borderRadius: 999,
+  cursor: "pointer",
+  color: "var(--text-secondary)",
+};
+
+const mesaDot: CSSProperties = { width: 8, height: 8, borderRadius: "50%" };
+
+const mesaText: CSSProperties = { fontSize: 12, fontWeight: 600 };
+
+const mesaDownBanner: CSSProperties = {
+  padding: "10px 32px",
+  background: "var(--danger-bg, var(--warning-bg))",
+  color: "var(--danger-text, var(--warning-text))",
+  fontSize: 13,
+  textAlign: "center",
+};
+
+const inlineReconnect: CSSProperties = {
+  background: "transparent",
+  border: 0,
+  color: "inherit",
+  textDecoration: "underline",
+  cursor: "pointer",
+  fontSize: 13,
+  fontWeight: 700,
+};
 
 const kicker: CSSProperties = {
   fontSize: 10,
@@ -126,7 +235,7 @@ const main: CSSProperties = {
   flexDirection: "column",
   gap: 28,
   padding: "40px 32px",
-  maxWidth: 720,
+  maxWidth: 1100,
   width: "100%",
   margin: "0 auto",
   boxSizing: "border-box",
@@ -142,16 +251,19 @@ const lead: CSSProperties = {
 
 const grid: CSSProperties = {
   display: "grid",
-  gridTemplateColumns: "repeat(auto-fit, minmax(90px, 1fr))",
-  gap: 12,
+  gridTemplateColumns: "repeat(8, minmax(0, 1fr))",
+  gap: 10,
   width: "100%",
 };
 
-const chip: CSSProperties = {
-  padding: "20px 0",
-  fontFamily: "var(--font-mono)",
-  fontSize: 22,
-  fontWeight: 700,
+const tile: CSSProperties = {
+  position: "relative",
+  display: "flex",
+  flexDirection: "column",
+  alignItems: "center",
+  justifyContent: "center",
+  gap: 8,
+  padding: "22px 0",
   background: "var(--bg-card)",
   border: "1px solid var(--border)",
   borderRadius: 12,
@@ -159,11 +271,34 @@ const chip: CSSProperties = {
   cursor: "pointer",
 };
 
-const chipOn: CSSProperties = {
-  ...chip,
+const tileOn: CSSProperties = {
+  ...tile,
   background: "var(--info-bg)",
   color: "var(--info-text)",
   border: "1px solid var(--info-border)",
+};
+
+const tileLabel: CSSProperties = {
+  fontFamily: "var(--font-mono)",
+  fontSize: 22,
+  fontWeight: 700,
+};
+
+const countBadge: CSSProperties = {
+  fontSize: 12,
+  fontWeight: 700,
+  padding: "2px 10px",
+  borderRadius: 999,
+  background: "var(--success-bg)",
+  color: "var(--success-text)",
+  border: "1px solid var(--success-border)",
+};
+
+const countBadgeZero: CSSProperties = {
+  ...countBadge,
+  background: "var(--bg-elevated)",
+  color: "var(--text-muted)",
+  border: "1px solid var(--border)",
 };
 
 const startBtn: CSSProperties = {

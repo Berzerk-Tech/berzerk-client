@@ -215,6 +215,23 @@ export function BatchBrowser({
     load(false);
   }, [load]);
 
+  // Mantém a lista em sintonia com o industrial: lote entra/sai da etapa "Env.
+  // Recebimento" lá e tem que refletir aqui sem clicar Atualizar. O Realtime do
+  // Supabase não está habilitado pra silk_records, então poll silencioso (sem
+  // limpar caches → barato) + refetch ao focar a janela.
+  useEffect(() => {
+    const POLL_MS = 30_000;
+    const refetch = () => {
+      if (document.visibilityState === "visible") void load(false);
+    };
+    const id = setInterval(refetch, POLL_MS);
+    document.addEventListener("visibilitychange", refetch);
+    return () => {
+      clearInterval(id);
+      document.removeEventListener("visibilitychange", refetch);
+    };
+  }, [load]);
+
   // Fila de impressão: fetch + Realtime sub em rfid_print_jobs
   useEffect(() => {
     let alive = true;
@@ -643,7 +660,7 @@ export function BatchBrowser({
           <BackButton onClick={onBack} />
         </div>
         <div style={subHeaderCenter}>
-          <h2 style={subHeaderTitle}>Produção</h2>
+          <h2 style={subHeaderTitle}>Impressão</h2>
           <div style={searchWrap}>
             <svg
               viewBox="0 0 24 24"

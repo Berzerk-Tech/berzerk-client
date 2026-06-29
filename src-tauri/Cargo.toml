@@ -1,6 +1,6 @@
 [package]
 name = "berzerk-rfid"
-version = "0.2.0"
+version = "0.2.1"
 description = "Berzerk RFID — estação industrial de etiquetagem e expedição"
 authors = ["Berzerk Tech"]
 edition = "2021"

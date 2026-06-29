@@ -25,22 +25,10 @@ export type ProductionBatch = {
   total_pieces: number;
   created_at: string;
   thumbnail_url: string | null;
-  /** Status de recebimento do lote (o mais avançado entre as linhas de
-   *  silk_records). Rótulo amigável via RECEIPT_STATUS_LABEL. */
+  /** Status de recebimento do lote. Hoje sempre `enviado_recebimento` (a
+   *  Produção só lista essa etapa). Rótulo amigável via RECEIPT_STATUS_LABEL. */
   receiptStatus: string;
 };
-
-/** Prioridade do ciclo de recebimento (maior = mais avançado). Desconhecido = 0. */
-const RECEIPT_STATUS_PRIORITY: Record<string, number> = {
-  aguardando_retirada: 1,
-  enviado_recebimento: 2,
-  aguardando_autorizacao: 3,
-  recebimento_confirmado: 4,
-};
-
-function receiptPriority(status: string | null | undefined): number {
-  return (status && RECEIPT_STATUS_PRIORITY[status]) || 0;
-}
 
 /** Rótulos amigáveis dos status de recebimento (UI). */
 export const RECEIPT_STATUS_LABEL: Record<string, string> = {
@@ -82,30 +70,24 @@ export type PrintedBatchEntry = {
 /**
  * Lista lotes prontos pra aparecer na Produção (não impressos ainda).
  *
- * Aparecem (todos imprimíveis): (a) lotes `recebimento_confirmado`, ou (b)
- * lotes em estágio inicial de recebimento (`aguardando_retirada`/
- * `enviado_recebimento`/`aguardando_autorizacao`) que já tenham volumes
- * contados na coleta (Σ `volumes_count` > 0) — i.e. já foram agrupados. A
- * impressão é liberada assim que o lote é agrupado (sem esperar a confirmação
- * do recebimento). Antes da confirmação a grade é a PLANEJADA do corte.
+ * Aparecem exatamente os lotes na etapa **"Env. Recebimento"** do industrial
+ * (`silk_records.status = 'enviado_recebimento'`) — o estágio em que a etiqueta
+ * RFID deve ser impressa. Lotes já `recebimento_confirmado` (recebidos no
+ * galpão, etapa posterior) e `aguardando_retirada`/`aguardando_autorizacao`
+ * (anteriores) NÃO aparecem. A grade exibida é a PLANEJADA do corte.
  *
  * Fonte da verdade do total/grade: `production_batches.grade`. silk_records dão
- * o status, os volumes e a metadata (batch_code, shirt_color, product_name).
+ * o status e a metadata (batch_code, shirt_color, product_name).
  * Thumbnails vêm de `design_templates.images.frente[0]`.
  */
 export async function fetchPendingBatches(): Promise<ProductionBatch[]> {
-  // 1. silk_records → metadata + status/volumes + descoberta de batch_ids
+  // 1. silk_records → metadata + descoberta de batch_ids da etapa Env. Recebimento
   const { data: silks, error: silksErr } = await supabase
     .from("silk_records")
     .select(
-      "batch_id, batch_code, shirt_color, product_name, design_name, created_at, status, volumes_count",
+      "batch_id, batch_code, shirt_color, product_name, design_name, created_at, status",
     )
-    .in("status", [
-      "recebimento_confirmado",
-      "aguardando_retirada",
-      "enviado_recebimento",
-      "aguardando_autorizacao",
-    ])
+    .eq("status", "enviado_recebimento")
     .order("created_at", { ascending: false })
     .limit(3000);
   if (silksErr) throw silksErr;
@@ -120,16 +102,10 @@ export async function fetchPendingBatches(): Promise<ProductionBatch[]> {
     // null, então NÃO dá pra confiar nele. Ver fallback no passo 3.
     design_name: string | null;
     created_at: string;
-    // status mais avançado entre as linhas do lote (silks de um lote andam
-    // juntos, mas durante transições podem divergir — pegamos o max).
-    statusPriority: number;
-    receiptStatus: string;
-    volumesSum: number;
   };
   const metaByBatch = new Map<string, Meta>();
   for (const s of silks) {
     if (!s.batch_id) continue;
-    const vol = s.volumes_count ?? 0;
     const existing = metaByBatch.get(s.batch_id);
     if (!existing) {
       metaByBatch.set(s.batch_id, {
@@ -138,9 +114,6 @@ export async function fetchPendingBatches(): Promise<ProductionBatch[]> {
         product_name: s.product_name,
         design_name: s.design_name,
         created_at: s.created_at,
-        statusPriority: receiptPriority(s.status),
-        receiptStatus: s.status ?? "",
-        volumesSum: vol,
       });
     } else {
       if (!existing.batch_code && s.batch_code) existing.batch_code = s.batch_code;
@@ -150,12 +123,6 @@ export async function fetchPendingBatches(): Promise<ProductionBatch[]> {
         existing.product_name = s.product_name;
       if (!existing.design_name && s.design_name)
         existing.design_name = s.design_name;
-      existing.volumesSum += vol;
-      const p = receiptPriority(s.status);
-      if (p > existing.statusPriority) {
-        existing.statusPriority = p;
-        existing.receiptStatus = s.status ?? existing.receiptStatus;
-      }
     }
   }
 
@@ -200,10 +167,6 @@ export async function fetchPendingBatches(): Promise<ProductionBatch[]> {
   for (const pb of printable) {
     const meta = metaByBatch.get(pb.id);
     if (!meta) continue;
-    const isConfirmed = meta.statusPriority === 4; // recebimento_confirmado
-    // Só aparece quando agrupado: confirmados sempre; estágio inicial só com
-    // volumes contados na coleta (Σ volumes > 0). Ambos são imprimíveis.
-    if (!isConfirmed && meta.volumesSum <= 0) continue;
     const sizes = parseGrade(pb.grade);
     const total_pieces = sizes.reduce((sum, s) => sum + s.quantity, 0);
     if (sizes.length === 0 || total_pieces === 0) continue;
@@ -226,7 +189,7 @@ export async function fetchPendingBatches(): Promise<ProductionBatch[]> {
       total_pieces,
       created_at: meta.created_at,
       thumbnail_url: thumbnail,
-      receiptStatus: meta.receiptStatus,
+      receiptStatus: "enviado_recebimento",
     });
   }
 

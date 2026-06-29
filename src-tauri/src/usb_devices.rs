@@ -36,11 +36,23 @@ pub enum SerialKind {
     Unknown,
 }
 
+/// `/dev/ttyS0`, `/dev/ttyS1`… são as UARTs legadas da placa-mãe (8250/16550),
+/// não USB — a máquina expõe dezenas delas sempre. Não são impressora/leitor,
+/// então não entram na lista. O dispositivo USB real é `ttyUSB*`/`ttyACM*` (ou
+/// COM no Windows).
+fn is_legacy_serial(name: &str) -> bool {
+    match name.strip_prefix("/dev/ttyS") {
+        Some(rest) => !rest.is_empty() && rest.chars().all(|c| c.is_ascii_digit()),
+        None => false,
+    }
+}
+
 #[tauri::command]
 pub fn list_serial_ports() -> Result<Vec<SerialPortInfo>, String> {
     let ports = serialport::available_ports().map_err(|e| e.to_string())?;
     let mapped: Vec<SerialPortInfo> = ports
         .into_iter()
+        .filter(|p| !is_legacy_serial(&p.port_name))
         .map(|p| {
             use serialport::SerialPortType;
             match p.port_type {

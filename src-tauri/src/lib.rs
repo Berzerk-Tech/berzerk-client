@@ -1,6 +1,7 @@
 mod itag_client;
 mod itag_iprint;
 mod oauth_loopback;
+mod rfid_usb;
 mod usb_devices;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -20,6 +21,7 @@ pub fn run() {
             itag_iprint::itag_iprint_query_inventory,
             itag_iprint::itag_iprint_movimentar,
             usb_devices::list_serial_ports,
+            rfid_usb::serial_sniff,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

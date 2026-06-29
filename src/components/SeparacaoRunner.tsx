@@ -282,6 +282,11 @@ function OrderView({
           return (
             <div key={it.id} style={ok ? itemRowDone : itemRow}>
               <span style={checkDot(ok)}>{ok ? "✓" : ""}</span>
+              {it.imagemUrl ? (
+                <img src={it.imagemUrl} alt="" style={itemThumb} loading="lazy" />
+              ) : (
+                <span style={itemThumbEmpty} />
+              )}
               <div style={itemBody}>
                 <span style={itemName}>{it.nome ?? it.sku ?? it.ean ?? "Item"}</span>
                 <span style={itemSub}>
@@ -513,6 +518,24 @@ const checkDot = (ok: boolean): CSSProperties => ({
   border: `2px solid ${ok ? "var(--success-text)" : "var(--border-strong)"}`,
   flexShrink: 0,
 });
+
+const itemThumb: CSSProperties = {
+  width: 44,
+  height: 44,
+  borderRadius: 8,
+  objectFit: "cover",
+  background: "var(--bg-card)",
+  border: "1px solid var(--border)",
+  flexShrink: 0,
+};
+
+const itemThumbEmpty: CSSProperties = {
+  width: 44,
+  height: 44,
+  borderRadius: 8,
+  background: "var(--border)",
+  flexShrink: 0,
+};
 
 const itemBody: CSSProperties = { display: "flex", flexDirection: "column", gap: 2, flex: 1, minWidth: 0 };
 

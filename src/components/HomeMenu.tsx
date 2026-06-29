@@ -19,7 +19,6 @@ export type Screen =
   | "nf"
   | "rastreio"
   | "separacao"
-  | "separacao-mistos"
   | "settings";
 
 type Props = {
@@ -147,39 +146,25 @@ export function HomeMenu({ email, stationShortId, onEnter }: Props) {
 
         <div style={cardsGrid}>
           <ModuleCard
-            label="Produção"
+            label="Impressão"
             tagline="Gerar tags RFID"
             description="Pra cada lote em produção, lê os EANs e imprime as etiquetas identificadoras (RFID)"
-            icon={<IconTag />}
+            icon={<IconPrinter />}
             iconBg="var(--info-bg)"
             iconColor="var(--info-text)"
             onClick={() => onEnter("rfid")}
             status="ready"
           />
-          {separacaoAllowed && (
-            <ModuleCard
-              label="Separação"
-              tagline="Separar pedidos"
-              description="Escolhe o tamanho, puxa o próximo pedido da fila e confere as peças pelo leitor RFID"
-              icon={<IconBox />}
-              iconBg="var(--info-bg)"
-              iconColor="var(--info-text)"
-              onClick={() => onEnter("separacao")}
-              status="preview"
-            />
-          )}
-          {separacaoAllowed && (
-            <ModuleCard
-              label="Mistos"
-              tagline="Pedidos de grade mista"
-              description="Fila separada pros pedidos com tamanhos misturados, com atribuição estável"
-              icon={<IconLayers />}
-              iconBg="var(--warning-bg)"
-              iconColor="var(--warning-text)"
-              onClick={() => onEnter("separacao-mistos")}
-              status="preview"
-            />
-          )}
+          <ModuleCard
+            label="Separação"
+            tagline="Separar pedidos"
+            description="Escolhe a fila (tamanho ou mistos), puxa o próximo pedido e confere as peças pelo leitor RFID"
+            icon={<IconBox />}
+            iconBg="var(--info-bg)"
+            iconColor="var(--info-text)"
+            onClick={() => onEnter("separacao")}
+            status={separacaoAllowed ? "preview" : "offline"}
+          />
           <ModuleCard
             label="Expedição"
             tagline="Despachar pedidos"
@@ -189,16 +174,6 @@ export function HomeMenu({ email, stationShortId, onEnter }: Props) {
             iconColor="var(--warning-text)"
             onClick={() => onEnter("nf")}
             status="preview"
-          />
-          <ModuleCard
-            label="Rastreio"
-            tagline="Consultar peça"
-            description="Lê a etiqueta RFID (ou informa o EPC) e mostra de qual lote a peça saiu"
-            icon={<IconSearch />}
-            iconBg="var(--success-bg)"
-            iconColor="var(--success-text)"
-            onClick={() => onEnter("rastreio")}
-            status="ready"
           />
         </div>
       </main>
@@ -377,20 +352,12 @@ if (typeof document !== "undefined" && !document.getElementById("berzerk-home-ke
 // ============================================================
 // Icons
 // ============================================================
-function IconTag(props: SVGProps<SVGSVGElement>) {
+function IconPrinter(props: SVGProps<SVGSVGElement>) {
   return (
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" {...props}>
-      <path d="M20.59 13.41 13.42 20.58a2 2 0 0 1-2.83 0L2 12V2h10z" />
-      <line x1="7" y1="7" x2="7.01" y2="7" />
-    </svg>
-  );
-}
-
-function IconSearch(props: SVGProps<SVGSVGElement>) {
-  return (
-    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" {...props}>
-      <circle cx="11" cy="11" r="7" />
-      <line x1="21" y1="21" x2="16.65" y2="16.65" />
+      <polyline points="6 9 6 2 18 2 18 9" />
+      <path d="M6 18H4a2 2 0 0 1-2-2v-5a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v5a2 2 0 0 1-2 2h-2" />
+      <rect x="6" y="14" width="12" height="8" />
     </svg>
   );
 }
@@ -401,16 +368,6 @@ function IconBox(props: SVGProps<SVGSVGElement>) {
       <path d="M21 8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z" />
       <polyline points="3.27 6.96 12 12.01 20.73 6.96" />
       <line x1="12" y1="22.08" x2="12" y2="12" />
-    </svg>
-  );
-}
-
-function IconLayers(props: SVGProps<SVGSVGElement>) {
-  return (
-    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" {...props}>
-      <polygon points="12 2 2 7 12 12 22 7 12 2" />
-      <polyline points="2 17 12 22 22 17" />
-      <polyline points="2 12 12 17 22 12" />
     </svg>
   );
 }
@@ -580,7 +537,7 @@ const mainCol: CSSProperties = {
   justifyContent: "center",
   padding: "48px 32px",
   gap: 36,
-  maxWidth: 1120,
+  maxWidth: 1280,
   width: "100%",
   margin: "0 auto",
   boxSizing: "border-box",
@@ -697,7 +654,7 @@ const statusGoSettings: CSSProperties = {
 
 const cardsGrid: CSSProperties = {
   display: "grid",
-  gridTemplateColumns: "repeat(auto-fit, minmax(340px, 1fr))",
+  gridTemplateColumns: "repeat(3, 1fr)",
   gap: 20,
   width: "100%",
 };
