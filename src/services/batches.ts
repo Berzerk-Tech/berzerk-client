@@ -193,28 +193,12 @@ export async function fetchPendingBatches(): Promise<ProductionBatch[]> {
     });
   }
 
-  // 4. Defesa: lote com job REAL `done` não volta pra fila mesmo que
-  // rfid_impresso_at esteja null (impressões de antes do fix que estampa o
-  // timestamp, ou update barrado por RLS). Falha aqui não derruba o load.
-  try {
-    const ids = result.map((b) => b.id);
-    if (ids.length > 0) {
-      const { data: doneJobs } = await supabase
-        .from("rfid_print_jobs")
-        .select("batch_id")
-        .eq("status", "done")
-        .eq("is_test", false)
-        .in("batch_id", ids);
-      const printed = new Set((doneJobs ?? []).map((j) => j.batch_id as string));
-      if (printed.size > 0) {
-        for (let i = result.length - 1; i >= 0; i--) {
-          if (printed.has(result[i].id)) result.splice(i, 1);
-        }
-      }
-    }
-  } catch (e) {
-    console.warn("[batches] filtro de jobs done falhou (seguindo sem):", e);
-  }
+  // NOTA: fonte da verdade de "já impresso" é SÓ rfid_impresso_at (estampado
+  // pelo app após impressão real — ver markBatchRfidPrinted). NÃO filtrar por
+  // "tem job done": job `done` significa que a iTAG GEROU os EPCs, não que as
+  // etiquetas saíram fisicamente (lote 2094: 1676 etiquetas "done" em 13s,
+  // impressão física nunca aconteceu). Filtrar por job esconderia o lote sem
+  // caminho de volta — limpar a estampa é o caminho de reimpressão.
 
   return result.sort(
     (a, b) => +new Date(b.created_at) - +new Date(a.created_at),
@@ -240,6 +224,21 @@ export async function markBatchRfidPrinted(batchId: string): Promise<number> {
     .is("rfid_impresso_at", null);
   if (error) throw error;
   return count ?? 0;
+}
+
+/**
+ * Caminho de REIMPRESSÃO: limpa rfid_impresso_at e o lote volta pra fila da
+ * Produção. Pra quando o job saiu `done` mas a impressão física falhou (a iTAG
+ * gera os EPCs na hora; a impressora pode atolar/cancelar sem o app saber).
+ * Os EPCs do job antigo ficam no inventário — a movimentação já reconcilia com
+ * a iTAG e só move o que ela confirma impresso.
+ */
+export async function unmarkBatchRfidPrinted(batchId: string): Promise<void> {
+  const { error } = await supabase
+    .from("production_batches")
+    .update({ rfid_impresso_at: null })
+    .eq("id", batchId);
+  if (error) throw error;
 }
 
 export async function resolveBatch(

@@ -23,6 +23,7 @@ import {
   fetchPendingBatches,
   fetchTodayHistory,
   markBatchRfidPrinted,
+  unmarkBatchRfidPrinted,
   resolveBatch,
   type ProductionBatch,
   type ResolvedBatch,
@@ -422,10 +423,9 @@ export function BatchBrowser({
           await printJobsService.markDone(jobId, result.count);
           if (isTest) {
             setBatchesWithTest((prev) => new Set(prev).add(batch.id));
-          } else {
+          } else if (result.count > 0) {
             // Estampa rfid_impresso_at — é o que tira o lote da fila e o põe
-            // no Histórico. Falha aqui não é fatal: a defesa no
-            // fetchPendingBatches (filtro por job done) segura a fila.
+            // no Histórico (fonte única; count 0 = nada queimado, não estampa).
             try {
               const stamped = await markBatchRfidPrinted(batch.id);
               if (stamped === 0) {
@@ -462,6 +462,31 @@ export function BatchBrowser({
       }
     },
     [pendingConfirm, stationId, operatorId, operatorEmail, load],
+  );
+
+  // Reimpressão: limpa a estampa e o lote volta pra fila. Pro caso de job
+  // `done` cuja impressão física falhou (iTAG gera EPCs na hora, impressora
+  // pode falhar depois sem feedback).
+  const handleReprint = useCallback(
+    async (entry: PrintedBatchEntry) => {
+      const ok = window.confirm(
+        `Voltar o lote ${entry.batch_code} pra fila de impressão?\n\n` +
+          "Use quando a impressão física falhou. As etiquetas do job antigo " +
+          "continuam no inventário; a movimentação só move o que a iTAG " +
+          "confirmar impresso.",
+      );
+      if (!ok) return;
+      try {
+        await unmarkBatchRfidPrinted(entry.id);
+      } catch (e) {
+        window.alert(
+          `Falha ao voltar ${entry.batch_code} pra fila: ${formatError(e)}`,
+        );
+      } finally {
+        load(false);
+      }
+    },
+    [load],
   );
 
   const q = query.trim().toLowerCase();
@@ -930,6 +955,14 @@ export function BatchBrowser({
                       <span style={historyTime}>
                         {formatTime(h.rfid_impresso_at)}
                       </span>
+                      <button
+                        type="button"
+                        style={historyReprintBtn}
+                        title="Impressão física falhou? Volta o lote pra fila."
+                        onClick={() => handleReprint(h)}
+                      >
+                        ↩ Voltar pra fila
+                      </button>
                     </div>
                   ))}
                 </div>
@@ -1514,6 +1547,17 @@ const historyTime: CSSProperties = {
   color: "var(--text-faint)",
   fontSize: 11,
   fontFamily: "var(--font-mono)",
+};
+
+const historyReprintBtn: CSSProperties = {
+  background: "transparent",
+  border: "1px solid var(--border)",
+  borderRadius: 6,
+  color: "var(--text-muted)",
+  fontSize: 11,
+  padding: "4px 8px",
+  cursor: "pointer",
+  whiteSpace: "nowrap",
 };
 
 const queueList: CSSProperties = {
