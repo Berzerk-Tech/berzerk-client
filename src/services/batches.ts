@@ -193,9 +193,53 @@ export async function fetchPendingBatches(): Promise<ProductionBatch[]> {
     });
   }
 
+  // 4. Defesa: lote com job REAL `done` não volta pra fila mesmo que
+  // rfid_impresso_at esteja null (impressões de antes do fix que estampa o
+  // timestamp, ou update barrado por RLS). Falha aqui não derruba o load.
+  try {
+    const ids = result.map((b) => b.id);
+    if (ids.length > 0) {
+      const { data: doneJobs } = await supabase
+        .from("rfid_print_jobs")
+        .select("batch_id")
+        .eq("status", "done")
+        .eq("is_test", false)
+        .in("batch_id", ids);
+      const printed = new Set((doneJobs ?? []).map((j) => j.batch_id as string));
+      if (printed.size > 0) {
+        for (let i = result.length - 1; i >= 0; i--) {
+          if (printed.has(result[i].id)) result.splice(i, 1);
+        }
+      }
+    }
+  } catch (e) {
+    console.warn("[batches] filtro de jobs done falhou (seguindo sem):", e);
+  }
+
   return result.sort(
     (a, b) => +new Date(b.created_at) - +new Date(a.created_at),
   );
+}
+
+/**
+ * Estampa `production_batches.rfid_impresso_at` após impressão REAL concluída.
+ * É esse timestamp que tira o lote da fila da Produção (fetchPendingBatches
+ * filtra `rfid_impresso_at IS NULL`) e o põe no Histórico — antes ninguém
+ * gravava e o lote impresso continuava listado. Jobs de teste NÃO estampam.
+ * Retorna quantas rows mudaram: 0 = já estampado OU RLS barrou (caller loga;
+ * a defesa em fetchPendingBatches cobre esse caso).
+ */
+export async function markBatchRfidPrinted(batchId: string): Promise<number> {
+  const { error, count } = await supabase
+    .from("production_batches")
+    .update(
+      { rfid_impresso_at: new Date().toISOString() },
+      { count: "exact" },
+    )
+    .eq("id", batchId)
+    .is("rfid_impresso_at", null);
+  if (error) throw error;
+  return count ?? 0;
 }
 
 export async function resolveBatch(

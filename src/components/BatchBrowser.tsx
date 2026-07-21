@@ -22,6 +22,7 @@ import {
   buildPrintItems,
   fetchPendingBatches,
   fetchTodayHistory,
+  markBatchRfidPrinted,
   resolveBatch,
   type ProductionBatch,
   type ResolvedBatch,
@@ -421,6 +422,21 @@ export function BatchBrowser({
           await printJobsService.markDone(jobId, result.count);
           if (isTest) {
             setBatchesWithTest((prev) => new Set(prev).add(batch.id));
+          } else {
+            // Estampa rfid_impresso_at — é o que tira o lote da fila e o põe
+            // no Histórico. Falha aqui não é fatal: a defesa no
+            // fetchPendingBatches (filtro por job done) segura a fila.
+            try {
+              const stamped = await markBatchRfidPrinted(batch.id);
+              if (stamped === 0) {
+                console.warn(
+                  `[BatchBrowser] rfid_impresso_at não estampado pra ${batch.batch_code} ` +
+                    "(já estampado ou RLS sem UPDATE em production_batches).",
+                );
+              }
+            } catch (e) {
+              console.warn("[BatchBrowser] markBatchRfidPrinted falhou:", e);
+            }
           }
         } else {
           const detail = result.stage ? ` (${result.stage})` : "";

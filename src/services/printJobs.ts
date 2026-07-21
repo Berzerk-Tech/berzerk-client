@@ -362,41 +362,62 @@ export async function markMoved(params: {
  * Lista jobs `done` que ainda têm EPCs com moved_at IS NULL. Pra UI mostrar
  * "Aguardando movimentação" — o operador clica e a gente move pro estoque.
  *
- * Implementação simples (não otimizada): busca jobs done recentes, depois pra
- * cada um conta EPCs pendentes. Volume é pequeno (dezenas/dia), aceita-se.
+ * Dirigido pelos EPCs pendentes, SEM janela de tempo. A versão anterior
+ * partia de "jobs done das últimas 48h": lote impresso na sexta sumia da
+ * lista na segunda sem nunca ter sido movimentado, e não havia como mover
+ * depois. Jobs de teste ficam fora — EPC de teste sai pelo "Descartar teste",
+ * não por movimentação.
  */
 export async function fetchJobsAwaitingMovimentacao(): Promise<
   JobAwaitingMovimentacao[]
 > {
-  const since = new Date(Date.now() - 48 * 3600 * 1000).toISOString();
+  // 1. EPCs pendentes → pendingCount por job (fonte da verdade do que falta).
+  const { data: pendRows, error: pendErr } = await supabase
+    .from("rfid_epc_inventory")
+    .select("job_id")
+    .is("moved_at", null)
+    .not("job_id", "is", null)
+    .limit(10000);
+  if (pendErr) throw pendErr;
+  const pendingByJob = new Map<string, number>();
+  for (const r of pendRows ?? []) {
+    const id = r.job_id as string;
+    pendingByJob.set(id, (pendingByJob.get(id) ?? 0) + 1);
+  }
+  if (pendingByJob.size === 0) return [];
+
+  // 2. Desses jobs, quais são done e reais (não-teste), mais recentes primeiro.
   const { data: jobs, error: jobsErr } = await supabase
     .from("rfid_print_jobs")
     .select(ACTIVE_COLUMNS)
     .eq("status", "done")
-    .gte("completed_at", since)
+    .eq("is_test", false)
+    .in("id", Array.from(pendingByJob.keys()))
     .order("completed_at", { ascending: false })
-    .limit(50);
+    .limit(100);
   if (jobsErr) throw jobsErr;
   if (!jobs || jobs.length === 0) return [];
 
-  const out: JobAwaitingMovimentacao[] = [];
-  for (const j of jobs as RfidPrintJob[]) {
-    const { count: total, error: totalErr } = await supabase
-      .from("rfid_epc_inventory")
-      .select("epc", { count: "exact", head: true })
-      .eq("job_id", j.id);
-    if (totalErr) continue;
-    const { count: pending, error: pendErr } = await supabase
-      .from("rfid_epc_inventory")
-      .select("epc", { count: "exact", head: true })
-      .eq("job_id", j.id)
-      .is("moved_at", null);
-    if (pendErr) continue;
-    const pendingCount = pending ?? 0;
-    const totalCount = total ?? 0;
-    if (pendingCount > 0) {
-      out.push({ job: j, pendingCount, totalCount });
-    }
+  // 3. Total de EPCs por job num query só (pendente + já movido).
+  const jobIds = jobs.map((j) => j.id as string);
+  const totalByJob = new Map<string, number>();
+  const { data: allRows, error: totErr } = await supabase
+    .from("rfid_epc_inventory")
+    .select("job_id")
+    .in("job_id", jobIds)
+    .limit(10000);
+  if (totErr) throw totErr;
+  for (const r of allRows ?? []) {
+    const id = r.job_id as string;
+    totalByJob.set(id, (totalByJob.get(id) ?? 0) + 1);
   }
-  return out;
+
+  return (jobs as RfidPrintJob[]).map((j) => {
+    const pendingCount = pendingByJob.get(j.id) ?? 0;
+    return {
+      job: j,
+      pendingCount,
+      totalCount: totalByJob.get(j.id) ?? pendingCount,
+    };
+  });
 }

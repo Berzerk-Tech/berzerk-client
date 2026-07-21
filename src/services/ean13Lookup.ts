@@ -154,14 +154,29 @@ async function loadDesignTemplates(): Promise<void> {
  * Resolve `design_name` do lote → `shopify_product_id`, espelhando o industrial:
  *   1. match exato por nome (case-insensitive) COM vínculo Shopify;
  *   2. fallback tolerante por `normName` — só aceita se houver UM único
- *      shopify_product_id candidato (evita casar estampa errada).
+ *      shopify_product_id candidato (evita casar estampa errada);
+ *   3. fallback por sufixo: lotes de dry tech/poliamida vêm com design_name
+ *      "Cor - Estampa" (ex: "Marrom - Symbol"), mas o template carrega o nome
+ *      COMPLETO do produto ("Poliamida Tech Running - Marrom - Symbol").
+ *      Casa quando o nome do template TERMINA no design do lote (limite de
+ *      palavra), e só se sobrar UM shopify_product_id candidato. NÃO casar
+ *      segmento solto ("Marrom") — existe template "Marrom" de outro produto
+ *      e o lote sairia com EAN errado.
  * Requer `loadDesignTemplates()` antes.
  */
 function resolveShopifyIdForDesign(designName: string): string | null {
   const exact = designTemplateByName.get(designName.toLowerCase());
   if (exact?.shopify_product_id) return exact.shopify_product_id;
-  const set = designShopifyIdByNormName.get(normName(designName));
+  const dn = normName(designName);
+  if (!dn) return null;
+  const set = designShopifyIdByNormName.get(dn);
   if (set && set.size === 1) return [...set][0];
+  const suffix = ` ${dn}`;
+  const candidates = new Set<string>();
+  for (const [tplNorm, sids] of designShopifyIdByNormName) {
+    if (tplNorm.endsWith(suffix)) for (const sid of sids) candidates.add(sid);
+  }
+  if (candidates.size === 1) return [...candidates][0];
   return null;
 }
 
