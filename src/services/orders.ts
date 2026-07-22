@@ -62,8 +62,12 @@ export type Me = {
 };
 
 export type QueueCounts = {
+  /** Pedidos puros (grade normal) por tamanho. */
   sizes: Record<string, number>;
+  /** Total de mistos (soma do mixedBySize). */
   mixed: number;
+  /** Mistos por tamanho predominante — aba "Mistos" de cada fila. */
+  mixedBySize: Record<string, number>;
 };
 
 export function getQueueCounts(): Promise<QueueCounts> {
@@ -78,8 +82,11 @@ export function claimNext(sizes: string[]): Promise<ClaimResponse> {
   return apiRequest<ClaimResponse>("/separacao/claim", { method: "POST", body: { sizes } });
 }
 
-export function claimNextMixed(): Promise<ClaimResponse> {
-  return apiRequest<ClaimResponse>("/separacao/claim-mixed", { method: "POST", body: {} });
+export function claimNextMixed(sizes?: string[]): Promise<ClaimResponse> {
+  return apiRequest<ClaimResponse>("/separacao/claim-mixed", {
+    method: "POST",
+    body: sizes && sizes.length > 0 ? { sizes } : {},
+  });
 }
 
 export function completeSeparacao(orderId: string, rfidTags: string[]): Promise<Order> {

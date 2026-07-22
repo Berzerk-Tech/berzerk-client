@@ -8,17 +8,20 @@ import { claimNext, claimNextMixed, getQueueCounts, type QueueCounts } from "../
 
 type Props = { onBack: () => void };
 
-/** Tamanhos atendidos pela fila normal. */
+/** Tamanhos atendidos pelas filas. */
 const SIZES = ["PP", "P", "M", "G", "GG", "XG", "XXG"];
-const MISTOS = "mistos";
 
-/** Fila escolhida: um tamanho OU mistos (uma fila por vez). */
+/** Cada tamanho tem duas abas: Puro (grade normal) e Mistos (grade mista). */
+type QueueMode = "puro" | "mistos";
+
+/** Fila escolhida: um tamanho por vez, na aba ativa. */
 type Selected = string | null;
 
 export function Separacao({ onBack }: Props) {
   const rfid = useRfid();
+  const [mode, setMode] = useState<QueueMode>("puro");
   const [selected, setSelected] = useState<Selected>(null);
-  const [confirmed, setConfirmed] = useState<Selected>(null);
+  const [confirmed, setConfirmed] = useState<{ size: string; mode: QueueMode } | null>(null);
   const [counts, setCounts] = useState<QueueCounts | null>(null);
   const [authError, setAuthError] = useState<string | null>(null);
 
@@ -55,20 +58,22 @@ export function Separacao({ onBack }: Props) {
     };
   }, []);
 
-  const claim = useCallback(
-    () => (confirmed === MISTOS ? claimNextMixed() : claimNext([confirmed ?? ""])),
-    [confirmed],
-  );
+  const claim = useCallback(() => {
+    if (!confirmed) return claimNext([""]);
+    return confirmed.mode === "mistos"
+      ? claimNextMixed([confirmed.size])
+      : claimNext([confirmed.size]);
+  }, [confirmed]);
 
   if (confirmed) {
-    const isMixed = confirmed === MISTOS;
+    const isMixed = confirmed.mode === "mistos";
     return (
       <SeparacaoRunner
         title={isMixed ? "Separação — Mistos" : "Separação"}
-        kicker={isMixed ? "Fila de mistos" : `Fila ${confirmed}`}
+        kicker={`Fila ${confirmed.size} — ${isMixed ? "Mistos" : "Puro"}`}
         emptyHint={
           isMixed
-            ? "Nenhum pedido misto pronto no momento."
+            ? "Nenhum pedido misto pronto nesse tamanho. Tente outra aba ou aguarde a sincronização."
             : "Nenhum pedido pronto nessa fila. Tente outra ou aguarde a sincronização."
         }
         claim={claim}
@@ -77,8 +82,10 @@ export function Separacao({ onBack }: Props) {
     );
   }
 
-  const countFor = (q: string): number =>
-    q === MISTOS ? counts?.mixed ?? 0 : counts?.sizes?.[q] ?? 0;
+  const countFor = (size: string, m: QueueMode): number =>
+    m === "mistos" ? counts?.mixedBySize?.[size] ?? 0 : counts?.sizes?.[size] ?? 0;
+  const totalFor = (m: QueueMode): number =>
+    SIZES.reduce((acc, s) => acc + countFor(s, m), 0);
 
   return (
     <div style={page}>
@@ -113,34 +120,42 @@ export function Separacao({ onBack }: Props) {
 
       <main style={main}>
         <p style={lead}>
-          Você entra em <strong>uma fila por vez</strong>. Escolha um tamanho ou a
-          fila de mistos — o número é quantos pedidos estão prontos agora.
+          Você entra em <strong>uma fila por vez</strong>. Cada tamanho tem duas abas —{" "}
+          <strong>Puro</strong> (grade única) e <strong>Mistos</strong> (grade mista) — o
+          número é quantos pedidos estão prontos agora.
         </p>
+
+        <div style={modeTabs}>
+          {(["puro", "mistos"] as const).map((m) => (
+            <button
+              key={m}
+              onClick={() => setMode(m)}
+              style={mode === m ? modeTabOn : modeTab}
+            >
+              {m === "puro" ? "Puro" : "Mistos"}
+              <span style={mode === m ? modeTabCountOn : modeTabCount}>{totalFor(m)}</span>
+            </button>
+          ))}
+        </div>
 
         <div style={grid}>
           {SIZES.map((s) => (
             <QueueTile
               key={s}
               label={s}
-              count={countFor(s)}
+              count={countFor(s, mode)}
               selected={selected === s}
               onClick={() => setSelected((p) => (p === s ? null : s))}
             />
           ))}
-          <QueueTile
-            label="Mistos"
-            count={countFor(MISTOS)}
-            selected={selected === MISTOS}
-            onClick={() => setSelected((p) => (p === MISTOS ? null : MISTOS))}
-          />
         </div>
 
         <button
-          onClick={() => selected && setConfirmed(selected)}
+          onClick={() => selected && setConfirmed({ size: selected, mode })}
           disabled={!selected}
           style={!selected ? startBtnDisabled : startBtn}
         >
-          Começar a separar
+          Começar a separar{selected ? ` — ${selected} ${mode === "mistos" ? "Mistos" : "Puro"}` : ""}
         </button>
       </main>
     </div>
@@ -268,9 +283,55 @@ const lead: CSSProperties = {
 
 const grid: CSSProperties = {
   display: "grid",
-  gridTemplateColumns: "repeat(8, minmax(0, 1fr))",
+  gridTemplateColumns: "repeat(7, minmax(0, 1fr))",
   gap: 10,
   width: "100%",
+};
+
+const modeTabs: CSSProperties = {
+  display: "inline-flex",
+  gap: 4,
+  padding: 4,
+  background: "var(--bg-card)",
+  border: "1px solid var(--border)",
+  borderRadius: 12,
+};
+
+const modeTab: CSSProperties = {
+  display: "inline-flex",
+  alignItems: "center",
+  gap: 8,
+  padding: "10px 22px",
+  background: "transparent",
+  border: 0,
+  borderRadius: 9,
+  color: "var(--text-secondary)",
+  fontSize: 14,
+  fontWeight: 700,
+  cursor: "pointer",
+  transition: "background 140ms, color 140ms",
+};
+
+const modeTabOn: CSSProperties = {
+  ...modeTab,
+  background: "var(--bg-input)",
+  color: "var(--text)",
+  boxShadow: "inset 0 0 0 1px var(--border-strong)",
+};
+
+const modeTabCount: CSSProperties = {
+  fontFamily: "var(--font-mono)",
+  fontSize: 11,
+  padding: "1px 8px",
+  borderRadius: 999,
+  background: "var(--bg-input)",
+  color: "var(--text-muted)",
+};
+
+const modeTabCountOn: CSSProperties = {
+  ...modeTabCount,
+  background: "var(--info-bg)",
+  color: "var(--info-text)",
 };
 
 const tile: CSSProperties = {
