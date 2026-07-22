@@ -4,6 +4,7 @@ import { AmbientBackground } from "./AmbientBackground";
 import { SeparacaoRunner } from "./SeparacaoRunner";
 import { useRfid } from "../contexts/RfidContext";
 import { ApiError } from "../lib/api";
+import { subscribeQueueChanged } from "../lib/realtime";
 import { claimNext, claimNextMixed, getQueueCounts, type QueueCounts } from "../services/orders";
 
 type Props = { onBack: () => void };
@@ -25,9 +26,10 @@ export function Separacao({ onBack }: Props) {
   const [counts, setCounts] = useState<QueueCounts | null>(null);
   const [authError, setAuthError] = useState<string | null>(null);
 
-  // Contagem das filas, atualizada periodicamente. Erro de auth/permissão é a
-  // API (nexus) dizendo quem pode operar — mostra, não engole. Falha de rede
-  // segue silenciosa (API fora não pode travar a tela).
+  // Contagem das filas: o WS do nexus empurra `queue.changed` (tiny-sync,
+  // claim, complete, release) e cada evento refaz o fetch; o intervalo de 60s
+  // é só rede de segurança pro WS cair. Erro de auth/permissão é a API dizendo
+  // quem pode operar — mostra, não engole. Falha de rede segue silenciosa.
   useEffect(() => {
     let alive = true;
     const load = () => {
@@ -51,10 +53,12 @@ export function Separacao({ onBack }: Props) {
         });
     };
     load();
-    const id = setInterval(load, 5000);
+    const unsubscribe = subscribeQueueChanged(load);
+    const id = setInterval(load, 60_000);
     return () => {
       alive = false;
       clearInterval(id);
+      unsubscribe();
     };
   }, []);
 

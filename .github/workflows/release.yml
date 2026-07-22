@@ -75,9 +75,11 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ""
           VITE_SUPABASE_URL: ${{ secrets.VITE_SUPABASE_URL }}
           VITE_SUPABASE_PUBLISHABLE_KEY: ${{ secrets.VITE_SUPABASE_PUBLISHABLE_KEY }}
-          # Separação (nexus): base da API. Sem esse secret o módulo cai no
-          # default localhost e não conecta. Auth = sessão Google (Supabase).
+          # Separação (nexus): base da API + WS de push (queue.changed). Sem o
+          # da API o módulo cai no default localhost e não conecta; sem o WS o
+          # app fica só no polling de fallback. Auth = sessão Google (Supabase).
           VITE_SEPARACAO_API_URL: ${{ secrets.VITE_SEPARACAO_API_URL }}
+          VITE_SEPARACAO_WS_URL: ${{ secrets.VITE_SEPARACAO_WS_URL }}
         with:
           tagName: ${{ github.ref_name }}
           releaseName: "Berzerk RFID v__VERSION__"
