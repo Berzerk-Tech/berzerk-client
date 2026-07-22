@@ -7,6 +7,7 @@ import {
 } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { supabase } from "../lib/supabase";
+import { signInWithGoogle } from "../lib/auth";
 import { getStoredTheme, setTheme, type Theme } from "../lib/theme";
 import { getDeviceConfig } from "../lib/devices";
 import { getMe, canOperateSeparacao } from "../services/orders";
@@ -60,6 +61,15 @@ export function HomeMenu({ email, stationShortId, onEnter }: Props) {
     })();
   }, []);
 
+  // Troca rápida de operador: a máquina é compartilhada, cada operador entra
+  // com a própria conta Google. Encerra a sessão e já abre o seletor de conta
+  // (o fluxo OAuth usa prompt=select_account) — um clique, sem passar pela
+  // tela de login.
+  const switchUser = async () => {
+    await supabase.auth.signOut();
+    await signInWithGoogle();
+  };
+
   const toggleTheme = () => {
     const next: Theme = theme === "dark" ? "light" : "dark";
     setTheme(next);
@@ -92,6 +102,15 @@ export function HomeMenu({ email, stationShortId, onEnter }: Props) {
         </div>
         <div style={topRight}>
           <span style={topUser}>{email}</span>
+          <button
+            onClick={switchUser}
+            style={switchUserBtn}
+            className="berzerk-text-btn"
+            title="Sair e entrar com outra conta Google"
+          >
+            <IconSwitchUser style={btnIcon} />
+            Trocar usuário
+          </button>
           <span style={topPipe} />
           <span style={topStation}>
             <span style={topStationDot} />
@@ -420,6 +439,17 @@ function IconShrink(props: SVGProps<SVGSVGElement>) {
   );
 }
 
+function IconSwitchUser(props: SVGProps<SVGSVGElement>) {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round" {...props}>
+      <circle cx="9" cy="7" r="4" />
+      <path d="M2 21v-2a4 4 0 0 1 4-4h6" />
+      <polyline points="16 11 19 8 22 11" />
+      <path d="M19 8v8" />
+    </svg>
+  );
+}
+
 function IconGear(props: SVGProps<SVGSVGElement>) {
   return (
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round" {...props}>
@@ -494,6 +524,21 @@ const topUser: CSSProperties = {
 };
 
 const topPipe: CSSProperties = { width: 1, height: 14, background: "var(--border)" };
+
+const switchUserBtn: CSSProperties = {
+  display: "inline-flex",
+  alignItems: "center",
+  gap: 6,
+  background: "transparent",
+  border: "1px solid var(--border)",
+  borderRadius: 8,
+  color: "var(--text-secondary)",
+  cursor: "pointer",
+  fontSize: 11,
+  fontWeight: 600,
+  padding: "6px 10px",
+  transition: "color 120ms, border-color 120ms",
+};
 
 const topStation: CSSProperties = { display: "inline-flex", alignItems: "center", gap: 7 };
 

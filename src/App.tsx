@@ -10,7 +10,6 @@ import { HomeMenu, type Screen } from "./components/HomeMenu";
 import { NotaFiscalPlaceholder } from "./components/NotaFiscalPlaceholder";
 import { PieceTrace } from "./components/PieceTrace";
 import { Separacao } from "./components/Separacao";
-import { RequireOpsAuth } from "./components/RequireOpsAuth";
 import { SettingsPlaceholder } from "./components/SettingsPlaceholder";
 import { UpdateBanner } from "./components/UpdateBanner";
 import { RfidProvider } from "./contexts/RfidContext";
@@ -84,12 +83,7 @@ export default function App() {
     if (screen === "rfid") content = withBanner(<BatchBrowser session={session} onBack={back} />);
     else if (screen === "nf") content = withBanner(<NotaFiscalPlaceholder onBack={back} />);
     else if (screen === "rastreio") content = withBanner(<PieceTrace onBack={back} />);
-    else if (screen === "separacao")
-      content = withBanner(
-        <RequireOpsAuth onBack={back}>
-          <Separacao onBack={back} />
-        </RequireOpsAuth>,
-      );
+    else if (screen === "separacao") content = withBanner(<Separacao onBack={back} />);
     else if (screen === "settings") content = withBanner(<SettingsPlaceholder onBack={back} />);
     else
       content = withBanner(

@@ -1,11 +1,10 @@
 // Cliente HTTP da separacao-api (nexus). Base URL configurável + bearer token.
 //
-// AUTENTICAÇÃO (transição): hoje usamos o access token do Supabase como bearer.
-// Quando o Cognito entrar (Fase 2), basta trocar `getAuthToken()` pra ler o
-// token store do Cognito — o resto do app não muda.
+// AUTENTICAÇÃO: a mesma sessão Google (Supabase) do app — quem logou é quem
+// separa. O nexus valida esse token (bridge HS256) e resolve as permissões
+// pelo RBAC dele (papéis por email); o app só reflete o que a API responder.
 
 import { supabase } from "./supabase";
-import { getValidAccessToken, isCognitoConfigured } from "./cognito";
 
 const DEFAULT_BASE = "http://localhost:3010";
 
@@ -13,16 +12,7 @@ export function apiBaseUrl(): string {
   return (import.meta.env.VITE_SEPARACAO_API_URL ?? DEFAULT_BASE).replace(/\/$/, "");
 }
 
-/**
- * Token pro header Authorization. Preferência: sessão do pool ops (Cognito) —
- * é o login da operadora de Separação. Fallback: sessão Supabase (transição,
- * pros módulos que ainda não migraram).
- */
 async function getAuthToken(): Promise<string | null> {
-  if (isCognitoConfigured()) {
-    const opsToken = await getValidAccessToken();
-    if (opsToken) return opsToken;
-  }
   try {
     const { data } = await supabase.auth.getSession();
     return data.session?.access_token ?? null;
