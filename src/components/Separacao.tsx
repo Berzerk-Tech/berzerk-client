@@ -3,6 +3,7 @@ import { BackButton } from "./BackButton";
 import { AmbientBackground } from "./AmbientBackground";
 import { SeparacaoRunner } from "./SeparacaoRunner";
 import { useRfid } from "../contexts/RfidContext";
+import { ApiError } from "../lib/api";
 import { claimNext, claimNextMixed, getQueueCounts, type QueueCounts } from "../services/orders";
 
 type Props = { onBack: () => void };
@@ -19,17 +20,31 @@ export function Separacao({ onBack }: Props) {
   const [selected, setSelected] = useState<Selected>(null);
   const [confirmed, setConfirmed] = useState<Selected>(null);
   const [counts, setCounts] = useState<QueueCounts | null>(null);
+  const [authError, setAuthError] = useState<string | null>(null);
 
-  // Contagem das filas, atualizada periodicamente.
+  // Contagem das filas, atualizada periodicamente. Erro de auth/permissão é a
+  // API (nexus) dizendo quem pode operar — mostra, não engole. Falha de rede
+  // segue silenciosa (API fora não pode travar a tela).
   useEffect(() => {
     let alive = true;
     const load = () => {
       getQueueCounts()
         .then((c) => {
-          if (alive) setCounts(c);
+          if (!alive) return;
+          setCounts(c);
+          setAuthError(null);
         })
-        .catch(() => {
-          /* API fora: mostra sem contador */
+        .catch((err) => {
+          if (!alive || !(err instanceof ApiError)) return;
+          if (err.status === 403) {
+            setAuthError(
+              "Seu usuário não tem a permissão de Separação (separacao:operate). Peça pra liberar no Nexus (Operadores).",
+            );
+          } else if (err.status === 401) {
+            setAuthError(
+              "A API não reconheceu sua sessão. Troque de usuário e entre de novo; se persistir, avise o suporte.",
+            );
+          }
         });
     };
     load();
@@ -93,6 +108,8 @@ export function Separacao({ onBack }: Props) {
           </button>
         </div>
       )}
+
+      {authError && <div style={mesaDownBanner}>{authError}</div>}
 
       <main style={main}>
         <p style={lead}>
