@@ -25,10 +25,14 @@ import {
   markBatchRfidPrinted,
   unmarkBatchRfidPrinted,
   resolveBatch,
+  searchBatchesGlobal,
+  RECEIPT_STATUS_LABEL,
+  type GlobalSearchEntry,
   type ProductionBatch,
   type ResolvedBatch,
   type PrintedBatchEntry,
 } from "../services/batches";
+import { logAction } from "../services/actionLog";
 import { BatchCard, type CardState } from "./BatchCard";
 import { PrintConfirmModal, type PrintOverride } from "./PrintConfirmModal";
 import { BackButton } from "./BackButton";
@@ -145,6 +149,15 @@ export function BatchBrowser({
     "connecting" | "connected" | "disconnected"
   >("connecting");
   const [searchingShopify, setSearchingShopify] = useState<Set<string>>(
+    new Set(),
+  );
+  // Busca na base toda (sem filtro de status/estampa): acionada pelo operador
+  // quando o lote não está na listagem normal. null = ainda não buscou.
+  const [globalResults, setGlobalResults] = useState<
+    GlobalSearchEntry[] | null
+  >(null);
+  const [searchingGlobal, setSearchingGlobal] = useState(false);
+  const [resolvingGlobal, setResolvingGlobal] = useState<Set<string>>(
     new Set(),
   );
 
@@ -313,6 +326,13 @@ export function BatchBrowser({
       });
       try {
         await printJobsService.discardTestForBatch(batchId);
+        logAction({
+          action: "discard_test",
+          batchId,
+          batchCode,
+          operatorId,
+          operatorEmail,
+        });
       } catch (e) {
         console.error("[BatchBrowser] discardTestForBatch failed:", e);
         window.alert(
@@ -322,7 +342,7 @@ export function BatchBrowser({
         load(false);
       }
     },
-    [load],
+    [load, operatorId, operatorEmail],
   );
 
   // Re-resolve um lote específico forçando o fallback do Shopify. Usado
@@ -421,13 +441,45 @@ export function BatchBrowser({
           // pode ser < solicitado em impressão parcial. Se foi teste, o lote
           // passa a ter teste pra limpar.
           await printJobsService.markDone(jobId, result.count);
+          const partial = result.count > 0 && result.count < totalRequested;
           if (isTest) {
             setBatchesWithTest((prev) => new Set(prev).add(batch.id));
+            logAction({
+              action: "print_test",
+              batchId: batch.id,
+              batchCode: batch.batch_code,
+              jobId,
+              operatorId,
+              operatorEmail,
+              details: { printed: result.count, requested: totalRequested },
+            });
+          } else if (partial) {
+            // PARCIAL: NÃO estampa — o lote FICA na fila pra completar as
+            // etiquetas que faltam (impressão manual por tamanho). Estampar
+            // aqui tirava o lote da fila com peças sem etiqueta (lote 1146:
+            // 1000 de 1474, as 474 restantes sumiam da vista).
+            setErrors((m) =>
+              new Map(m).set(
+                batch.id,
+                `Impressão parcial: ${result.count} de ${totalRequested} etiquetas. ` +
+                  "O lote continua na fila — use a impressão manual (✋) pra completar o restante.",
+              ),
+            );
+            logAction({
+              action: "print_partial",
+              batchId: batch.id,
+              batchCode: batch.batch_code,
+              jobId,
+              operatorId,
+              operatorEmail,
+              details: { printed: result.count, requested: totalRequested },
+            });
           } else if (result.count > 0) {
             // Estampa rfid_impresso_at — é o que tira o lote da fila e o põe
             // no Histórico (fonte única; count 0 = nada queimado, não estampa).
+            let stamped = 0;
             try {
-              const stamped = await markBatchRfidPrinted(batch.id);
+              stamped = await markBatchRfidPrinted(batch.id);
               if (stamped === 0) {
                 console.warn(
                   `[BatchBrowser] rfid_impresso_at não estampado pra ${batch.batch_code} ` +
@@ -437,12 +489,35 @@ export function BatchBrowser({
             } catch (e) {
               console.warn("[BatchBrowser] markBatchRfidPrinted falhou:", e);
             }
+            logAction({
+              action: "print_done",
+              batchId: batch.id,
+              batchCode: batch.batch_code,
+              jobId,
+              operatorId,
+              operatorEmail,
+              details: {
+                printed: result.count,
+                requested: totalRequested,
+                isManual,
+                stamped: stamped > 0,
+              },
+            });
           }
         } else {
           const detail = result.stage ? ` (${result.stage})` : "";
           const msg = result.error + detail;
           await printJobsService.markFailed(jobId, msg);
           setErrors((m) => new Map(m).set(batch.id, msg));
+          logAction({
+            action: "print_failed",
+            batchId: batch.id,
+            batchCode: batch.batch_code,
+            jobId,
+            operatorId,
+            operatorEmail,
+            details: { error: msg },
+          });
         }
       } catch (e) {
         const msg = formatError(e);
@@ -452,6 +527,15 @@ export function BatchBrowser({
           /* swallow */
         }
         setErrors((m) => new Map(m).set(batch.id, msg));
+        logAction({
+          action: "print_failed",
+          batchId: batch.id,
+          batchCode: batch.batch_code,
+          jobId,
+          operatorId,
+          operatorEmail,
+          details: { error: msg },
+        });
       } finally {
         setPrinting((m) => {
           const next = new Map(m);
@@ -478,6 +562,14 @@ export function BatchBrowser({
       if (!ok) return;
       try {
         await unmarkBatchRfidPrinted(entry.id);
+        logAction({
+          action: "reprint_queue",
+          batchId: entry.id,
+          batchCode: entry.batch_code,
+          operatorId,
+          operatorEmail,
+          details: { origem: "historico" },
+        });
       } catch (e) {
         window.alert(
           `Falha ao voltar ${entry.batch_code} pra fila: ${formatError(e)}`,
@@ -486,7 +578,107 @@ export function BatchBrowser({
         load(false);
       }
     },
-    [load],
+    [load, operatorId, operatorEmail],
+  );
+
+  // Mudou o termo → resultado da base toda fica obsoleto.
+  useEffect(() => {
+    setGlobalResults(null);
+  }, [query]);
+
+  const handleGlobalSearch = useCallback(async () => {
+    const term = query.trim();
+    if (!term) return;
+    setSearchingGlobal(true);
+    try {
+      setGlobalResults(await searchBatchesGlobal(term));
+    } catch (e) {
+      window.alert(`Busca na base toda falhou: ${formatError(e)}`);
+    } finally {
+      setSearchingGlobal(false);
+    }
+  }, [query]);
+
+  // "Voltar pra fila" a partir da busca global: limpa a estampa de impresso.
+  // Se o lote não estiver mais na etapa Env. Recebimento, avisa que ele só
+  // reaparece na fila quando o industrial trouxer ele de volta pra etapa.
+  const handleGlobalReturnToQueue = useCallback(
+    async (entry: GlobalSearchEntry) => {
+      const inStage = entry.batch.receiptStatus === "enviado_recebimento";
+      const statusLabel =
+        RECEIPT_STATUS_LABEL[entry.batch.receiptStatus] ??
+        entry.batch.receiptStatus;
+      const ok = window.confirm(
+        `Voltar o lote ${entry.batch.batch_code} pra fila de impressão?\n\n` +
+          (inStage
+            ? "Ele volta a aparecer na lista de Prontos pra imprimir."
+            : `Atenção: o lote está em "${statusLabel}" no industrial — a estampa ` +
+              "de impresso será limpa, mas ele só reaparece na fila quando voltar " +
+              "pra etapa Env. Recebimento."),
+      );
+      if (!ok) return;
+      try {
+        await unmarkBatchRfidPrinted(entry.batch.id);
+        logAction({
+          action: "reprint_queue",
+          batchId: entry.batch.id,
+          batchCode: entry.batch.batch_code,
+          operatorId,
+          operatorEmail,
+          details: {
+            origem: "busca_global",
+            receiptStatus: entry.batch.receiptStatus,
+          },
+        });
+        setGlobalResults((prev) =>
+          prev?.map((g) =>
+            g.batch.id === entry.batch.id
+              ? { ...g, rfid_impresso_at: null }
+              : g,
+          ) ?? prev,
+        );
+      } catch (e) {
+        window.alert(
+          `Falha ao voltar ${entry.batch.batch_code} pra fila: ${formatError(e)}`,
+        );
+      } finally {
+        load(false);
+      }
+    },
+    [load, operatorId, operatorEmail],
+  );
+
+  // Imprimir direto do resultado da busca global (consulta/reimpressão):
+  // resolve EAN13 e abre o mesmo modal de confirmação do fluxo normal.
+  const handleGlobalPrint = useCallback(
+    async (entry: GlobalSearchEntry) => {
+      const id = entry.batch.id;
+      if (resolvingGlobal.has(id)) return;
+      setResolvingGlobal((s) => new Set(s).add(id));
+      try {
+        const resolved = await resolveBatch(entry.batch, {
+          skipShopifyFallback: false,
+        });
+        if (!resolved.isPrintable) {
+          window.alert(
+            `Lote ${entry.batch.batch_code} sem cobertura de EAN13 ` +
+              `(faltam: ${resolved.missingSizes.join(", ") || "todos"}). ` +
+              "Coordenador precisa cadastrar no catálogo do industrial.",
+          );
+          return;
+        }
+        setPendingConfirm(resolved);
+      } catch (e) {
+        window.alert(`Falha ao preparar impressão: ${formatError(e)}`);
+      } finally {
+        setResolvingGlobal((s) => {
+          const next = new Set(s);
+          next.delete(id);
+          return next;
+        });
+      }
+    },
+    [resolvingGlobal],
   );
 
   const q = query.trim().toLowerCase();
@@ -622,12 +814,35 @@ export function BatchBrowser({
           situacaoDestino: config.situacaoDestino,
           operatorId,
         });
+        logAction({
+          action: "movimentar",
+          batchId: job.batch_id,
+          batchCode: job.batch_code,
+          jobId: job.id,
+          operatorId,
+          operatorEmail,
+          details: {
+            epcs: pendingEpcs.length,
+            situacaoDestino: config.situacaoDestino,
+            empresaOrigem: config.empresaOrigem,
+            empresaDestino: config.empresaDestino,
+          },
+        });
 
         const refreshed = await printJobsService.fetchJobsAwaitingMovimentacao();
         setAwaitingJobs(refreshed);
       } catch (e) {
         const msg = formatError(e);
         console.error("[BatchBrowser] handleMovimentar failed:", e);
+        logAction({
+          action: "movimentar_failed",
+          batchId: job.batch_id,
+          batchCode: job.batch_code,
+          jobId: job.id,
+          operatorId,
+          operatorEmail,
+          details: { error: msg },
+        });
         window.alert(`Movimentação falhou: ${msg}`);
       } finally {
         setMovingJobs((m) => {
@@ -637,7 +852,7 @@ export function BatchBrowser({
         });
       }
     },
-    [movingJobs, operatorId],
+    [movingJobs, operatorId, operatorEmail],
   );
 
   function cardStateFor(batchId: string): CardState {
@@ -980,11 +1195,57 @@ export function BatchBrowser({
             {q &&
               ready.length === 0 &&
               blocked.length === 0 &&
-              filteredHistory.length === 0 && (
+              filteredHistory.length === 0 &&
+              filteredAwaiting.length === 0 && (
                 <EmptyState
-                  text={`Nenhum lote bate com "${query}".`}
+                  text={`Nenhum lote na fila bate com "${query}".`}
                 />
               )}
+
+            {q && globalResults === null && (
+              <div style={globalSearchWrap}>
+                <button
+                  onClick={handleGlobalSearch}
+                  disabled={searchingGlobal}
+                  style={searchingGlobal ? globalSearchBtnBusy : globalSearchBtn}
+                >
+                  {searchingGlobal
+                    ? "Buscando na base toda…"
+                    : `🔍 Buscar "${query.trim()}" na base toda`}
+                </button>
+                <span style={globalSearchHint}>
+                  Procura em todos os lotes do industrial, incluindo já
+                  impressos e fora da etapa de recebimento.
+                </span>
+              </div>
+            )}
+
+            {q && globalResults !== null && (
+              <Section
+                title="Base toda"
+                count={globalResults.length}
+                accent="muted"
+                hint="Todos os status — consulte, reimprima ou volte o lote pra fila."
+              >
+                {globalResults.length === 0 ? (
+                  <EmptyState
+                    text={`Nada na base toda pra "${query.trim()}".`}
+                  />
+                ) : (
+                  <div style={historyList}>
+                    {globalResults.map((g) => (
+                      <GlobalResultRow
+                        key={g.batch.id}
+                        entry={g}
+                        resolving={resolvingGlobal.has(g.batch.id)}
+                        onPrint={handleGlobalPrint}
+                        onReturnToQueue={handleGlobalReturnToQueue}
+                      />
+                    ))}
+                  </div>
+                )}
+              </Section>
+            )}
 
             {!q &&
               filter !== "all" &&
@@ -1184,6 +1445,84 @@ function AwaitingMovRow({
       >
         {moving ? "Movendo…" : "Movimentar"}
       </button>
+    </div>
+  );
+}
+
+function formatDateTime(iso: string): string {
+  try {
+    const d = new Date(iso);
+    return d.toLocaleString("pt-BR", {
+      day: "2-digit",
+      month: "2-digit",
+      hour: "2-digit",
+      minute: "2-digit",
+    });
+  } catch {
+    return "";
+  }
+}
+
+function GlobalResultRow({
+  entry,
+  resolving,
+  onPrint,
+  onReturnToQueue,
+}: {
+  entry: GlobalSearchEntry;
+  resolving: boolean;
+  onPrint: (e: GlobalSearchEntry) => void;
+  onReturnToQueue: (e: GlobalSearchEntry) => void;
+}) {
+  const b = entry.batch;
+  const printed = entry.rfid_impresso_at != null;
+  const statusLabel =
+    RECEIPT_STATUS_LABEL[b.receiptStatus] ?? b.receiptStatus ?? "—";
+  return (
+    <div style={globalRow}>
+      {b.thumbnail_url ? (
+        <img src={b.thumbnail_url} alt="" loading="lazy" style={historyThumb} />
+      ) : (
+        <span style={historyThumbPlaceholder} />
+      )}
+      <span style={historyCode}>{b.batch_code}</span>
+      <span style={historyName}>
+        {b.design_name ?? "—"}
+        {b.shirt_color && ` · ${b.shirt_color}`}
+      </span>
+      <span style={globalStatus}>
+        {statusLabel}
+        {entry.deleted && " · EXCLUÍDO"}
+      </span>
+      <span style={historyQty}>
+        {b.total_pieces > 0 ? `${b.total_pieces} etiq.` : "sem grade"}
+      </span>
+      <span style={historyTime}>
+        {printed
+          ? `impresso ${formatDateTime(entry.rfid_impresso_at as string)}`
+          : "não impresso"}
+      </span>
+      {printed && !entry.deleted && (
+        <button
+          type="button"
+          style={historyReprintBtn}
+          title="Limpa a estampa de impresso — o lote volta pra fila se estiver na etapa Env. Recebimento."
+          onClick={() => onReturnToQueue(entry)}
+        >
+          ↩ Voltar pra fila
+        </button>
+      )}
+      {!entry.deleted && b.total_pieces > 0 && (
+        <button
+          type="button"
+          style={resolving ? mvBtnBusy : mvBtn}
+          title="Abre o fluxo de impressão pra este lote, mesmo fora da fila."
+          onClick={() => onPrint(entry)}
+          disabled={resolving}
+        >
+          {resolving ? "Preparando…" : printed ? "Reimprimir" : "Imprimir"}
+        </button>
+      )}
     </div>
   );
 }
@@ -1566,6 +1905,53 @@ const historyReprintBtn: CSSProperties = {
   padding: "4px 8px",
   cursor: "pointer",
   whiteSpace: "nowrap",
+};
+
+const globalRow: CSSProperties = {
+  display: "grid",
+  gridTemplateColumns: "auto auto 1fr auto auto auto auto auto",
+  gap: 14,
+  alignItems: "center",
+  padding: "8px 14px",
+  borderBottom: "1px solid var(--border)",
+  fontSize: 13,
+};
+
+const globalStatus: CSSProperties = {
+  color: "var(--text-muted)",
+  fontSize: 11,
+  fontFamily: "var(--font-mono)",
+  whiteSpace: "nowrap",
+};
+
+const globalSearchWrap: CSSProperties = {
+  display: "flex",
+  flexDirection: "column",
+  alignItems: "center",
+  gap: 8,
+  padding: "18px 0",
+};
+
+const globalSearchBtn: CSSProperties = {
+  background: "var(--bg-card)",
+  border: "1px solid var(--border)",
+  borderRadius: 8,
+  color: "var(--text)",
+  fontSize: 13,
+  fontWeight: 600,
+  padding: "10px 18px",
+  cursor: "pointer",
+};
+
+const globalSearchBtnBusy: CSSProperties = {
+  ...globalSearchBtn,
+  opacity: 0.6,
+  cursor: "wait",
+};
+
+const globalSearchHint: CSSProperties = {
+  color: "var(--text-faint)",
+  fontSize: 11,
 };
 
 const queueList: CSSProperties = {

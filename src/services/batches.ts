@@ -310,6 +310,105 @@ export function buildPrintItems(resolved: ResolvedBatch): PrintJobItem[] {
     }));
 }
 
+/** Resultado da busca na base toda (sem filtro de status/estampa). */
+export type GlobalSearchEntry = {
+  batch: ProductionBatch;
+  /** null = ainda não impresso. */
+  rfid_impresso_at: string | null;
+  deleted: boolean;
+};
+
+// Pra escolher o status "mais avançado" quando o lote tem múltiplas linhas de
+// silk_records em etapas diferentes.
+const GLOBAL_STATUS_PRIORITY = [
+  "aguardando_autorizacao",
+  "aguardando_retirada",
+  "enviado_recebimento",
+  "recebimento_confirmado",
+];
+
+/**
+ * Busca GERAL: procura o lote na base toda do industrial, ignorando status de
+ * recebimento e estampa de impresso. Pra consulta, reimpressão ou voltar um
+ * lote pra fila quando ele não aparece na listagem normal (que só mostra
+ * `enviado_recebimento` não impresso).
+ */
+export async function searchBatchesGlobal(
+  query: string,
+): Promise<GlobalSearchEntry[]> {
+  // PostgREST usa , e () como sintaxe do .or — tira do termo pra não quebrar.
+  const q = query.trim().replace(/[,()]/g, " ").replace(/\s+/g, " ");
+  if (!q) return [];
+  const pattern = `*${q}*`;
+  const { data: silks, error: silksErr } = await supabase
+    .from("silk_records")
+    .select(
+      "batch_id, batch_code, shirt_color, product_name, design_name, created_at, status",
+    )
+    .or(
+      `batch_code.ilike.${pattern},design_name.ilike.${pattern},product_name.ilike.${pattern}`,
+    )
+    .order("created_at", { ascending: false })
+    .limit(200);
+  if (silksErr) throw silksErr;
+  if (!silks || silks.length === 0) return [];
+
+  type SilkRow = (typeof silks)[number];
+  const rowByBatch = new Map<string, SilkRow>();
+  const statusByBatch = new Map<string, string>();
+  for (const s of silks) {
+    if (!s.batch_id) continue;
+    if (!rowByBatch.has(s.batch_id)) rowByBatch.set(s.batch_id, s);
+    const cur = statusByBatch.get(s.batch_id);
+    if (
+      !cur ||
+      GLOBAL_STATUS_PRIORITY.indexOf(s.status) >
+        GLOBAL_STATUS_PRIORITY.indexOf(cur)
+    ) {
+      statusByBatch.set(s.batch_id, s.status);
+    }
+  }
+  const batchIds = Array.from(rowByBatch.keys()).slice(0, 30);
+  if (batchIds.length === 0) return [];
+
+  const [{ data: pbs, error: pbErr }] = await Promise.all([
+    supabase
+      .from("production_batches")
+      .select("id, design_name, grade, rfid_impresso_at, deleted_at")
+      .in("id", batchIds),
+    ensureDesignTemplatesLoaded(),
+  ]);
+  if (pbErr) throw pbErr;
+
+  const result: GlobalSearchEntry[] = [];
+  for (const pb of pbs ?? []) {
+    const meta = rowByBatch.get(pb.id as string);
+    if (!meta) continue;
+    const sizes = parseGrade(pb.grade as string | null);
+    const designName = meta.design_name ?? (pb.design_name as string | null);
+    result.push({
+      batch: {
+        id: pb.id as string,
+        batch_code: meta.batch_code ?? `LOTE ${(pb.id as string).slice(0, 8)}`,
+        design_name: designName,
+        product_name: meta.product_name,
+        tiny_reference: null,
+        shirt_color: meta.shirt_color,
+        sizes,
+        total_pieces: sizes.reduce((sum, s) => sum + s.quantity, 0),
+        created_at: meta.created_at,
+        thumbnail_url: getDesignThumbnail(designName),
+        receiptStatus: statusByBatch.get(pb.id as string) ?? "",
+      },
+      rfid_impresso_at: (pb.rfid_impresso_at as string | null) ?? null,
+      deleted: pb.deleted_at != null,
+    });
+  }
+  return result.sort(
+    (a, b) => +new Date(b.batch.created_at) - +new Date(a.batch.created_at),
+  );
+}
+
 export async function fetchTodayHistory(): Promise<PrintedBatchEntry[]> {
   const startOfDay = new Date();
   startOfDay.setHours(0, 0, 0, 0);
