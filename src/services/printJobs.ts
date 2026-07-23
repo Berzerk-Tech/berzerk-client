@@ -287,15 +287,29 @@ export async function reconcileSituacaoFromItag(
     bySituacao.set(situacao, arr);
   }
   for (const [situacao, epcs] of bySituacao) {
-    const { error, count } = await supabase
-      .from("rfid_epc_inventory")
-      .update({ situacao_atual: situacao }, { count: "exact" })
-      .in("epc", epcs)
-      .neq("situacao_atual", situacao);
-    if (error) throw error;
-    updated += count ?? 0;
+    for (const chunk of chunkEpcs(epcs)) {
+      const { error, count } = await supabase
+        .from("rfid_epc_inventory")
+        .update({ situacao_atual: situacao }, { count: "exact" })
+        .in("epc", chunk)
+        .neq("situacao_atual", situacao);
+      if (error) throw error;
+      updated += count ?? 0;
+    }
   }
   return updated;
+}
+
+// O filtro `.in("epc", ...)` do PostgREST vai na URL; acima de ~14KB o edge do
+// Supabase devolve 400 "Bad Request" (lote 1146: 1000 EPCs ≈ 27KB estourava a
+// movimentação). 300 EPCs ≈ 9KB, com folga.
+const EPC_IN_CHUNK = 300;
+function chunkEpcs(epcs: string[]): string[][] {
+  const out: string[][] = [];
+  for (let i = 0; i < epcs.length; i += EPC_IN_CHUNK) {
+    out.push(epcs.slice(i, i + EPC_IN_CHUNK));
+  }
+  return out;
 }
 
 /**
@@ -325,14 +339,18 @@ export async function fetchEpcInventoryByEpcs(
     new Set(epcs.map((e) => e.trim().toUpperCase()).filter(Boolean)),
   );
   if (norm.length === 0) return [];
-  const { data, error } = await supabase
-    .from("rfid_epc_inventory")
-    .select(
-      "epc,batch_id,batch_code,size,ean13,sku,codigo_inventario_itag,job_id,situacao_atual,printed_at,moved_at,moved_to_situacao,moved_by",
-    )
-    .in("epc", norm);
-  if (error) throw error;
-  return (data ?? []) as EpcInventoryRow[];
+  const rows: EpcInventoryRow[] = [];
+  for (const chunk of chunkEpcs(norm)) {
+    const { data, error } = await supabase
+      .from("rfid_epc_inventory")
+      .select(
+        "epc,batch_id,batch_code,size,ean13,sku,codigo_inventario_itag,job_id,situacao_atual,printed_at,moved_at,moved_to_situacao,moved_by",
+      )
+      .in("epc", chunk);
+    if (error) throw error;
+    rows.push(...(data ?? []) as EpcInventoryRow[]);
+  }
+  return rows;
 }
 
 /**
@@ -346,16 +364,19 @@ export async function markMoved(params: {
   operatorId: string;
 }): Promise<void> {
   if (params.epcs.length === 0) return;
-  const { error } = await supabase
-    .from("rfid_epc_inventory")
-    .update({
-      situacao_atual: params.situacaoDestino,
-      moved_at: new Date().toISOString(),
-      moved_to_situacao: params.situacaoDestino,
-      moved_by: params.operatorId,
-    })
-    .in("epc", params.epcs);
-  if (error) throw error;
+  const movedAt = new Date().toISOString();
+  for (const chunk of chunkEpcs(params.epcs)) {
+    const { error } = await supabase
+      .from("rfid_epc_inventory")
+      .update({
+        situacao_atual: params.situacaoDestino,
+        moved_at: movedAt,
+        moved_to_situacao: params.situacaoDestino,
+        moved_by: params.operatorId,
+      })
+      .in("epc", chunk);
+    if (error) throw error;
+  }
 }
 
 /**

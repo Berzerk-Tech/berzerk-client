@@ -553,14 +553,22 @@ export function BatchBrowser({
         )?.codigo_inventario_itag;
         if (codigoInventario != null) {
           try {
-            const real = await invoke<
-              Array<{ epc: string; situacao: number | null }>
-            >("itag_iprint_query_inventory", {
-              config: toRustConfig(config),
-              codigoInventario,
-              page: 0,
-              size: 500,
-            });
+            // Pagina até o fim: job grande (ex: 1474 EPCs) não cabe numa página
+            // de 500 — sem o loop, só os 500 primeiros eram confirmados.
+            const real: Array<{ epc: string; situacao: number | null }> = [];
+            const PAGE_SIZE = 500;
+            for (let page = 0; page < 40; page++) {
+              const chunk = await invoke<
+                Array<{ epc: string; situacao: number | null }>
+              >("itag_iprint_query_inventory", {
+                config: toRustConfig(config),
+                codigoInventario,
+                page,
+                size: PAGE_SIZE,
+              });
+              real.push(...chunk);
+              if (chunk.length < PAGE_SIZE) break;
+            }
             const realByEpc = new Map<string, number | null>();
             for (const r of real) {
               realByEpc.set(r.epc.trim().toUpperCase(), r.situacao);
