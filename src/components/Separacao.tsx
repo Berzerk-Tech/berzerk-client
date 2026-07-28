@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState, type CSSProperties } from "react";
+import { compareSizes } from "../lib/grade";
 import { BackButton } from "./BackButton";
 import { AmbientBackground } from "./AmbientBackground";
 import { SeparacaoRunner } from "./SeparacaoRunner";
@@ -10,18 +11,12 @@ import { claimNext, claimNextMixed, getQueueCounts, type QueueCounts } from "../
 type Props = { onBack: () => void };
 
 /**
- * Ordem canônica de exibição das filas. Os tamanhos em si vêm da API (contadores
- * por tamanho): fila zerada some, tamanho novo (G3, etc.) aparece sozinho.
- * Tamanho fora desta lista vai pro fim, em ordem alfabética.
+ * As filas vêm da API (contadores por tamanho): fila zerada some, tamanho novo
+ * (G1/G2/G3, etc.) aparece sozinho. A ordem canônica é a mesma da grade de
+ * impressão (`lib/grade.ts`) — uma fonte só pro app inteiro.
  */
-const SIZE_ORDER = ["PP", "P", "M", "G", "GG", "XG", "XXG", "G1", "G2", "G3", "XGG"];
-
 function sortSizes(sizes: string[]): string[] {
-  const rank = (s: string) => {
-    const i = SIZE_ORDER.indexOf(s);
-    return i === -1 ? SIZE_ORDER.length : i;
-  };
-  return [...sizes].sort((a, b) => rank(a) - rank(b) || a.localeCompare(b));
+  return [...sizes].sort(compareSizes);
 }
 
 /** Cada tamanho tem duas abas: Puro (grade normal) e Mistos (grade mista). */
@@ -219,15 +214,18 @@ function QueueTile({
   return (
     <button
       onClick={onClick}
+      className="berzerk-module-card"
       style={{
         ...(selected ? tileOn : tile),
         ...(wide ? { gridColumn: "span 2" } : null),
       }}
     >
-      <span style={{ ...tileLabel, ...(label.length > 4 ? { fontSize: 13 } : null) }}>
+      <span style={{ ...tileLabel, ...(label.length > 4 ? { fontSize: 16 } : null) }}>
         {label}
       </span>
-      <span style={count > 0 ? countBadge : countBadgeZero}>{count}</span>
+      <span style={count > 0 ? countBadge : countBadgeZero}>
+        {count} {count === 1 ? "pedido" : "pedidos"}
+      </span>
     </button>
   );
 }
@@ -309,12 +307,13 @@ const main: CSSProperties = {
   display: "flex",
   flexDirection: "column",
   gap: 28,
-  padding: "40px 32px",
+  padding: "48px 32px",
   maxWidth: 1100,
   width: "100%",
   margin: "0 auto",
   boxSizing: "border-box",
-  alignItems: "flex-start",
+  alignItems: "center",
+  justifyContent: "center",
 };
 
 const lead: CSSProperties = {
@@ -322,13 +321,16 @@ const lead: CSSProperties = {
   fontSize: 14,
   color: "var(--text-secondary)",
   lineHeight: 1.5,
+  textAlign: "center",
+  maxWidth: 640,
 };
 
 const grid: CSSProperties = {
   display: "grid",
-  gridTemplateColumns: "repeat(auto-fill, minmax(120px, 1fr))",
-  gap: 10,
+  gridTemplateColumns: "repeat(auto-fit, minmax(150px, 190px))",
+  gap: 16,
   width: "100%",
+  justifyContent: "center",
 };
 
 const gridHint: CSSProperties = {
@@ -396,19 +398,23 @@ const modeTabCountOn: CSSProperties = {
   color: "var(--info-text)",
 };
 
+/** Mesmo look dos cards da home (radius 16, hover com lift via
+    .berzerk-module-card) — pedido do Victor: replicar o estilo aqui. */
 const tile: CSSProperties = {
   position: "relative",
   display: "flex",
   flexDirection: "column",
   alignItems: "center",
   justifyContent: "center",
-  gap: 8,
-  padding: "22px 0",
+  gap: 12,
+  padding: "30px 0 26px",
   background: "var(--bg-card)",
   border: "1px solid var(--border)",
-  borderRadius: 12,
+  borderRadius: 16,
   color: "var(--text-secondary)",
   cursor: "pointer",
+  transition: "background 160ms, border-color 160ms, transform 160ms",
+  fontFamily: "inherit",
 };
 
 const tileOn: CSSProperties = {
@@ -419,9 +425,12 @@ const tileOn: CSSProperties = {
 };
 
 const tileLabel: CSSProperties = {
-  fontFamily: "var(--font-mono)",
-  fontSize: 22,
-  fontWeight: 700,
+  fontFamily: "var(--font-display)",
+  fontSize: 36,
+  fontWeight: 400,
+  letterSpacing: 1,
+  lineHeight: 1,
+  color: "var(--text)",
 };
 
 const countBadge: CSSProperties = {

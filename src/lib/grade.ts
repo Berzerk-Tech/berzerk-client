@@ -6,6 +6,11 @@ export type GradeEntry = {
 /**
  * Parseia texto de grade tipo "0PP|66P|134M|200G|133GG|63XG|0XXG"
  * em [{size, quantity}]. Ignora entradas com quantidade 0.
+ *
+ * O tamanho aceita dígitos DEPOIS da primeira letra ("10G1" → 10× G1): nem toda
+ * grade segue P|M|G|GG|XG — plus sizes G1/G2/G3 existem e eram descartados
+ * silenciosamente pelo regex antigo (só letras), sumindo da contagem e da
+ * impressão.
  */
 export function parseGrade(grade: string | null | undefined): GradeEntry[] {
   if (!grade) return [];
@@ -15,7 +20,7 @@ export function parseGrade(grade: string | null | undefined): GradeEntry[] {
     .filter(Boolean);
   const result: GradeEntry[] = [];
   for (const part of parts) {
-    const match = part.match(/^(\d+)\s*([A-Za-zÀ-ÿ]+)$/);
+    const match = part.match(/^(\d+)\s*([A-Za-zÀ-ÿ][A-Za-z0-9À-ÿ]*)$/);
     if (!match) continue;
     const qty = parseInt(match[1], 10);
     if (!Number.isFinite(qty) || qty <= 0) continue;
@@ -54,6 +59,9 @@ export const SIZE_ORDER = [
   "G",
   "GG",
   "XG",
+  "G1",
+  "G2",
+  "G3",
   "XGG",
   "XXG",
   "XXXG",
