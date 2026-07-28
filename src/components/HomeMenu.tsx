@@ -96,8 +96,6 @@ export function HomeMenu({ email, stationShortId, onEnter }: Props) {
           <BerzerkLogo style={topLogo} />
           <div style={topBrand}>
             <span style={topWordmark}>BERZERK</span>
-            <span style={topDivider} />
-            <span style={topProduct}>RFID</span>
           </div>
         </div>
         <div style={topRight}>
@@ -151,10 +149,6 @@ export function HomeMenu({ email, stationShortId, onEnter }: Props) {
         <div style={heroBlock}>
           <span style={heroKicker}>― Bem-vindo de volta ―</span>
           <h1 style={heroGreeting}>{firstName(email)}</h1>
-          <p style={heroSubtitle}>
-            O que vamos fazer hoje na estação{" "}
-            <code style={heroStationInline}>{stationShortId}</code>?
-          </p>
         </div>
 
         <StatusStrip
@@ -501,20 +495,6 @@ const topWordmark: CSSProperties = {
   transform: "translateY(1px)",
 };
 
-const topDivider: CSSProperties = {
-  width: 1,
-  height: 16,
-  background: "var(--border-strong)",
-};
-
-const topProduct: CSSProperties = {
-  fontSize: 10,
-  textTransform: "uppercase",
-  letterSpacing: 3,
-  color: "var(--text-secondary)",
-  fontWeight: 600,
-};
-
 const topRight: CSSProperties = { display: "flex", alignItems: "center", gap: 10 };
 
 const topUser: CSSProperties = {
@@ -614,23 +594,6 @@ const heroGreeting: CSSProperties = {
   color: "var(--text)",
   letterSpacing: 1,
   lineHeight: 1,
-};
-
-const heroSubtitle: CSSProperties = {
-  margin: 0,
-  marginTop: 4,
-  fontSize: 14,
-  color: "var(--text-secondary)",
-};
-
-const heroStationInline: CSSProperties = {
-  fontFamily: "var(--font-mono)",
-  fontSize: 12,
-  background: "var(--bg-input)",
-  padding: "1px 7px",
-  borderRadius: 4,
-  border: "1px solid var(--border)",
-  color: "var(--text)",
 };
 
 // --- Status strip ---

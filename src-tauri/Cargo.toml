@@ -1,14 +1,14 @@
 [package]
-name = "berzerk-rfid"
-version = "0.2.6"
-description = "Berzerk RFID — estação industrial de etiquetagem e expedição"
+name = "berzerk-client"
+version = "0.3.0"
+description = "Berzerk Client — estação industrial de etiquetagem e expedição"
 authors = ["Berzerk Tech"]
 edition = "2021"
 
 [lib]
 # Sufixo `_lib` é workaround obrigatório no Windows pra lib name não
 # bater com bin name (cargo issue #8519).
-name = "berzerk_rfid_lib"
+name = "berzerk_client_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 [build-dependencies]

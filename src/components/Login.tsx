@@ -38,11 +38,6 @@ export function Login() {
         <header style={brandStack}>
           <BerzerkLogo style={logoStyle} />
           <h1 style={wordmark}>BERZERK</h1>
-          <div style={taglineRow}>
-            <span style={taglineDot} />
-            <span style={tagline}>RFID</span>
-            <span style={taglineDot} />
-          </div>
         </header>
 
         <section style={authSection}>
@@ -164,27 +159,6 @@ const wordmark: CSSProperties = {
   letterSpacing: 2,
   lineHeight: 1,
   color: "var(--text)",
-};
-
-const taglineRow: CSSProperties = {
-  display: "flex",
-  alignItems: "center",
-  gap: 10,
-  marginTop: 4,
-};
-
-const taglineDot: CSSProperties = {
-  width: 24,
-  height: 1,
-  background: "var(--border-strong)",
-};
-
-const tagline: CSSProperties = {
-  fontSize: 11,
-  letterSpacing: 5,
-  textTransform: "uppercase",
-  color: "var(--text-secondary)",
-  fontWeight: 600,
 };
 
 const authSection: CSSProperties = {

@@ -1,4 +1,4 @@
-# Berzerk RFID
+# Berzerk Client
 
 > Estação industrial onde produtos da Berzerk recebem identidade RFID
 > e são despachados. Substitui o antigo "Print Station" — o escopo
@@ -18,7 +18,7 @@ Login restrito a contas Google Workspace `@berzerk.com.br`.
 
 Tempo total: ~3 minutos por PC.
 
-1. Baixar o instalador mais recente: [latest release](https://github.com/Berzerk-Tech/berzerk-rfid/releases/latest) → `berzerk-rfid_*_x64-setup.exe`.
+1. Baixar o instalador mais recente: [latest release](https://github.com/Berzerk-Tech/berzerk-client/releases/latest) → `Berzerk.Client_*_x64-setup.exe`.
 
 2. Executar o `.exe`. Na primeira vez, o Windows SmartScreen vai bloquear com a mensagem **"O Windows protegeu seu PC"**:
    - Clicar em **"Mais informações"**
@@ -26,7 +26,7 @@ Tempo total: ~3 minutos por PC.
 
    Isso aparece porque o app ainda não tem certificado de assinatura de código do Windows. Acontece **uma única vez por PC** — após instalado, abre normal.
 
-3. Seguir o instalador (Next, Next, Install). O app é instalado em `%LOCALAPPDATA%\Programs\berzerk-rfid\` e adicionado ao Menu Iniciar.
+3. Seguir o instalador (Next, Next, Install). O app é instalado em `%LOCALAPPDATA%\Programs\Berzerk Client\` e adicionado ao Menu Iniciar.
 
 4. Abrir o app pelo atalho do Menu Iniciar. Clicar em **"Entrar com Google"** e logar com sua conta `@berzerk.com.br`.
 
@@ -99,8 +99,8 @@ Requisitos:
 - **Visual Studio Build Tools** com workload "Desktop development with C++"
 
 ```powershell
-git clone git@github.com:Berzerk-Tech/berzerk-rfid.git
-cd berzerk-rfid
+git clone git@github.com:Berzerk-Tech/berzerk-client.git
+cd berzerk-client
 cp .env.example .env
 # Editar .env com VITE_SUPABASE_PUBLISHABLE_KEY (chave anon pública)
 
@@ -147,9 +147,9 @@ git push --follow-tags
 
 GitHub Actions builda em ~7min, assina com a chave privada Ed25519, publica release com:
 
-- `berzerk-rfid_0.X.Y_x64-setup.exe` — instalador NSIS pros operadores
-- `berzerk-rfid_0.X.Y_x64-setup.nsis.zip` — bundle pro updater
-- `berzerk-rfid_0.X.Y_x64-setup.nsis.zip.sig` — assinatura Ed25519
+- `berzerk-client_0.X.Y_x64-setup.exe` — instalador NSIS pros operadores
+- `berzerk-client_0.X.Y_x64-setup.nsis.zip` — bundle pro updater
+- `berzerk-client_0.X.Y_x64-setup.nsis.zip.sig` — assinatura Ed25519
 - `latest.json` — manifest que o updater consulta
 
 PCs instalados pegam a atualização sozinhos na próxima abertura.

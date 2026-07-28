@@ -82,7 +82,7 @@ jobs:
           VITE_SEPARACAO_WS_URL: ${{ secrets.VITE_SEPARACAO_WS_URL }}
         with:
           tagName: ${{ github.ref_name }}
-          releaseName: "Berzerk RFID v__VERSION__"
+          releaseName: "Berzerk Client v__VERSION__"
           releaseBody: |
             Auto-update vai pegar essa versão automaticamente nas próximas aberturas do app.
 
