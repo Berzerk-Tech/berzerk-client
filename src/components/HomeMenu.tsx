@@ -7,6 +7,7 @@ import {
 } from "react";
 import { supabase } from "../lib/supabase";
 import { getStoredTheme, setTheme, type Theme } from "../lib/theme";
+import { getDeviceConfig } from "../lib/devices";
 import { getMe, canOperateSeparacao } from "../services/orders";
 import { BerzerkLogo } from "./BerzerkLogo";
 import { AmbientBackground } from "./AmbientBackground";
@@ -30,6 +31,7 @@ export function HomeMenu({ email, onEnter }: Props) {
   // Gating da Separação: mostra o card a menos que o backend negue explicitamente
   // a permissão. Falha de rede (API fora) NÃO esconde — segue mostrando (dev).
   const [separacaoAllowed, setSeparacaoAllowed] = useState(true);
+  const devices = getDeviceConfig();
 
   useEffect(() => {
     let alive = true;
@@ -56,6 +58,27 @@ export function HomeMenu({ email, onEnter }: Props) {
       <AmbientBackground />
 
       <header style={topBar}>
+        {/* Status dos periféricos saiu do meio da tela pra cá (faxina visual):
+            informa sem poluir; clique abre as Configurações. */}
+        <div style={topLeft}>
+          <HwChip
+            label="Impressora"
+            tone={devices.printer ? "ok" : "warn"}
+            title={devices.printer ? "Impressora configurada" : "Impressora não configurada"}
+            onClick={() => onEnter("settings")}
+          />
+          <HwChip
+            label="Leitor"
+            tone={devices.reader.mode === "direct-usb" ? "ok" : "neutral"}
+            title={
+              devices.reader.mode === "via-proxy"
+                ? "Leitor RFID via proxy HTTPS"
+                : "Leitor RFID direto"
+            }
+            onClick={() => onEnter("settings")}
+          />
+        </div>
+
         <BerzerkLogo style={topLogoCenter} />
 
         <div style={topRight}>
@@ -89,7 +112,6 @@ export function HomeMenu({ email, onEnter }: Props) {
         <div style={cardsGrid}>
           <ModuleCard
             label="Impressão"
-            tagline="Gerar tags RFID"
             description="Pra cada lote em produção, lê os EANs e imprime as etiquetas identificadoras (RFID)"
             icon={<IconPrinter />}
             iconBg="var(--info-bg)"
@@ -99,7 +121,6 @@ export function HomeMenu({ email, onEnter }: Props) {
           />
           <ModuleCard
             label="Separação"
-            tagline="Separar pedidos"
             description="Escolhe a fila (tamanho ou mistos), puxa o próximo pedido e confere as peças pelo leitor RFID"
             icon={<IconBox />}
             iconBg="var(--info-bg)"
@@ -109,7 +130,6 @@ export function HomeMenu({ email, onEnter }: Props) {
           />
           <ModuleCard
             label="Expedição"
-            tagline="Despachar pedidos"
             description="Bipa etiqueta, identifica pedido, imprime DANFE automática"
             icon={<IconReceipt />}
             iconBg="var(--warning-bg)"
@@ -137,11 +157,38 @@ function firstName(email: string): string {
 }
 
 // ============================================================
-// ModuleCard — card de módulo
+// HwChip — status compacto de periférico na barra superior
+// ============================================================
+function HwChip({
+  label,
+  tone,
+  title,
+  onClick,
+}: {
+  label: string;
+  tone: "ok" | "warn" | "neutral";
+  title: string;
+  onClick: () => void;
+}) {
+  const dotColor =
+    tone === "ok"
+      ? "var(--success-dot)"
+      : tone === "warn"
+        ? "var(--warning-dot)"
+        : "var(--text-muted)";
+  return (
+    <button type="button" onClick={onClick} style={hwChip} className="berzerk-icon-btn" title={title}>
+      <span style={{ ...hwDot, background: dotColor }} />
+      {label}
+    </button>
+  );
+}
+
+// ============================================================
+// ModuleCard — card de módulo (grade horizontal, texto enxuto)
 // ============================================================
 function ModuleCard({
   label,
-  tagline,
   description,
   icon,
   iconBg,
@@ -150,7 +197,6 @@ function ModuleCard({
   status,
 }: {
   label: string;
-  tagline: string;
   description: string;
   icon: ReactNode;
   iconBg: string;
@@ -160,15 +206,16 @@ function ModuleCard({
 }) {
   const statusInfo =
     status === "ready"
-      ? { label: "Operacional", dot: "var(--success-dot)", text: "var(--success-text)" }
+      ? { label: "Operacional", dot: "var(--success-dot)" }
       : status === "preview"
-        ? { label: "Preview", dot: "var(--info-text)", text: "var(--info-text)" }
+        ? { label: "Preview", dot: "var(--info-text)" }
         : status === "offline"
-          ? { label: "Offline", dot: "var(--danger-text)", text: "var(--danger-text)" }
-          : { label: "Em breve", dot: "var(--warning-dot)", text: "var(--warning-text)" };
+          ? { label: "Offline", dot: "var(--danger-text)" }
+          : { label: "Em breve", dot: "var(--warning-dot)" };
 
   return (
     <button onClick={onClick} style={moduleCard} className="berzerk-module-card">
+      {/* Status virou só a bolinha no canto — hover mostra o nome. */}
       <span
         style={{ ...statusDotCorner, background: statusInfo.dot }}
         title={statusInfo.label}
@@ -179,12 +226,11 @@ function ModuleCard({
       </div>
 
       <div style={cardBody}>
-        <span style={cardTagline}>{tagline}</span>
         <h3 style={cardLabel}>{label}</h3>
         <p style={cardDesc}>{description}</p>
       </div>
 
-      <div style={cardRight}>
+      <div style={cardFooter}>
         <span style={cardCta} className="berzerk-arrow">
           Abrir →
         </span>
@@ -315,7 +361,9 @@ const topBar: CSSProperties = {
   gap: 16,
 };
 
-/** Só o lumberjack, centralizado — sem wordmark (pedido do Leonardo). */
+const topLeft: CSSProperties = { display: "flex", alignItems: "center", gap: 8 };
+
+/** Só o lumberjack, centralizado — sem wordmark. */
 const topLogoCenter: CSSProperties = {
   position: "absolute",
   left: "50%",
@@ -325,12 +373,24 @@ const topLogoCenter: CSSProperties = {
   color: "var(--text)",
 };
 
-const topRight: CSSProperties = {
-  display: "flex",
+const topRight: CSSProperties = { display: "flex", alignItems: "center", gap: 10 };
+
+const hwChip: CSSProperties = {
+  display: "inline-flex",
   alignItems: "center",
-  gap: 10,
-  marginLeft: "auto",
+  gap: 7,
+  padding: "6px 12px",
+  background: "transparent",
+  border: "1px solid var(--border)",
+  borderRadius: 999,
+  color: "var(--text-secondary)",
+  cursor: "pointer",
+  fontSize: 11,
+  fontWeight: 600,
+  transition: "background 120ms, color 120ms, border-color 120ms",
 };
+
+const hwDot: CSSProperties = { width: 7, height: 7, borderRadius: "50%" };
 
 const iconBtn: CSSProperties = {
   display: "flex",
@@ -353,11 +413,11 @@ const mainCol: CSSProperties = {
   flex: 1,
   display: "flex",
   flexDirection: "column",
-  alignItems: "stretch",
-  justifyContent: "flex-start",
-  padding: "36px 32px",
-  gap: 24,
-  maxWidth: 860,
+  alignItems: "center",
+  justifyContent: "center",
+  padding: "48px 32px",
+  gap: 36,
+  maxWidth: 1280,
   width: "100%",
   margin: "0 auto",
   boxSizing: "border-box",
@@ -368,14 +428,14 @@ const mainCol: CSSProperties = {
 const heroBlock: CSSProperties = {
   display: "flex",
   flexDirection: "column",
-  alignItems: "flex-start",
+  alignItems: "center",
   gap: 6,
-  textAlign: "left",
+  textAlign: "center",
 };
 
 const heroKicker: CSSProperties = {
-  fontSize: 10,
-  letterSpacing: 3,
+  fontSize: 11,
+  letterSpacing: 4,
   textTransform: "uppercase",
   color: "var(--text-muted)",
   fontWeight: 600,
@@ -384,28 +444,28 @@ const heroKicker: CSSProperties = {
 const heroGreeting: CSSProperties = {
   margin: 0,
   fontFamily: "var(--font-display)",
-  fontSize: 40,
+  fontSize: 56,
   fontWeight: 400,
   color: "var(--text)",
   letterSpacing: 1,
   lineHeight: 1,
 };
 
-// --- Cards (empilhados, largura cheia — um módulo por linha) ---
+// --- Cards ---
 
 const cardsGrid: CSSProperties = {
-  display: "flex",
-  flexDirection: "column",
-  gap: 14,
+  display: "grid",
+  gridTemplateColumns: "repeat(3, 1fr)",
+  gap: 20,
   width: "100%",
 };
 
 const moduleCard: CSSProperties = {
   display: "flex",
-  flexDirection: "row",
-  alignItems: "center",
-  gap: 22,
-  padding: "24px 26px",
+  flexDirection: "column",
+  alignItems: "stretch",
+  gap: 20,
+  padding: 26,
   background: "var(--bg-card)",
   border: "1px solid var(--border)",
   borderRadius: 16,
@@ -413,18 +473,28 @@ const moduleCard: CSSProperties = {
   textAlign: "left",
   color: "var(--text)",
   transition: "background 160ms, border-color 160ms, transform 160ms",
+  minHeight: 230,
   fontFamily: "inherit",
+};
+
+/** Status do módulo: só a bolinha no canto superior direito do card. */
+const statusDotCorner: CSSProperties = {
+  position: "absolute",
+  top: 16,
+  right: 16,
+  width: 8,
+  height: 8,
+  borderRadius: "50%",
 };
 
 const cardIconWrap: CSSProperties = {
   width: 60,
   height: 60,
-  borderRadius: 14,
+  borderRadius: 15,
   display: "grid",
   placeItems: "center",
   border: "1px solid",
   borderColor: "transparent",
-  flexShrink: 0,
 };
 
 const cardIconInner: CSSProperties = {
@@ -439,46 +509,30 @@ const cardBody: CSSProperties = {
   flex: 1,
 };
 
-const cardTagline: CSSProperties = {
-  fontSize: 10,
-  letterSpacing: 2.5,
-  textTransform: "uppercase",
-  color: "var(--text-muted)",
-  fontWeight: 700,
-};
-
 const cardLabel: CSSProperties = {
   margin: 0,
   fontSize: 24,
   fontWeight: 700,
-  letterSpacing: -0.3,
+  letterSpacing: -0.4,
   color: "var(--text)",
   lineHeight: 1.1,
 };
 
+/** Descrição apagadinha de propósito — o operador diário não precisa reler. */
 const cardDesc: CSSProperties = {
   margin: 0,
-  fontSize: 13,
-  color: "var(--text-secondary)",
+  fontSize: 12.5,
+  color: "var(--text-muted)",
   lineHeight: 1.55,
 };
 
-const cardRight: CSSProperties = {
+const cardFooter: CSSProperties = {
   display: "flex",
-  flexDirection: "column",
-  alignItems: "flex-end",
-  gap: 12,
-  flexShrink: 0,
-};
-
-/** Status do módulo virou só a bolinha no canto (hover mostra o nome). */
-const statusDotCorner: CSSProperties = {
-  position: "absolute",
-  top: 14,
-  right: 14,
-  width: 8,
-  height: 8,
-  borderRadius: "50%",
+  alignItems: "center",
+  justifyContent: "flex-end",
+  paddingTop: 14,
+  borderTop: "1px solid var(--border)",
+  marginTop: "auto",
 };
 
 const cardCta: CSSProperties = {
@@ -510,4 +564,3 @@ const signOutBtn: CSSProperties = {
   fontWeight: 600,
   transition: "color 160ms",
 };
-
