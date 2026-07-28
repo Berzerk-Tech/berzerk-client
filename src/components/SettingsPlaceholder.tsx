@@ -573,7 +573,7 @@ function IprintCard() {
         />
       </Field>
 
-      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 14 }}>
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 22 }}>
         <Field label="Código Empresa" hint="Path /gerarRFID/{empresa}/{filial}">
           <input
             type="number"
@@ -603,7 +603,7 @@ function IprintCard() {
         </Field>
       </div>
 
-      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 14 }}>
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 22 }}>
         <Field label="Empresa origem" hint="Movimentação">
           <input
             type="number"
@@ -938,7 +938,9 @@ const input: CSSProperties = {
   fontFamily: "var(--font-mono)",
   background: "var(--bg-input)",
   color: "var(--text)",
-  border: "1px solid var(--border)",
+  // border-strong de propósito: o fundo do input é quase igual ao do card,
+  // sem uma borda visível o operador não acha onde digitar.
+  border: "1px solid var(--border-strong)",
   borderRadius: 8,
   boxSizing: "border-box",
   transition: "border-color 120ms",

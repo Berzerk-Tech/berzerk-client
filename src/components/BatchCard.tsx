@@ -464,19 +464,22 @@ const discardBtn: CSSProperties = {
   cursor: "pointer",
 };
 
+/** Outline em vez de branco sólido: com um botão por linha, o branco roubava a
+    tela inteira — o destaque fica pras ações globais e pro estado do lote. */
 const printBtn: CSSProperties = {
   padding: "9px 16px",
   fontSize: 13,
   fontWeight: 600,
-  border: 0,
+  border: "1px solid var(--border-strong)",
   borderRadius: 8,
-  background: "var(--accent)",
-  color: "var(--accent-text)",
+  background: "transparent",
+  color: "var(--text)",
   cursor: "pointer",
 };
 
 const printBtnDisabled: CSSProperties = {
   ...printBtn,
+  border: "1px solid var(--border)",
   background: "var(--bg-input)",
   color: "var(--text-muted)",
   cursor: "not-allowed",

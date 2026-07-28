@@ -71,6 +71,9 @@ function statusOfStep(state: FlowState, step: Step): StepStatus {
 
 export function NotaFiscalPlaceholder({ onBack }: Props) {
   const [state, setState] = useState<FlowState>({ kind: "idle" });
+  // Último pedido despachado — o "PRONTO" mostra o resumo como feedback visual
+  // de que o despacho anterior fechou de verdade.
+  const [lastSealed, setLastSealed] = useState<MockOrder | null>(null);
   const [scan, setScan] = useState("");
   const [packingProgress, setPackingProgress] = useState(0);
   const [prefetch, setPrefetch] = useState<Prefetch | null>(null);
@@ -79,6 +82,10 @@ export function NotaFiscalPlaceholder({ onBack }: Props) {
   // EPCs já vistos nesta sessão — evita re-disparar fluxo se a mesa relê
   // o mesmo pedido (que ainda tá fisicamente em cima dela)
   const processedEpcs = useRef<Set<string>>(new Set());
+
+  useEffect(() => {
+    if (state.kind === "sealed") setLastSealed(state.order);
+  }, [state]);
 
   // Foco automático — input fica vivo em quase tudo (exceto processamento ativo)
   useEffect(() => {
@@ -246,6 +253,7 @@ export function NotaFiscalPlaceholder({ onBack }: Props) {
           state={state}
           packingProgress={packingProgress}
           prefetch={prefetch}
+          lastSealed={lastSealed}
           onSeal={handleSeal}
           onAbort={handleAbort}
         />
@@ -324,12 +332,14 @@ function StageHero({
   state,
   packingProgress,
   prefetch,
+  lastSealed,
   onSeal,
   onAbort,
 }: {
   state: FlowState;
   packingProgress: number;
   prefetch: Prefetch | null;
+  lastSealed: MockOrder | null;
   onSeal: () => void;
   onAbort: () => void;
 }) {
@@ -339,6 +349,13 @@ function StageHero({
         <div style={{ ...heroAccent, background: "var(--success-dot)" }} />
         <h1 style={heroDisplay}>PRONTO</h1>
         <p style={heroHint}>Coloque o próximo pedido na mesa</p>
+        {lastSealed && (
+          <p style={heroLastSealed}>
+            Último despacho: <strong>{lastSealed.number}</strong> ·{" "}
+            {lastSealed.itemCount} {lastSealed.itemCount === 1 ? "item" : "itens"} ·{" "}
+            {lastSealed.customer}
+          </p>
+        )}
       </div>
     );
   }
@@ -750,6 +767,17 @@ const heroHint: CSSProperties = {
   margin: 0,
   fontSize: 14,
   color: "var(--text-secondary)",
+};
+
+const heroLastSealed: CSSProperties = {
+  margin: 0,
+  marginTop: 10,
+  fontSize: 13,
+  color: "var(--text-muted)",
+  padding: "8px 16px",
+  background: "var(--bg-card)",
+  border: "1px solid var(--border)",
+  borderRadius: 999,
 };
 
 const heroEpc: CSSProperties = {

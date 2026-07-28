@@ -5,6 +5,7 @@ import {
   useState,
   type CSSProperties,
   type ReactNode,
+  type SVGProps,
 } from "react";
 import { BackButton } from "./BackButton";
 import { AmbientBackground } from "./AmbientBackground";
@@ -467,15 +468,12 @@ function OrderView({
 
       {offSizeItems.length > 0 && (
         <>
-          <div style={sizeDivider}>
-            <span style={sizeDividerLine} />
-            <span style={sizeDividerText}>
-              ⚠ {offSizeItems.length}{" "}
-              {offSizeItems.length === 1
-                ? "item de tamanho diferente"
-                : "itens de tamanho diferente"}
-            </span>
-            <span style={sizeDividerLine} />
+          <div style={sizeBanner}>
+            ⚠{" "}
+            {offSizeItems.length === 1
+              ? "1 item de tamanho diferente neste pedido"
+              : `${offSizeItems.length} itens de tamanho diferente neste pedido`}{" "}
+            — confira antes de concluir
           </div>
           <div style={cardsGrid}>
             {offSizeItems.map((it) => (
@@ -525,7 +523,10 @@ function ItemCard({
         {item.imagemUrl ? (
           <img src={item.imagemUrl} alt="" style={cardImage} loading="lazy" />
         ) : (
-          <div style={cardImageEmpty}>sem imagem</div>
+          <div style={cardImageEmpty}>
+            <IconShirt style={emptyShirtIcon} />
+            sem imagem
+          </div>
         )}
         <span style={item.quantidade > 1 ? qtyBadgeMulti : qtyBadge}>x{item.quantidade}</span>
         <span style={checkRing(ok)}>{ok ? "✓" : ""}</span>
@@ -547,6 +548,16 @@ function ItemCard({
         </div>
       </div>
     </div>
+  );
+}
+
+/** Camiseta em contorno pro placeholder de imagem — "sem imagem" deixa de
+    parecer erro de carregamento. */
+function IconShirt(props: SVGProps<SVGSVGElement>) {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" {...props}>
+      <path d="M20.38 3.46 16 2a4 4 0 0 1-8 0L3.62 3.46a2 2 0 0 0-1.34 2.23l.58 3.47a1 1 0 0 0 .99.84H6v10a2 2 0 0 0 2 2h8a2 2 0 0 0 2-2V10h2.15a1 1 0 0 0 .99-.84l.58-3.47a2 2 0 0 0-1.34-2.23z" />
+    </svg>
   );
 }
 
@@ -932,10 +943,13 @@ const progressBadge: CSSProperties = {
   border: "1px solid var(--border)",
 };
 
+/** auto-fit + largura máxima + centralizado: pedido de 2 itens não deixa a
+    direita da tela morta (cards ficam no meio, tamanho estável). */
 const cardsGrid: CSSProperties = {
   display: "grid",
-  gridTemplateColumns: "repeat(auto-fill, minmax(200px, 1fr))",
+  gridTemplateColumns: "repeat(auto-fit, minmax(200px, 250px))",
   gap: 14,
+  justifyContent: "center",
 };
 
 const card: CSSProperties = {
@@ -972,13 +986,18 @@ const cardImage: CSSProperties = {
 const cardImageEmpty: CSSProperties = {
   width: "100%",
   height: "100%",
-  display: "grid",
-  placeItems: "center",
+  display: "flex",
+  flexDirection: "column",
+  alignItems: "center",
+  justifyContent: "center",
+  gap: 10,
   fontSize: 11,
   letterSpacing: 1,
   textTransform: "uppercase",
   color: "var(--text-faint)",
 };
+
+const emptyShirtIcon: CSSProperties = { width: 38, height: 38, opacity: 0.6 };
 
 const qtyBadge: CSSProperties = {
   position: "absolute",
@@ -1078,24 +1097,19 @@ const sizeChipOff: CSSProperties = {
   border: "1px solid var(--info-border)",
 };
 
-const sizeDivider: CSSProperties = {
-  display: "flex",
-  alignItems: "center",
-  gap: 14,
-  margin: "4px 0",
-};
-
-const sizeDividerLine: CSSProperties = {
-  flex: 1,
-  height: 1,
-  background: "var(--info-border)",
-};
-
-const sizeDividerText: CSSProperties = {
-  fontSize: 13,
-  fontWeight: 700,
+/** Alerta de grade mista: banner de verdade, não texto solto — o operador
+    precisa bater o olho e ver que tem tamanho diferente no pedido. */
+const sizeBanner: CSSProperties = {
+  width: "100%",
+  boxSizing: "border-box",
+  padding: "11px 16px",
+  background: "var(--info-bg)",
+  border: "1px solid var(--info-border)",
+  borderRadius: 10,
   color: "var(--info-text)",
-  whiteSpace: "nowrap",
+  fontSize: 14,
+  fontWeight: 700,
+  textAlign: "center",
 };
 
 const actionsRow: CSSProperties = {
@@ -1105,18 +1119,27 @@ const actionsRow: CSSProperties = {
   marginTop: 8,
 };
 
+/** Ação principal: verde sólido de alto contraste. */
 const primaryBtn: CSSProperties = {
   padding: "13px 24px",
-  background: "var(--success-bg)",
-  color: "var(--success-text)",
-  border: "1px solid var(--success-border)",
+  background: "var(--success-dot)",
+  color: "#04150c",
+  border: "1px solid var(--success-dot)",
   borderRadius: 10,
   cursor: "pointer",
   fontSize: 15,
-  fontWeight: 700,
+  fontWeight: 800,
 };
 
-const primaryBtnDisabled: CSSProperties = { ...primaryBtn, opacity: 0.5, cursor: "not-allowed" };
+/** Estado de espera ("Aguardando leitura…"): verde suave, mas legível — não some. */
+const primaryBtnDisabled: CSSProperties = {
+  ...primaryBtn,
+  background: "var(--success-bg)",
+  border: "1px solid var(--success-border)",
+  color: "var(--success-text)",
+  cursor: "not-allowed",
+  fontWeight: 700,
+};
 
 const ghostBtn: CSSProperties = {
   padding: "13px 20px",

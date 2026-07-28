@@ -441,15 +441,23 @@ const countBadgeZero: CSSProperties = {
   border: "1px solid var(--border)",
 };
 
+/** Ação principal: verde sólido de alto contraste (galpão tem monitor com brilho baixo). */
 const startBtn: CSSProperties = {
   padding: "14px 28px",
-  background: "var(--success-bg)",
-  color: "var(--success-text)",
-  border: "1px solid var(--success-border)",
+  background: "var(--success-dot)",
+  color: "#04150c",
+  border: "1px solid var(--success-dot)",
   borderRadius: 10,
   cursor: "pointer",
   fontSize: 15,
-  fontWeight: 700,
+  fontWeight: 800,
 };
 
-const startBtnDisabled: CSSProperties = { ...startBtn, opacity: 0.5, cursor: "not-allowed" };
+const startBtnDisabled: CSSProperties = {
+  ...startBtn,
+  background: "var(--bg-input)",
+  border: "1px solid var(--border)",
+  color: "var(--text-muted)",
+  cursor: "not-allowed",
+  fontWeight: 700,
+};
