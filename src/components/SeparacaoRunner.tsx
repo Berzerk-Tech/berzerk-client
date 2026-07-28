@@ -9,6 +9,7 @@ import {
 } from "react";
 import { BackButton } from "./BackButton";
 import { AmbientBackground } from "./AmbientBackground";
+import { OperatorChip } from "./OperatorChip";
 import { useRfid } from "../contexts/RfidContext";
 import { beepError, beepOk } from "../lib/beep";
 import { subscribeQueueChanged } from "../lib/realtime";
@@ -212,6 +213,7 @@ export function SeparacaoRunner({ title, kicker, claim, emptyHint, queue, onBack
           <span style={kickerStyle}>― {kicker} ―</span>
           <h1 style={titleStyle}>{title}</h1>
         </div>
+        <OperatorChip />
         <MesaStatus
           connected={rfid.connected}
           host={rfid.host}

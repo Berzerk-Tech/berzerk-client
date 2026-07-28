@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState, type CSSProperties } from "react";
-import { compareSizes } from "../lib/grade";
 import { BackButton } from "./BackButton";
 import { AmbientBackground } from "./AmbientBackground";
+import { OperatorChip } from "./OperatorChip";
 import { SeparacaoRunner } from "./SeparacaoRunner";
 import { useRfid } from "../contexts/RfidContext";
 import { ApiError } from "../lib/api";
@@ -11,12 +11,22 @@ import { claimNext, claimNextMixed, getQueueCounts, type QueueCounts } from "../
 type Props = { onBack: () => void };
 
 /**
- * As filas vêm da API (contadores por tamanho): fila zerada some, tamanho novo
- * (G1/G2/G3, etc.) aparece sozinho. A ordem canônica é a mesma da grade de
- * impressão (`lib/grade.ts`) — uma fonte só pro app inteiro.
+ * Filas FIXAS da Separação (regra do Victor): só os 5 tamanhos que existem de
+ * verdade na operação. Tamanhos raros são agrupados — o claim manda a lista de
+ * tamanhos reais do bucket, então nenhum pedido fica órfão:
+ *   PP → fila P;  XXG/G1/G2/G3/qualquer outro → fila XG.
+ * "SEM TAMANHO" fica FORA (pedidos antigos, pré-junho — o corte por data é
+ * feito no nexus).
  */
-function sortSizes(sizes: string[]): string[] {
-  return [...sizes].sort(compareSizes);
+const QUEUES = ["P", "M", "G", "GG", "XG"] as const;
+type Queue = (typeof QUEUES)[number];
+
+function queueFor(sizeKey: string): Queue | null {
+  const s = sizeKey.trim().toUpperCase();
+  if ((QUEUES as readonly string[]).includes(s)) return s as Queue;
+  if (s === "PP") return "P";
+  if (s === "SEM TAMANHO") return null;
+  return "XG";
 }
 
 /** Cada tamanho tem duas abas: Puro (grade normal) e Mistos (grade mista). */
@@ -29,7 +39,12 @@ export function Separacao({ onBack }: Props) {
   const rfid = useRfid();
   const [mode, setMode] = useState<QueueMode>("puro");
   const [selected, setSelected] = useState<Selected>(null);
-  const [confirmed, setConfirmed] = useState<{ size: string; mode: QueueMode } | null>(null);
+  const [confirmed, setConfirmed] = useState<{
+    size: Queue;
+    mode: QueueMode;
+    /** Tamanhos REAIS do bucket no momento do confirm (o claim usa esta lista). */
+    sizes: string[];
+  } | null>(null);
   const [counts, setCounts] = useState<QueueCounts | null>(null);
   const [authError, setAuthError] = useState<string | null>(null);
 
@@ -72,8 +87,8 @@ export function Separacao({ onBack }: Props) {
   const claim = useCallback(() => {
     if (!confirmed) return claimNext([""]);
     return confirmed.mode === "mistos"
-      ? claimNextMixed([confirmed.size])
-      : claimNext([confirmed.size]);
+      ? claimNextMixed(confirmed.sizes)
+      : claimNext(confirmed.sizes);
   }, [confirmed]);
 
   if (confirmed) {
@@ -96,16 +111,29 @@ export function Separacao({ onBack }: Props) {
 
   const recordFor = (m: QueueMode): Record<string, number> =>
     (m === "mistos" ? counts?.mixedBySize : counts?.sizes) ?? {};
-  const countFor = (size: string, m: QueueMode): number => recordFor(m)[size] ?? 0;
-  const totalFor = (m: QueueMode): number =>
-    Object.values(recordFor(m)).reduce((acc, n) => acc + n, 0);
 
-  // Filas visíveis = tamanhos com pedido AGORA na aba ativa (dinâmico, da API).
-  const visibleSizes = sortSizes(
-    Object.keys(recordFor(mode)).filter((s) => countFor(s, mode) > 0),
-  );
-  // Seleção só vale se a fila ainda existe (pode zerar entre um push e outro).
-  const effectiveSelected = selected && visibleSizes.includes(selected) ? selected : null;
+  // Contadores agrupados nas 5 filas fixas (SEM TAMANHO fica de fora do total).
+  const bucketed = (m: QueueMode): Record<Queue, number> => {
+    const out: Record<Queue, number> = { P: 0, M: 0, G: 0, GG: 0, XG: 0 };
+    for (const [k, v] of Object.entries(recordFor(m))) {
+      const q = queueFor(k);
+      if (q) out[q] += v;
+    }
+    return out;
+  };
+  const countFor = (q: Queue, m: QueueMode): number => bucketed(m)[q];
+  const totalFor = (m: QueueMode): number =>
+    Object.values(bucketed(m)).reduce((acc, n) => acc + n, 0);
+
+  /** Tamanhos reais que caem no bucket (pro claim cobrir XXG/G1/G2/G3 etc.). */
+  const sizesForQueue = (q: Queue, m: QueueMode): string[] => {
+    const keys = Object.keys(recordFor(m))
+      .map((k) => k.trim().toUpperCase())
+      .filter((k) => queueFor(k) === q);
+    return Array.from(new Set([q, ...keys]));
+  };
+
+  const effectiveSelected = selected as Queue | null;
 
   return (
     <div style={page}>
@@ -116,6 +144,7 @@ export function Separacao({ onBack }: Props) {
           <span style={kicker}>― Separação ―</span>
           <h1 style={title}>Escolha a fila</h1>
         </div>
+        <OperatorChip />
         <button style={mesaChip} onClick={() => void rfid.reconnect()} title={rfid.host}>
           <span
             style={{
@@ -159,32 +188,33 @@ export function Separacao({ onBack }: Props) {
             ))}
           </div>
           {counts !== null && (
-            <span style={totalHint}>{totalFor("puro") + totalFor("mistos")} pedidos no total</span>
+            <span style={totalHint}>
+              {totalFor("puro") + totalFor("mistos")} pedidos no total
+            </span>
           )}
         </div>
 
-        {counts === null ? (
-          <p style={gridHint}>Carregando filas…</p>
-        ) : visibleSizes.length === 0 ? (
-          <p style={gridHint}>
-            Nenhum pedido pronto na aba {mode === "mistos" ? "Mistos" : "Puro"} agora.
-          </p>
-        ) : (
-          <div style={grid}>
-            {visibleSizes.map((s) => (
-              <QueueTile
-                key={s}
-                label={s}
-                count={countFor(s, mode)}
-                selected={effectiveSelected === s}
-                onClick={() => setSelected((p) => (p === s ? null : s))}
-              />
-            ))}
-          </div>
-        )}
+        <div style={grid}>
+          {QUEUES.map((q) => (
+            <QueueTile
+              key={q}
+              label={q}
+              count={countFor(q, mode)}
+              selected={effectiveSelected === q}
+              onClick={() => setSelected((p) => (p === q ? null : q))}
+            />
+          ))}
+        </div>
 
         <button
-          onClick={() => effectiveSelected && setConfirmed({ size: effectiveSelected, mode })}
+          onClick={() =>
+            effectiveSelected &&
+            setConfirmed({
+              size: effectiveSelected,
+              mode,
+              sizes: sizesForQueue(effectiveSelected, mode),
+            })
+          }
           disabled={!effectiveSelected}
           style={!effectiveSelected ? startBtnDisabled : startBtn}
         >
@@ -220,7 +250,7 @@ function QueueTile({
         ...(wide ? { gridColumn: "span 2" } : null),
       }}
     >
-      <span style={{ ...tileLabel, ...(label.length > 4 ? { fontSize: 16 } : null) }}>
+      <span style={{ ...tileLabel, ...(label.length > 4 ? { fontSize: 20 } : null) }}>
         {label}
       </span>
       <span style={count > 0 ? countBadge : countBadgeZero}>
@@ -325,31 +355,29 @@ const lead: CSSProperties = {
   maxWidth: 640,
 };
 
+/** 5 filas, SEMPRE numa linha só (pedido do Victor) — as colunas encolhem
+    juntas em tela menor em vez de quebrar. */
 const grid: CSSProperties = {
   display: "grid",
-  gridTemplateColumns: "repeat(auto-fit, minmax(150px, 190px))",
-  gap: 16,
+  gridTemplateColumns: "repeat(5, minmax(0, 210px))",
+  gap: 18,
   width: "100%",
   justifyContent: "center",
 };
 
-const gridHint: CSSProperties = {
-  margin: 0,
-  fontSize: 14,
-  color: "var(--text-muted)",
-  padding: "24px 0",
-};
-
+/** Toggle centralizado; total logo abaixo, bem discreto (pedido do Victor/Leo —
+    do lado ele brigava com o layout). */
 const tabsRow: CSSProperties = {
   display: "flex",
+  flexDirection: "column",
   alignItems: "center",
-  gap: 16,
+  gap: 8,
 };
 
 const totalHint: CSSProperties = {
   fontFamily: "var(--font-mono)",
-  fontSize: 12,
-  color: "var(--text-muted)",
+  fontSize: 11,
+  color: "var(--text-faint)",
 };
 
 const modeTabs: CSSProperties = {
@@ -406,8 +434,8 @@ const tile: CSSProperties = {
   flexDirection: "column",
   alignItems: "center",
   justifyContent: "center",
-  gap: 12,
-  padding: "30px 0 26px",
+  gap: 14,
+  padding: "40px 0 34px",
   background: "var(--bg-card)",
   border: "1px solid var(--border)",
   borderRadius: 16,
@@ -426,7 +454,7 @@ const tileOn: CSSProperties = {
 
 const tileLabel: CSSProperties = {
   fontFamily: "var(--font-display)",
-  fontSize: 36,
+  fontSize: 46,
   fontWeight: 400,
   letterSpacing: 1,
   lineHeight: 1,
