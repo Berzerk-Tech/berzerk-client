@@ -9,8 +9,20 @@ import { claimNext, claimNextMixed, getQueueCounts, type QueueCounts } from "../
 
 type Props = { onBack: () => void };
 
-/** Tamanhos atendidos pelas filas. */
-const SIZES = ["PP", "P", "M", "G", "GG", "XG", "XXG"];
+/**
+ * Ordem canônica de exibição das filas. Os tamanhos em si vêm da API (contadores
+ * por tamanho): fila zerada some, tamanho novo (G3, etc.) aparece sozinho.
+ * Tamanho fora desta lista vai pro fim, em ordem alfabética.
+ */
+const SIZE_ORDER = ["PP", "P", "M", "G", "GG", "XG", "XXG", "G1", "G2", "G3", "XGG"];
+
+function sortSizes(sizes: string[]): string[] {
+  const rank = (s: string) => {
+    const i = SIZE_ORDER.indexOf(s);
+    return i === -1 ? SIZE_ORDER.length : i;
+  };
+  return [...sizes].sort((a, b) => rank(a) - rank(b) || a.localeCompare(b));
+}
 
 /** Cada tamanho tem duas abas: Puro (grade normal) e Mistos (grade mista). */
 type QueueMode = "puro" | "mistos";
@@ -81,15 +93,24 @@ export function Separacao({ onBack }: Props) {
             : "Nenhum pedido pronto nessa fila. Tente outra ou aguarde a sincronização."
         }
         claim={claim}
+        queue={{ mode: isMixed ? "total" : "normal", size: confirmed.size }}
         onBack={() => setConfirmed(null)}
       />
     );
   }
 
-  const countFor = (size: string, m: QueueMode): number =>
-    m === "mistos" ? counts?.mixedBySize?.[size] ?? 0 : counts?.sizes?.[size] ?? 0;
+  const recordFor = (m: QueueMode): Record<string, number> =>
+    (m === "mistos" ? counts?.mixedBySize : counts?.sizes) ?? {};
+  const countFor = (size: string, m: QueueMode): number => recordFor(m)[size] ?? 0;
   const totalFor = (m: QueueMode): number =>
-    SIZES.reduce((acc, s) => acc + countFor(s, m), 0);
+    Object.values(recordFor(m)).reduce((acc, n) => acc + n, 0);
+
+  // Filas visíveis = tamanhos com pedido AGORA na aba ativa (dinâmico, da API).
+  const visibleSizes = sortSizes(
+    Object.keys(recordFor(mode)).filter((s) => countFor(s, mode) > 0),
+  );
+  // Seleção só vale se a fila ainda existe (pode zerar entre um push e outro).
+  const effectiveSelected = selected && visibleSizes.includes(selected) ? selected : null;
 
   return (
     <div style={page}>
@@ -129,37 +150,53 @@ export function Separacao({ onBack }: Props) {
           número é quantos pedidos estão prontos agora.
         </p>
 
-        <div style={modeTabs}>
-          {(["puro", "mistos"] as const).map((m) => (
-            <button
-              key={m}
-              onClick={() => setMode(m)}
-              style={mode === m ? modeTabOn : modeTab}
-            >
-              {m === "puro" ? "Puro" : "Mistos"}
-              <span style={mode === m ? modeTabCountOn : modeTabCount}>{totalFor(m)}</span>
-            </button>
-          ))}
+        <div style={tabsRow}>
+          <div style={modeTabs}>
+            {(["puro", "mistos"] as const).map((m) => (
+              <button
+                key={m}
+                onClick={() => setMode(m)}
+                style={mode === m ? modeTabOn : modeTab}
+              >
+                {m === "puro" ? "Puro" : "Mistos"}
+                <span style={mode === m ? modeTabCountOn : modeTabCount}>{totalFor(m)}</span>
+              </button>
+            ))}
+          </div>
+          {counts !== null && (
+            <span style={totalHint}>{totalFor("puro") + totalFor("mistos")} pedidos no total</span>
+          )}
         </div>
 
-        <div style={grid}>
-          {SIZES.map((s) => (
-            <QueueTile
-              key={s}
-              label={s}
-              count={countFor(s, mode)}
-              selected={selected === s}
-              onClick={() => setSelected((p) => (p === s ? null : s))}
-            />
-          ))}
-        </div>
+        {counts === null ? (
+          <p style={gridHint}>Carregando filas…</p>
+        ) : visibleSizes.length === 0 ? (
+          <p style={gridHint}>
+            Nenhum pedido pronto na aba {mode === "mistos" ? "Mistos" : "Puro"} agora.
+          </p>
+        ) : (
+          <div style={grid}>
+            {visibleSizes.map((s) => (
+              <QueueTile
+                key={s}
+                label={s}
+                count={countFor(s, mode)}
+                selected={effectiveSelected === s}
+                onClick={() => setSelected((p) => (p === s ? null : s))}
+              />
+            ))}
+          </div>
+        )}
 
         <button
-          onClick={() => selected && setConfirmed({ size: selected, mode })}
-          disabled={!selected}
-          style={!selected ? startBtnDisabled : startBtn}
+          onClick={() => effectiveSelected && setConfirmed({ size: effectiveSelected, mode })}
+          disabled={!effectiveSelected}
+          style={!effectiveSelected ? startBtnDisabled : startBtn}
         >
-          Começar a separar{selected ? ` — ${selected} ${mode === "mistos" ? "Mistos" : "Puro"}` : ""}
+          Começar a separar
+          {effectiveSelected
+            ? ` — ${effectiveSelected} ${mode === "mistos" ? "Mistos" : "Puro"}`
+            : ""}
         </button>
       </main>
     </div>
@@ -187,7 +224,9 @@ function QueueTile({
         ...(wide ? { gridColumn: "span 2" } : null),
       }}
     >
-      <span style={tileLabel}>{label}</span>
+      <span style={{ ...tileLabel, ...(label.length > 4 ? { fontSize: 13 } : null) }}>
+        {label}
+      </span>
       <span style={count > 0 ? countBadge : countBadgeZero}>{count}</span>
     </button>
   );
@@ -287,9 +326,28 @@ const lead: CSSProperties = {
 
 const grid: CSSProperties = {
   display: "grid",
-  gridTemplateColumns: "repeat(7, minmax(0, 1fr))",
+  gridTemplateColumns: "repeat(auto-fill, minmax(120px, 1fr))",
   gap: 10,
   width: "100%",
+};
+
+const gridHint: CSSProperties = {
+  margin: 0,
+  fontSize: 14,
+  color: "var(--text-muted)",
+  padding: "24px 0",
+};
+
+const tabsRow: CSSProperties = {
+  display: "flex",
+  alignItems: "center",
+  gap: 16,
+};
+
+const totalHint: CSSProperties = {
+  fontFamily: "var(--font-mono)",
+  fontSize: 12,
+  color: "var(--text-muted)",
 };
 
 const modeTabs: CSSProperties = {

@@ -43,6 +43,10 @@ export type Order = {
   items: OrderItem[];
   createdAt: string;
   updatedAt: string;
+  /** Campos enriquecidos (nexus mais novo). Opcionais: API antiga não manda. */
+  clienteNome?: string | null;
+  dataEmissao?: string | null;
+  prioritario?: boolean;
 };
 
 export type ClaimResponse = { order: Order | null };
@@ -69,6 +73,46 @@ export type QueueCounts = {
   /** Mistos por tamanho predominante — aba "Mistos" de cada fila. */
   mixedBySize: Record<string, number>;
 };
+
+/** Entrada da fila (resumo pro card da sidebar; itens completos só no claim). */
+export type QueueListItem = {
+  /** Posição na fila (1-based). */
+  position: number;
+  id: string;
+  numero: string | null;
+  clienteNome: string | null;
+  dataEmissao: string | null;
+  prioritario: boolean;
+  predominantSize: string | null;
+  separationMode: SeparationMode;
+  /** Soma das quantidades dos itens do pedido. */
+  itemCount: number;
+  /** Até 4 URLs de imagem de itens (thumbnails do card). */
+  imagens: string[];
+  createdAt: string;
+};
+
+export type QueueListResponse = { items: QueueListItem[]; total: number };
+
+/** Listagem read-only da fila (sidebar) — mesma ordem do claim. */
+export function getQueueList(params: {
+  mode: SeparationMode;
+  size?: string;
+  /** Busca server-side (numero, cliente, item/EAN/SKU) — indexada no nexus. */
+  q?: string;
+  limit?: number;
+  offset?: number;
+}): Promise<QueueListResponse> {
+  return apiRequest<QueueListResponse>("/separacao/queue", {
+    query: {
+      mode: params.mode,
+      size: params.size,
+      q: params.q || undefined,
+      limit: params.limit?.toString(),
+      offset: params.offset?.toString(),
+    },
+  });
+}
 
 export function getQueueCounts(): Promise<QueueCounts> {
   return apiRequest<QueueCounts>("/separacao/queues");
