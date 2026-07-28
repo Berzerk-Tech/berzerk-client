@@ -5,11 +5,8 @@ import {
   type ReactNode,
   type SVGProps,
 } from "react";
-import { getCurrentWindow } from "@tauri-apps/api/window";
 import { supabase } from "../lib/supabase";
-import { signInWithGoogle } from "../lib/auth";
 import { getStoredTheme, setTheme, type Theme } from "../lib/theme";
-import { getDeviceConfig } from "../lib/devices";
 import { getMe, canOperateSeparacao } from "../services/orders";
 import { BerzerkLogo } from "./BerzerkLogo";
 import { AmbientBackground } from "./AmbientBackground";
@@ -28,13 +25,11 @@ type Props = {
   onEnter: (screen: Screen) => void;
 };
 
-export function HomeMenu({ email, stationShortId, onEnter }: Props) {
+export function HomeMenu({ email, onEnter }: Props) {
   const [theme, setThemeLocal] = useState<Theme>(getStoredTheme());
-  const [isFullscreen, setIsFullscreen] = useState(false);
   // Gating da Separação: mostra o card a menos que o backend negue explicitamente
   // a permissão. Falha de rede (API fora) NÃO esconde — segue mostrando (dev).
   const [separacaoAllowed, setSeparacaoAllowed] = useState(true);
-  const devices = getDeviceConfig();
 
   useEffect(() => {
     let alive = true;
@@ -50,41 +45,10 @@ export function HomeMenu({ email, stationShortId, onEnter }: Props) {
     };
   }, []);
 
-  useEffect(() => {
-    (async () => {
-      try {
-        const fs = await getCurrentWindow().isFullscreen();
-        setIsFullscreen(fs);
-      } catch {
-        /* não-Tauri */
-      }
-    })();
-  }, []);
-
-  // Troca rápida de operador: a máquina é compartilhada, cada operador entra
-  // com a própria conta Google. Encerra a sessão e já abre o seletor de conta
-  // (o fluxo OAuth usa prompt=select_account) — um clique, sem passar pela
-  // tela de login.
-  const switchUser = async () => {
-    await supabase.auth.signOut();
-    await signInWithGoogle();
-  };
-
   const toggleTheme = () => {
     const next: Theme = theme === "dark" ? "light" : "dark";
     setTheme(next);
     setThemeLocal(next);
-  };
-
-  const toggleFullscreen = async () => {
-    try {
-      const win = getCurrentWindow();
-      const fs = await win.isFullscreen();
-      await win.setFullscreen(!fs);
-      setIsFullscreen(!fs);
-    } catch {
-      /* ignore */
-    }
   };
 
   return (
@@ -92,38 +56,9 @@ export function HomeMenu({ email, stationShortId, onEnter }: Props) {
       <AmbientBackground />
 
       <header style={topBar}>
-        <div style={topLeft}>
-          <BerzerkLogo style={topLogo} />
-          <div style={topBrand}>
-            <span style={topWordmark}>BERZERK</span>
-          </div>
-        </div>
+        <BerzerkLogo style={topLogoCenter} />
+
         <div style={topRight}>
-          <span style={topUser}>{email}</span>
-          <button
-            onClick={switchUser}
-            style={switchUserBtn}
-            className="berzerk-text-btn"
-            title="Sair e entrar com outra conta Google"
-          >
-            <IconSwitchUser style={btnIcon} />
-            Trocar usuário
-          </button>
-          <span style={topPipe} />
-          <span style={topStation}>
-            <span style={topStationDot} />
-            <code style={topStationCode}>{stationShortId}</code>
-          </span>
-          <span style={topPipe} />
-          <button
-            onClick={toggleFullscreen}
-            style={iconBtn}
-            className="berzerk-icon-btn"
-            title={isFullscreen ? "Sair de tela cheia" : "Modo tela cheia"}
-            aria-label="Tela cheia"
-          >
-            {isFullscreen ? <IconShrink style={btnIcon} /> : <IconExpand style={btnIcon} />}
-          </button>
           <button
             onClick={toggleTheme}
             style={iconBtn}
@@ -151,12 +86,6 @@ export function HomeMenu({ email, stationShortId, onEnter }: Props) {
           <h1 style={heroGreeting}>{firstName(email)}</h1>
         </div>
 
-        <StatusStrip
-          printerConfigured={!!devices.printer}
-          readerMode={devices.reader.mode}
-          onOpenSettings={() => onEnter("settings")}
-        />
-
         <div style={cardsGrid}>
           <ModuleCard
             label="Impressão"
@@ -176,7 +105,7 @@ export function HomeMenu({ email, stationShortId, onEnter }: Props) {
             iconBg="var(--info-bg)"
             iconColor="var(--info-text)"
             onClick={() => onEnter("separacao")}
-            status={separacaoAllowed ? "preview" : "offline"}
+            status={separacaoAllowed ? "ready" : "offline"}
           />
           <ModuleCard
             label="Expedição"
@@ -205,68 +134,6 @@ function firstName(email: string): string {
   const local = email.split("@")[0] ?? email;
   const first = local.split(".")[0] ?? local;
   return first.charAt(0).toUpperCase() + first.slice(1).toLowerCase();
-}
-
-// ============================================================
-// StatusStrip — barra com status dos dispositivos e atalho settings
-// ============================================================
-function StatusStrip({
-  printerConfigured,
-  readerMode,
-  onOpenSettings,
-}: {
-  printerConfigured: boolean;
-  readerMode: "via-proxy" | "direct-itag" | "direct-usb";
-  onOpenSettings: () => void;
-}) {
-  return (
-    <div style={statusStrip}>
-      <StatusChip
-        label="Impressora"
-        value={printerConfigured ? "Configurada" : "Não configurada"}
-        tone={printerConfigured ? "ok" : "warn"}
-      />
-      <StatusChip
-        label="Leitor RFID"
-        value={readerMode === "via-proxy" ? "via proxy HTTPS" : "direto"}
-        tone={readerMode === "direct-usb" ? "ok" : "neutral"}
-      />
-      <button
-        type="button"
-        onClick={onOpenSettings}
-        style={statusGoSettings}
-        className="berzerk-text-btn"
-      >
-        Configurar →
-      </button>
-    </div>
-  );
-}
-
-function StatusChip({
-  label,
-  value,
-  tone,
-}: {
-  label: string;
-  value: string;
-  tone: "ok" | "warn" | "neutral";
-}) {
-  const dotColor =
-    tone === "ok"
-      ? "var(--success-dot)"
-      : tone === "warn"
-        ? "var(--warning-dot)"
-        : "var(--text-muted)";
-  return (
-    <div style={chipBox}>
-      <span style={{ ...chipDot, background: dotColor }} />
-      <div style={chipBody}>
-        <span style={chipLabel}>{label}</span>
-        <span style={chipValue}>{value}</span>
-      </div>
-    </div>
-  );
 }
 
 // ============================================================
@@ -302,6 +169,11 @@ function ModuleCard({
 
   return (
     <button onClick={onClick} style={moduleCard} className="berzerk-module-card">
+      <span
+        style={{ ...statusDotCorner, background: statusInfo.dot }}
+        title={statusInfo.label}
+      />
+
       <div style={{ ...cardIconWrap, background: iconBg, color: iconColor }}>
         <div style={cardIconInner}>{icon}</div>
       </div>
@@ -312,11 +184,7 @@ function ModuleCard({
         <p style={cardDesc}>{description}</p>
       </div>
 
-      <div style={cardFooter}>
-        <span style={{ ...cardStatus, color: statusInfo.text }}>
-          <span style={{ ...cardStatusDot, background: statusInfo.dot }} />
-          {statusInfo.label}
-        </span>
+      <div style={cardRight}>
         <span style={cardCta} className="berzerk-arrow">
           Abrir →
         </span>
@@ -415,35 +283,6 @@ function IconMoon(props: SVGProps<SVGSVGElement>) {
   );
 }
 
-function IconExpand(props: SVGProps<SVGSVGElement>) {
-  return (
-    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round" {...props}>
-      <polyline points="15 3 21 3 21 9" /><polyline points="9 21 3 21 3 15" />
-      <line x1="21" y1="3" x2="14" y2="10" /><line x1="3" y1="21" x2="10" y2="14" />
-    </svg>
-  );
-}
-
-function IconShrink(props: SVGProps<SVGSVGElement>) {
-  return (
-    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round" {...props}>
-      <polyline points="4 14 10 14 10 20" /><polyline points="20 10 14 10 14 4" />
-      <line x1="14" y1="10" x2="21" y2="3" /><line x1="3" y1="21" x2="10" y2="14" />
-    </svg>
-  );
-}
-
-function IconSwitchUser(props: SVGProps<SVGSVGElement>) {
-  return (
-    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round" {...props}>
-      <circle cx="9" cy="7" r="4" />
-      <path d="M2 21v-2a4 4 0 0 1 4-4h6" />
-      <polyline points="16 11 19 8 22 11" />
-      <path d="M19 8v8" />
-    </svg>
-  );
-}
-
 function IconGear(props: SVGProps<SVGSVGElement>) {
   return (
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round" {...props}>
@@ -476,65 +315,21 @@ const topBar: CSSProperties = {
   gap: 16,
 };
 
-const topLeft: CSSProperties = { display: "flex", alignItems: "center", gap: 14 };
+/** Só o lumberjack, centralizado — sem wordmark (pedido do Leonardo). */
+const topLogoCenter: CSSProperties = {
+  position: "absolute",
+  left: "50%",
+  transform: "translateX(-50%)",
+  width: 46,
+  height: 48,
+  color: "var(--text)",
+};
 
-const topLogo: CSSProperties = { width: 26, height: 28, color: "var(--text)" };
-
-const topBrand: CSSProperties = {
+const topRight: CSSProperties = {
   display: "flex",
   alignItems: "center",
-  gap: 12,
-};
-
-const topWordmark: CSSProperties = {
-  fontFamily: "var(--font-display)",
-  fontSize: 22,
-  letterSpacing: 1,
-  color: "var(--text)",
-  lineHeight: 1,
-  transform: "translateY(1px)",
-};
-
-const topRight: CSSProperties = { display: "flex", alignItems: "center", gap: 10 };
-
-const topUser: CSSProperties = {
-  fontFamily: "var(--font-mono)",
-  fontSize: 11,
-  color: "var(--text-secondary)",
-};
-
-const topPipe: CSSProperties = { width: 1, height: 14, background: "var(--border)" };
-
-const switchUserBtn: CSSProperties = {
-  display: "inline-flex",
-  alignItems: "center",
-  gap: 6,
-  background: "transparent",
-  border: "1px solid var(--border)",
-  borderRadius: 8,
-  color: "var(--text-secondary)",
-  cursor: "pointer",
-  fontSize: 11,
-  fontWeight: 600,
-  padding: "6px 10px",
-  transition: "color 120ms, border-color 120ms",
-};
-
-const topStation: CSSProperties = { display: "inline-flex", alignItems: "center", gap: 7 };
-
-const topStationDot: CSSProperties = {
-  width: 6,
-  height: 6,
-  borderRadius: "50%",
-  background: "var(--success-dot)",
-  boxShadow: "0 0 0 3px var(--success-bg)",
-};
-
-const topStationCode: CSSProperties = {
-  fontFamily: "var(--font-mono)",
-  fontSize: 11,
-  color: "var(--text)",
-  letterSpacing: 0.5,
+  gap: 10,
+  marginLeft: "auto",
 };
 
 const iconBtn: CSSProperties = {
@@ -558,11 +353,11 @@ const mainCol: CSSProperties = {
   flex: 1,
   display: "flex",
   flexDirection: "column",
-  alignItems: "center",
-  justifyContent: "center",
-  padding: "48px 32px",
-  gap: 36,
-  maxWidth: 1280,
+  alignItems: "stretch",
+  justifyContent: "flex-start",
+  padding: "36px 32px",
+  gap: 24,
+  maxWidth: 860,
   width: "100%",
   margin: "0 auto",
   boxSizing: "border-box",
@@ -573,14 +368,14 @@ const mainCol: CSSProperties = {
 const heroBlock: CSSProperties = {
   display: "flex",
   flexDirection: "column",
-  alignItems: "center",
+  alignItems: "flex-start",
   gap: 6,
-  textAlign: "center",
+  textAlign: "left",
 };
 
 const heroKicker: CSSProperties = {
-  fontSize: 11,
-  letterSpacing: 4,
+  fontSize: 10,
+  letterSpacing: 3,
   textTransform: "uppercase",
   color: "var(--text-muted)",
   fontWeight: 600,
@@ -589,90 +384,28 @@ const heroKicker: CSSProperties = {
 const heroGreeting: CSSProperties = {
   margin: 0,
   fontFamily: "var(--font-display)",
-  fontSize: 64,
+  fontSize: 40,
   fontWeight: 400,
   color: "var(--text)",
   letterSpacing: 1,
   lineHeight: 1,
 };
 
-// --- Status strip ---
-
-const statusStrip: CSSProperties = {
-  display: "flex",
-  alignItems: "center",
-  gap: 14,
-  flexWrap: "wrap",
-  justifyContent: "center",
-  width: "100%",
-  maxWidth: 720,
-};
-
-const chipBox: CSSProperties = {
-  display: "flex",
-  alignItems: "center",
-  gap: 10,
-  padding: "10px 14px",
-  background: "var(--bg-card)",
-  border: "1px solid var(--border)",
-  borderRadius: 999,
-};
-
-const chipDot: CSSProperties = {
-  width: 7,
-  height: 7,
-  borderRadius: "50%",
-};
-
-const chipBody: CSSProperties = {
-  display: "flex",
-  flexDirection: "column",
-  gap: 1,
-  lineHeight: 1.2,
-};
-
-const chipLabel: CSSProperties = {
-  fontSize: 9,
-  letterSpacing: 1.5,
-  textTransform: "uppercase",
-  color: "var(--text-muted)",
-  fontWeight: 700,
-};
-
-const chipValue: CSSProperties = {
-  fontSize: 12,
-  color: "var(--text)",
-  fontWeight: 500,
-};
-
-const statusGoSettings: CSSProperties = {
-  background: "transparent",
-  border: 0,
-  color: "var(--text-muted)",
-  cursor: "pointer",
-  fontSize: 11,
-  letterSpacing: 1.5,
-  textTransform: "uppercase",
-  fontWeight: 700,
-  padding: "8px 12px",
-  transition: "color 160ms",
-};
-
-// --- Cards ---
+// --- Cards (empilhados, largura cheia — um módulo por linha) ---
 
 const cardsGrid: CSSProperties = {
-  display: "grid",
-  gridTemplateColumns: "repeat(3, 1fr)",
-  gap: 20,
+  display: "flex",
+  flexDirection: "column",
+  gap: 14,
   width: "100%",
 };
 
 const moduleCard: CSSProperties = {
   display: "flex",
-  flexDirection: "column",
-  alignItems: "stretch",
-  gap: 24,
-  padding: 28,
+  flexDirection: "row",
+  alignItems: "center",
+  gap: 22,
+  padding: "24px 26px",
   background: "var(--bg-card)",
   border: "1px solid var(--border)",
   borderRadius: 16,
@@ -680,23 +413,23 @@ const moduleCard: CSSProperties = {
   textAlign: "left",
   color: "var(--text)",
   transition: "background 160ms, border-color 160ms, transform 160ms",
-  minHeight: 280,
   fontFamily: "inherit",
 };
 
 const cardIconWrap: CSSProperties = {
-  width: 64,
-  height: 64,
-  borderRadius: 16,
+  width: 60,
+  height: 60,
+  borderRadius: 14,
   display: "grid",
   placeItems: "center",
   border: "1px solid",
   borderColor: "transparent",
+  flexShrink: 0,
 };
 
 const cardIconInner: CSSProperties = {
-  width: 30,
-  height: 30,
+  width: 28,
+  height: 28,
 };
 
 const cardBody: CSSProperties = {
@@ -716,9 +449,9 @@ const cardTagline: CSSProperties = {
 
 const cardLabel: CSSProperties = {
   margin: 0,
-  fontSize: 26,
+  fontSize: 24,
   fontWeight: 700,
-  letterSpacing: -0.4,
+  letterSpacing: -0.3,
   color: "var(--text)",
   lineHeight: 1.1,
 };
@@ -727,31 +460,24 @@ const cardDesc: CSSProperties = {
   margin: 0,
   fontSize: 13,
   color: "var(--text-secondary)",
-  lineHeight: 1.6,
+  lineHeight: 1.55,
 };
 
-const cardFooter: CSSProperties = {
+const cardRight: CSSProperties = {
   display: "flex",
-  alignItems: "center",
-  justifyContent: "space-between",
-  paddingTop: 16,
-  borderTop: "1px solid var(--border)",
-  marginTop: "auto",
+  flexDirection: "column",
+  alignItems: "flex-end",
+  gap: 12,
+  flexShrink: 0,
 };
 
-const cardStatus: CSSProperties = {
-  display: "inline-flex",
-  alignItems: "center",
-  gap: 7,
-  fontSize: 11,
-  letterSpacing: 1.2,
-  textTransform: "uppercase",
-  fontWeight: 700,
-};
-
-const cardStatusDot: CSSProperties = {
-  width: 7,
-  height: 7,
+/** Status do módulo virou só a bolinha no canto (hover mostra o nome). */
+const statusDotCorner: CSSProperties = {
+  position: "absolute",
+  top: 14,
+  right: 14,
+  width: 8,
+  height: 8,
   borderRadius: "50%",
 };
 
@@ -784,3 +510,4 @@ const signOutBtn: CSSProperties = {
   fontWeight: 600,
   transition: "color 160ms",
 };
+

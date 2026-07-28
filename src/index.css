@@ -176,3 +176,8 @@ input {
 ::-webkit-scrollbar-thumb:hover {
   background: var(--border-strong);
 }
+
+/* Logo lumberjack: variante por tema (dark = ícone branco, light = ícone preto) */
+.berzerk-logo-light { display: none; }
+:root[data-theme="light"] .berzerk-logo-dark { display: none; }
+:root[data-theme="light"] .berzerk-logo-light { display: inline; }

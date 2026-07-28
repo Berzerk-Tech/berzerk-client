@@ -13,6 +13,9 @@ import {
   type RfidReader,
 } from "../lib/devices";
 import { pingItag, type ConnectionStatus } from "../lib/rfid";
+import { getCurrentWindow } from "@tauri-apps/api/window";
+import { supabase } from "../lib/supabase";
+import { signInWithGoogle } from "../lib/auth";
 import { listSerialPorts, describePort, type SerialPortInfo } from "../lib/usb";
 import { SerialSniffer } from "./SerialSniffer";
 import {
@@ -44,6 +47,11 @@ export function SettingsPlaceholder({ onBack }: Props) {
       </header>
 
       <main style={body}>
+        <div style={section}>
+          <SectionHeader kicker="Sessão" label="Operador" />
+          <SessionCard />
+        </div>
+
         <div style={section}>
           <SectionHeader kicker="Dispositivos" label="Impressora térmica" />
           <PrinterCard
@@ -85,6 +93,69 @@ export function SettingsPlaceholder({ onBack }: Props) {
           </div>
         </div>
       </main>
+    </div>
+  );
+}
+
+// === Session Card ===
+
+/**
+ * Sessão do operador — saiu do header da home (que ficou só com tema/engrenagem):
+ * e-mail logado, troca de conta Google (máquina compartilhada) e tela cheia.
+ */
+function SessionCard() {
+  const [email, setEmail] = useState<string | null>(null);
+  const [isFullscreen, setIsFullscreen] = useState(false);
+
+  useEffect(() => {
+    let alive = true;
+    void supabase.auth.getSession().then(({ data }) => {
+      if (alive) setEmail(data.session?.user?.email ?? null);
+    });
+    void (async () => {
+      try {
+        const fs = await getCurrentWindow().isFullscreen();
+        if (alive) setIsFullscreen(fs);
+      } catch {
+        /* não-Tauri */
+      }
+    })();
+    return () => {
+      alive = false;
+    };
+  }, []);
+
+  // signOut + prompt=select_account: um clique pra trocar de conta.
+  const switchUser = async () => {
+    await supabase.auth.signOut();
+    await signInWithGoogle();
+  };
+
+  const toggleFullscreen = async () => {
+    try {
+      const win = getCurrentWindow();
+      const fs = await win.isFullscreen();
+      await win.setFullscreen(!fs);
+      setIsFullscreen(!fs);
+    } catch {
+      /* ignore */
+    }
+  };
+
+  return (
+    <div style={infoCard}>
+      <div style={infoRow}>
+        <span style={infoLabel}>Conta Google</span>
+        <code style={infoValueMono}>{email ?? "…"}</code>
+      </div>
+      <div style={cardActions}>
+        <button type="button" style={btnGhost} className="berzerk-btn-ghost" onClick={toggleFullscreen}>
+          {isFullscreen ? "Sair de tela cheia" : "Tela cheia"}
+        </button>
+        <button type="button" style={btnGhost} className="berzerk-btn-ghost" onClick={switchUser}>
+          Trocar usuário
+        </button>
+      </div>
     </div>
   );
 }
