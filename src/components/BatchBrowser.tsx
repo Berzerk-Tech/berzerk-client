@@ -39,6 +39,14 @@ import { BackButton } from "./BackButton";
 import { AmbientBackground } from "./AmbientBackground";
 
 const MAX_VISIBLE = 50;
+
+/**
+ * Movimentação via iTAG DESLIGADA por enquanto (pedido do Leonardo, 2026-07-28):
+ * ainda não funciona e estava atrapalhando a operação. Esconde o contador e a
+ * seção "Aguardando movimentação"; o código por baixo fica intacto — religar é
+ * só virar esta flag.
+ */
+const MOVIMENTACAO_ENABLED: boolean = false;
 // Concorrência baixa pra não estourar rate limit do shopify-analytics.
 // O cache module-level dedupa requests pro mesmo product_id, então
 // mesmo com 50 batches só batemos 1x por produto único.
@@ -1026,7 +1034,7 @@ export function BatchBrowser({
               onClick={() => toggleFilter("queue")}
             />
           )}
-          {awaitingJobs.length > 0 && (
+          {MOVIMENTACAO_ENABLED && awaitingJobs.length > 0 && (
             <Stat
               label="movimentar"
               value={awaitingJobs.length}
@@ -1082,7 +1090,7 @@ export function BatchBrowser({
               </Section>
             )}
 
-            {showAwaiting && filteredAwaiting.length > 0 && (
+            {MOVIMENTACAO_ENABLED && showAwaiting && filteredAwaiting.length > 0 && (
               <Section
                 title="Aguardando movimentação"
                 count={filteredAwaiting.length}
