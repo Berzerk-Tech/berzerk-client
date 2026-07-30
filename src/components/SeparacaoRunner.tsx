@@ -63,6 +63,24 @@ function normSku(v: string | null | undefined): string | null {
   return s || null;
 }
 
+/**
+ * Identificadores GTIN de um item/tag: o EAN e TAMBÉM o SKU quando ele é um
+ * código de barras puro (8–14 dígitos) — o Tiny às vezes manda o EAN no campo
+ * SKU com `ean` null, e o card até MOSTRA esse número (ean ?? sku), mas o
+ * casamento só por `ean` rejeitava a peça (bug real de campo, pedido #793823).
+ */
+function gtinCandidates(...vals: Array<string | null | undefined>): string[] {
+  const out = new Set<string>();
+  for (const v of vals) {
+    const t = v?.trim();
+    if (t && /^\d{8,14}$/.test(t)) {
+      const n = normGtin(t);
+      if (n) out.add(n);
+    }
+  }
+  return Array.from(out);
+}
+
 type Phase = "loading" | "separating" | "empty" | "error";
 
 /** Progresso de conferência de um item. */
@@ -142,20 +160,22 @@ export function SeparacaoRunner({ title, kicker, claim, emptyHint, queue, onBack
     }
   }, [completing, collectedTags, fetchNext]);
 
-  // Acha o item esperado que casa com a tag lida (EAN normalizado → fallback
-  // SKU). Comparação CRUA não serve: o EAN do Tiny pode vir como GTIN-14/zero à
-  // esquerda e o da tag vem EAN-13 puro — mesma normalização do nexus (normGtin).
+  // Acha o item esperado que casa com a tag lida. Casa por QUALQUER
+  // identificador GTIN dos dois lados (ean OU sku-que-é-código-de-barras,
+  // normalizados — Tiny mistura os campos), com fallback de SKU textual.
   const matchItem = useCallback((ord: Order, look: EpcLookupItem): OrderItem | null => {
     const prog = progressRef.current;
     const remaining = (it: OrderItem) => it.quantidade - (prog.get(it.id)?.count ?? 0);
-    const lookEan = normGtin(look.ean13);
+    const tagGtins = gtinCandidates(look.ean13, look.sku);
+    // 1) GTIN cruzado (ean↔ean, ean↔sku-numérico, etc.)
+    const byGtin = ord.items.find((it) => {
+      if (remaining(it) <= 0) return false;
+      const itemGtins = gtinCandidates(it.ean, it.sku);
+      return tagGtins.some((g) => itemGtins.includes(g));
+    });
+    if (byGtin) return byGtin;
+    // 2) skuEquivalence: mesmo SKU textual (EAN legado do mesmo produto/tamanho)
     const lookSku = normSku(look.sku);
-    // 1) EAN normalizado
-    const byEan = ord.items.find(
-      (it) => lookEan && normGtin(it.ean) === lookEan && remaining(it) > 0,
-    );
-    if (byEan) return byEan;
-    // 2) skuEquivalence: mesmo SKU (EAN legado do mesmo produto/tamanho)
     const bySku = ord.items.find(
       (it) => lookSku && normSku(it.sku) === lookSku && remaining(it) > 0,
     );
@@ -196,7 +216,16 @@ export function SeparacaoRunner({ title, kicker, claim, emptyHint, queue, onBack
           beepError();
           if (look) {
             const desc = [look.name, look.size, look.ean13].filter(Boolean).join(" · ");
-            showReject(`Peça lida não pertence a este pedido: ${desc}`);
+            // Diagnóstico de campo: mostra os códigos que o pedido ainda espera
+            // (ean/sku dos itens com saldo) pra divergência aparecer na hora.
+            const esperados = ord.items
+              .filter((it) => it.quantidade - (progressRef.current.get(it.id)?.count ?? 0) > 0)
+              .map((it) => it.ean ?? it.sku ?? "?")
+              .slice(0, 5)
+              .join(", ");
+            showReject(
+              `Peça lida não pertence a este pedido: ${desc} — pedido espera: ${esperados}`,
+            );
           } else {
             showReject(`Tag não identificada em nenhuma fonte: ${epc.toUpperCase()}`);
           }
