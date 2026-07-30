@@ -304,6 +304,138 @@ pub async fn itag_iprint_movimentar(
     }
 }
 
+#[derive(Serialize, Clone)]
+pub struct EpcDetail {
+    pub epc: String,
+    pub ean13: Option<String>,
+    pub nome: Option<String>,
+    pub tamanho: Option<String>,
+    pub cor: Option<String>,
+    pub found: bool,
+    /// base_url do ambiente que resolveu (debug/telemetria).
+    pub fonte: Option<String>,
+}
+
+/// Resolve EPC → produto (ean13/nome/tamanho/cor) na NUVEM da iTAG — o mesmo
+/// caminho do posvenda em produção (edge `itag-epc-lookup`): POST
+/// produtoIprint/findPageByPredicate com {codigoEmpresa, epc}. A doc da iTAG
+/// avisa que tags em campo nem sempre são SGTIN padrão GS1 — a nuvem deles é a
+/// fonte da verdade do que cada EPC significa.
+///
+/// Tenta cada base na ordem: o ambiente configurado primeiro e depois
+/// `extra_bases` (tags da era posvenda vivem no itagalert_berzerk; as nossas no
+/// itagalert_integracao). Mesmas credenciais Basic pra todos (validado).
+#[tauri::command(rename_all = "camelCase")]
+pub async fn itag_epc_details(
+    config: IprintConfig,
+    epcs: Vec<String>,
+    extra_bases: Option<Vec<String>>,
+    codigo_empresa: Option<u32>,
+) -> Result<Vec<EpcDetail>, String> {
+    let client = build_client(QUERY_TIMEOUT_SECS).map_err(|e| format!("client_init: {}", e))?;
+    let empresa = codigo_empresa.unwrap_or(1);
+
+    let mut bases = vec![base(&config)];
+    for b in extra_bases.unwrap_or_default() {
+        let b = b.trim().trim_end_matches('/').to_string();
+        if !b.is_empty() && !bases.contains(&b) {
+            bases.push(b);
+        }
+    }
+
+    let mut out: Vec<EpcDetail> = Vec::with_capacity(epcs.len());
+    // Chunks de 8 concorrentes (mesmo batch size do edge do posvenda).
+    for chunk in epcs.chunks(8) {
+        let handles: Vec<_> = chunk
+            .iter()
+            .map(|epc| {
+                let epc = epc.trim().to_uppercase();
+                let client = client.clone();
+                let bases = bases.clone();
+                let user = config.basic_user.clone();
+                let pass = config.basic_pass.clone();
+                tokio::spawn(async move {
+                    for b in &bases {
+                        match lookup_epc_once(&client, b, &user, &pass, empresa, &epc).await {
+                            Ok(Some(mut d)) => {
+                                d.fonte = Some(b.clone());
+                                return d;
+                            }
+                            Ok(None) => continue,
+                            Err(_) => continue, // ambiente fora → tenta o próximo
+                        }
+                    }
+                    EpcDetail {
+                        epc,
+                        ean13: None,
+                        nome: None,
+                        tamanho: None,
+                        cor: None,
+                        found: false,
+                        fonte: None,
+                    }
+                })
+            })
+            .collect();
+        for h in handles {
+            out.push(h.await.map_err(|e| format!("join: {}", e))?);
+        }
+    }
+    Ok(out)
+}
+
+/// Um lookup em um ambiente: Ok(Some) achou, Ok(None) não existe lá,
+/// Err = ambiente inacessível (o caller tenta o próximo).
+async fn lookup_epc_once(
+    client: &Client,
+    base_url: &str,
+    user: &str,
+    pass: &str,
+    empresa: u32,
+    epc: &str,
+) -> Result<Option<EpcDetail>, String> {
+    let url = format!(
+        "{}/produtoIprint/findPageByPredicate?page=0&size=1&direction=ASC",
+        base_url
+    );
+    let body = serde_json::json!({
+        "codigoEmpresa": { "valorCampo": empresa },
+        "epc": epc,
+    });
+    let resp = client
+        .post(&url)
+        .basic_auth(user, Some(pass))
+        .header("Content-Type", "application/json")
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| fmt_err(&e))?;
+    if !resp.status().is_success() {
+        return Err(format!("HTTP {}", resp.status().as_u16()));
+    }
+    let json: serde_json::Value = resp.json().await.map_err(|e| fmt_err(&e))?;
+    let item = match json.get("content").and_then(|c| c.as_array()).and_then(|a| a.first()) {
+        Some(i) => i,
+        None => return Ok(None),
+    };
+    let s = |k: &str| -> Option<String> {
+        match item.get(k) {
+            Some(serde_json::Value::String(v)) if !v.trim().is_empty() => Some(v.trim().to_string()),
+            Some(serde_json::Value::Number(n)) => Some(n.to_string()),
+            _ => None,
+        }
+    };
+    Ok(Some(EpcDetail {
+        epc: epc.to_string(),
+        ean13: s("ean13"),
+        nome: s("nome"),
+        tamanho: s("tamanho"),
+        cor: s("cor"),
+        found: true,
+        fonte: None,
+    }))
+}
+
 // ============ helpers ============
 
 async fn poll_inventory_epcs(

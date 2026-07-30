@@ -12,9 +12,42 @@ import {
   type ReactNode,
 } from "react";
 import { getDeviceConfig } from "../lib/devices";
-import { clearBuffer, pingItag, pollItagTags, startReading, stopReading } from "../lib/rfid";
+import {
+  clearBuffer,
+  lookupEpcDetails,
+  pingItag,
+  pollItagTags,
+  startReading,
+  stopReading,
+} from "../lib/rfid";
 import { decodeSgtin96 } from "../lib/sgtin";
 import { epcLookup, type EpcLookupItem } from "../services/orders";
+
+/** Cache persistente EPC→item (mesmo padrão do posvenda: sobrevive a reload). */
+const EPC_CACHE_KEY = "berzerk_epc_resolve_cache_v1";
+const EPC_CACHE_MAX = 5000;
+
+function loadEpcCache(): Map<string, EpcLookupItem> {
+  try {
+    const raw = localStorage.getItem(EPC_CACHE_KEY);
+    if (!raw) return new Map();
+    return new Map(JSON.parse(raw) as [string, EpcLookupItem][]);
+  } catch {
+    return new Map();
+  }
+}
+
+function persistEpcCache(map: Map<string, EpcLookupItem>): void {
+  try {
+    let entries = Array.from(map.entries());
+    if (entries.length > EPC_CACHE_MAX) {
+      entries = entries.slice(entries.length - EPC_CACHE_MAX);
+    }
+    localStorage.setItem(EPC_CACHE_KEY, JSON.stringify(entries));
+  } catch {
+    /* localStorage cheio/indisponível */
+  }
+}
 
 /** Intervalo entre polls durante uma sessão de leitura contínua. */
 const POLL_MS = 700;
@@ -85,7 +118,10 @@ export function RfidProvider({ children }: { children: ReactNode }) {
   const [connected, setConnected] = useState(false);
   const [host, setHost] = useState(() => getDeviceConfig().reader.itagHost);
   const [lastError, setLastError] = useState<string | null>(null);
-  const cacheRef = useRef<Map<string, EpcLookupItem>>(new Map());
+  const cacheRef = useRef<Map<string, EpcLookupItem>>(loadEpcCache());
+  // EPCs que já falharam em TODAS as fontes nesta sessão — evita martelar a
+  // API a cada poll com a mesma tag desconhecida em cima da mesa.
+  const unresolvedRef = useRef<Set<string>>(new Set());
 
   const ping = useCallback(async () => {
     const reader = getDeviceConfig().reader;
@@ -179,43 +215,94 @@ export function RfidProvider({ children }: { children: ReactNode }) {
     };
   }, []);
 
+  // Resolução EPC→peça em CAMADAS — paridade com o posvenda em produção, que
+  // usa a nuvem da iTAG como fonte da verdade (edge `itag-epc-lookup`). O
+  // decode SGTIN local NÃO basta: a doc do posvenda avisa que as tags em campo
+  // nem sempre são GS1 padrão, e o decode-first da v0.3.6/0.3.7 curto-circuitava
+  // sem nunca trazer nome/tamanho (a raiz do "lê mas não resolve").
   const resolveEpcs = useCallback(
     async (epcs: string[]): Promise<Map<string, EpcLookupItem>> => {
       const norm = Array.from(
         new Set(epcs.map((e) => e.trim().toUpperCase()).filter(Boolean)),
       );
       const result = new Map<string, EpcLookupItem>();
-      const misses: string[] = [];
+      let misses: string[] = [];
       for (const e of norm) {
-        // EAN-13 direto (iTAG WS já resolve EPC→EAN): não precisa de lookup.
+        // EAN-13 direto (leitor em modo teclado pode digitar EAN puro).
         if (/^\d{13}$/.test(e)) {
           result.set(e, { epc: e, ean13: e, sku: null, size: null, batchCode: null });
           continue;
         }
-        // DECODE-FIRST: EPC SGTIN-96 carrega o EAN nos próprios bits (mesmo
-        // caminho do posvenda). Instantâneo, offline e imune a inventário
-        // desatualizado/errado. API só pra EPC fora do padrão SGTIN.
-        const decoded = decodeSgtin96(e);
-        if (decoded) {
-          result.set(e, { epc: e, ean13: decoded, sku: null, size: null, batchCode: null });
-          continue;
-        }
         const cached = cacheRef.current.get(e);
-        if (cached) result.set(e, cached);
-        else misses.push(e);
+        if (cached) {
+          result.set(e, cached);
+        } else if (unresolvedRef.current.has(e)) {
+          // Já falhou em todas as fontes: resolve o que der localmente.
+          const decoded = decodeSgtin96(e);
+          if (decoded) {
+            result.set(e, { epc: e, ean13: decoded, sku: null, size: null, batchCode: null });
+          }
+        } else {
+          misses.push(e);
+        }
       }
+
+      let touchedCache = false;
+      const commit = (item: EpcLookupItem) => {
+        const key = item.epc.toUpperCase();
+        cacheRef.current.set(key, item);
+        result.set(key, item);
+        touchedCache = true;
+      };
+
+      // 1) NUVEM DA iTAG (quem imprimiu a tag sabe o que ela é): ean13 + nome
+      //    + tamanho + cor. Tenta o ambiente configurado e o itagalert_berzerk
+      //    (tags da era posvenda).
       if (misses.length > 0) {
         try {
-          const { items } = await epcLookup(misses);
-          for (const item of items) {
-            const key = item.epc.toUpperCase();
-            cacheRef.current.set(key, item);
-            result.set(key, item);
+          const details = await lookupEpcDetails(misses);
+          for (const d of details) {
+            if (d.found && d.ean13) {
+              commit({
+                epc: d.epc,
+                ean13: d.ean13,
+                sku: null,
+                size: d.tamanho,
+                batchCode: null,
+                name: d.nome,
+              });
+            }
           }
         } catch (e) {
           setLastError(e instanceof Error ? e.message : String(e));
         }
+        misses = misses.filter((e) => !result.has(e));
       }
+
+      // 2) Nosso inventário (rfid_epc_inventory replicado no nexus): cobre o
+      //    que o app imprimiu caso a iTAG esteja fora/limpa.
+      if (misses.length > 0) {
+        try {
+          const { items } = await epcLookup(misses);
+          for (const item of items) commit(item);
+        } catch (e) {
+          setLastError(e instanceof Error ? e.message : String(e));
+        }
+        misses = misses.filter((e) => !result.has(e));
+      }
+
+      // 3) Último recurso: decodificar SGTIN-96 localmente (EAN sem nome nem
+      //    tamanho — só vale pra tag GS1 de verdade). Não entra no cache
+      //    persistente; marca como esgotado pra não re-consultar a cada poll.
+      for (const e of misses) {
+        unresolvedRef.current.add(e);
+        const decoded = decodeSgtin96(e);
+        if (decoded) {
+          result.set(e, { epc: e, ean13: decoded, sku: null, size: null, batchCode: null });
+        }
+      }
+
+      if (touchedCache) persistEpcCache(cacheRef.current);
       return result;
     },
     [],

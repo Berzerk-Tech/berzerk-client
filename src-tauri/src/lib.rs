@@ -20,6 +20,7 @@ pub fn run() {
             itag_iprint::itag_iprint_gerar_rfid,
             itag_iprint::itag_iprint_query_inventory,
             itag_iprint::itag_iprint_movimentar,
+            itag_iprint::itag_epc_details,
             usb_devices::list_serial_ports,
             rfid_usb::serial_sniff,
         ])

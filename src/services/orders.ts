@@ -57,6 +57,9 @@ export type EpcLookupItem = {
   sku: string | null;
   size: string | null;
   batchCode: string | null;
+  /** Nome do produto — só vem quando resolvido pela nuvem da iTAG (o endpoint
+   *  do nexus não manda; opcional pra manter o shape do contrato). */
+  name?: string | null;
 };
 
 export type Me = {

@@ -19,8 +19,8 @@ import {
   stopReading,
   type ConnectionStatus,
 } from "../lib/rfid";
-import { epcLookup } from "../services/orders";
-import { decodeSgtin96 } from "../lib/sgtin";
+import { type EpcLookupItem } from "../services/orders";
+import { useRfid } from "../contexts/RfidContext";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { supabase } from "../lib/supabase";
 import { signInWithGoogle } from "../lib/auth";
@@ -483,47 +483,20 @@ function ReaderCard({
   );
 }
 
-/** EAN "efetivo" de uma leitura: decodificado do EPC SGTIN ou EAN-13 direto. */
-function eanForTag(tag: string): string | null {
-  return decodeSgtin96(tag) ?? (/^\d{13}$/.test(tag) ? tag : null);
-}
-
-/**
- * EAN→tamanho pela `rfid_epc_inventory` do Supabase: o par ean13↔size DENTRO da
- * mesma linha é confiável (a corrupção conhecida é na associação EPC→linha).
- */
-async function fetchEanSizes(eans: string[]): Promise<Map<string, string>> {
-  const out = new Map<string, string>();
-  const list = Array.from(new Set(eans)).filter(Boolean);
-  if (list.length === 0) return out;
-  try {
-    const { data } = await supabase
-      .from("rfid_epc_inventory")
-      .select("ean13, size")
-      .in("ean13", list)
-      .limit(1000);
-    for (const r of (data ?? []) as { ean13: string | null; size: string | null }[]) {
-      if (r.ean13 && r.size && !out.has(r.ean13)) out.set(r.ean13, r.size);
-    }
-  } catch {
-    /* sem tamanho é melhor do que quebrar o teste */
-  }
-  return out;
-}
-
 // === REST Read Test — comanda o WCF REST do iTAG e mostra TUDO que chega ===
 
 /**
  * Sessão de teste de 15s pelo WCF REST (porta 9093): `limparLeitura` + `iniciar`
  * uma vez, poll de `RetornaTag` a cada 700ms, `parar` no fim. Mostra o corpo
- * CRU de cada resposta + EPCs extraídos + EAN decodificado da própria tag.
+ * CRU de cada resposta + cada EPC resolvido pela MESMA cadeia da produção
+ * (nuvem da iTAG → inventário nexus → decode SGTIN local).
  */
 function RestReadTest({ host }: { host: string }) {
+  const rfid = useRfid();
   const [listening, setListening] = useState(false);
   const [raw, setRaw] = useState<string[]>([]);
   const [epcs, setEpcs] = useState<string[]>([]);
-  const [resolved, setResolved] = useState<Map<string, string>>(new Map());
-  const [sizes, setSizes] = useState<Map<string, string>>(new Map());
+  const [resolved, setResolved] = useState<Map<string, EpcLookupItem>>(new Map());
   const [error, setError] = useState<string | null>(null);
 
   const run = () => {
@@ -532,7 +505,6 @@ function RestReadTest({ host }: { host: string }) {
     setRaw([]);
     setEpcs([]);
     setResolved(new Map());
-    setSizes(new Map());
     const seen = new Set<string>();
     let stopped = false;
 
@@ -540,30 +512,10 @@ function RestReadTest({ host }: { host: string }) {
       if (fresh.length === 0) return;
       for (const e of fresh) seen.add(e);
       setEpcs(Array.from(seen));
-      const eans = fresh.map(eanForTag).filter((e): e is string => !!e);
-      if (eans.length > 0) {
-        void fetchEanSizes(eans).then((m) =>
-          setSizes((prev) => new Map([...prev, ...m])),
-        );
-      }
-      // API só pro que não decodifica localmente
-      const misses = fresh.filter((e) => !eanForTag(e));
-      if (misses.length > 0) {
-        void epcLookup(misses)
-          .then(({ items }) => {
-            setResolved((prev) => {
-              const m = new Map(prev);
-              for (const it of items) {
-                m.set(
-                  it.epc.toUpperCase(),
-                  `${it.ean13}${it.size ? ` · ${it.size}` : ""}`,
-                );
-              }
-              return m;
-            });
-          })
-          .catch(() => {});
-      }
+      void rfid
+        .resolveEpcs(fresh)
+        .then((m) => setResolved((prev) => new Map([...prev, ...m])))
+        .catch(() => {});
     };
 
     void (async () => {
@@ -619,23 +571,20 @@ function RestReadTest({ host }: { host: string }) {
         {error && <div style={portError}>{error}</div>}
         {epcs.length > 0 && (
           <div style={mesaReadList}>
-            {epcs.map((epc) => (
-              <div key={epc} style={mesaReadRow}>
-                <code style={mesaReadEpc}>{epc}</code>
-                <span
-                  style={
-                    eanForTag(epc) || resolved.has(epc) ? mesaReadOk : mesaReadMiss
-                  }
-                >
-                  {(() => {
-                    const ean = eanForTag(epc);
-                    if (!ean) return resolved.get(epc) ?? "não resolvido";
-                    const size = sizes.get(ean);
-                    return `${ean}${size ? ` · ${size}` : ""} · da tag`;
-                  })()}
-                </span>
-              </div>
-            ))}
+            {epcs.map((epc) => {
+              const it = resolved.get(epc);
+              return (
+                <div key={epc} style={mesaReadRow}>
+                  <code style={mesaReadEpc}>{epc}</code>
+                  <span style={it ? mesaReadOk : mesaReadMiss}>
+                    {it
+                      ? [it.name, it.size, it.ean13].filter(Boolean).join(" · ") +
+                        (it.name || it.size ? "" : " · só EAN (decode local)")
+                      : "não resolvido"}
+                  </span>
+                </div>
+              );
+            })}
             <span style={mesaReadCount}>
               {epcs.length} {epcs.length === 1 ? "EPC extraído" : "EPCs extraídos"}
             </span>
