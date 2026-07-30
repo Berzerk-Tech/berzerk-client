@@ -73,7 +73,7 @@ export function HomeMenu({ email, onEnter }: Props) {
             title={
               devices.reader.mode === "keyboard-wedge"
                 ? "Leitor RFID em modo teclado (plug and play)"
-                : "Leitor via WebSocket do iTAG (porta 9098)"
+                : "Leitor via iTAG Monitor WCF REST (porta 9093)"
             }
             onClick={() => onEnter("settings")}
           />

@@ -5,11 +5,14 @@
 // http://127.0.0.1:9093 sem proxy HTTPS no meio. O frontend chama via
 // `invoke(...)`, não direto com fetch().
 //
-// Endpoints expostos pelo iTAG Monitor (Windows desktop app):
+// Endpoints expostos pelo iTAG Monitor (doc "Fluxo padrão de integração V1.2",
+// modo "Monitor Web Service WCF" — o que roda na fábrica):
 //   GET /ItagRFIDMonitor/CarregaComando?comando=iniciar       — start continuous
 //   GET /ItagRFIDMonitor/CarregaComando?comando=parar          — stop
 //   GET /ItagRFIDMonitor/CarregaComando?comando=limparLeitura  — clear buffer
 //   GET /ItagRFIDMonitor/RetornaTag                            — read accumulated
+//   GET /ItagRFIDMonitor/RetornaStatus                         — parado/iniciado
+//   GET /ItagRFIDMonitor/RetornaTime                           — tempo de leitura
 
 use reqwest::Client;
 use serde::Serialize;
@@ -45,7 +48,9 @@ fn resolve_host(host: Option<String>) -> String {
 #[tauri::command]
 pub async fn itag_ping(host: Option<String>) -> ConnectionStatus {
     let h = resolve_host(host);
-    let url = format!("{}/ItagRFIDMonitor/RetornaTag", h);
+    // RetornaStatus: healthcheck sem efeito colateral (não toca a lista de tags
+    // nem dispara o overlay "Aguarde!" do iTAG — esse só aparece no `iniciar`).
+    let url = format!("{}/ItagRFIDMonitor/RetornaStatus", h);
     let client = match build_client() {
         Ok(c) => c,
         Err(e) => {

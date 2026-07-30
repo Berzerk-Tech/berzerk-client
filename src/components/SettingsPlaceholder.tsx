@@ -12,9 +12,14 @@ import {
   type ThermalPrinter,
   type RfidReader,
 } from "../lib/devices";
-import { type ConnectionStatus } from "../lib/rfid";
+import {
+  clearBuffer,
+  pollItagTags,
+  startReading,
+  stopReading,
+  type ConnectionStatus,
+} from "../lib/rfid";
 import { epcLookup } from "../services/orders";
-import { bytesToPrintable, extractEpcs } from "../contexts/RfidContext";
 import { decodeSgtin96 } from "../lib/sgtin";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { supabase } from "../lib/supabase";
@@ -421,22 +426,22 @@ function ReaderCard({
         </div>
       </Field>
 
-      {draft.mode === "itag-ws" && (
+      {draft.mode === "itag-rest" && (
         <>
           <Field
-            label="URL do WebSocket"
-            hint="WebSocket Server do iTAG Monitor (porta 9098)"
+            label="URL do iTAG Monitor"
+            hint="Serviço WCF REST do iTAG Monitor (porta 9093 — 'Serviço WCF REST está Online' na tela do Monitor)"
           >
             <input
               style={input}
               className="berzerk-input"
-              value={draft.wsUrl}
-              onChange={(e) => setDraft({ ...draft, wsUrl: e.target.value })}
-              placeholder="ws://localhost:9098"
+              value={draft.itagHost}
+              onChange={(e) => setDraft({ ...draft, itagHost: e.target.value })}
+              placeholder="http://localhost:9093"
               spellCheck={false}
             />
           </Field>
-          <WsReadTest url={draft.wsUrl} />
+          <RestReadTest host={draft.itagHost} />
         </>
       )}
 
@@ -506,13 +511,14 @@ async function fetchEanSizes(eans: string[]): Promise<Map<string, string>> {
   return out;
 }
 
-// === WS Read Test — escuta o WebSocket do iTAG e mostra TUDO que chega ===
+// === REST Read Test — comanda o WCF REST do iTAG e mostra TUDO que chega ===
 
 /**
- * Escuta o WS do iTAG por 15s: mostra as mensagens CRUAS (pra descobrirmos o
- * formato exato em campo) + os EPCs extraídos + resolução EPC→EAN pela API.
+ * Sessão de teste de 15s pelo WCF REST (porta 9093): `limparLeitura` + `iniciar`
+ * uma vez, poll de `RetornaTag` a cada 700ms, `parar` no fim. Mostra o corpo
+ * CRU de cada resposta + EPCs extraídos + EAN decodificado da própria tag.
  */
-function WsReadTest({ url }: { url: string }) {
+function RestReadTest({ host }: { host: string }) {
   const [listening, setListening] = useState(false);
   const [raw, setRaw] = useState<string[]>([]);
   const [epcs, setEpcs] = useState<string[]>([]);
@@ -528,15 +534,7 @@ function WsReadTest({ url }: { url: string }) {
     setResolved(new Map());
     setSizes(new Map());
     const seen = new Set<string>();
-
-    let ws: WebSocket;
-    try {
-      ws = new WebSocket(url);
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
-      setListening(false);
-      return;
-    }
+    let stopped = false;
 
     const ingest = (fresh: string[]) => {
       if (fresh.length === 0) return;
@@ -568,60 +566,45 @@ function WsReadTest({ url }: { url: string }) {
       }
     };
 
-    const handleText = (text: string) => {
-      setRaw((prev) => [...prev.slice(-19), text.slice(0, 300)]);
-      ingest(extractEpcs(text).filter((e) => !seen.has(e)));
-    };
-
-    const send = (cmd: string) => {
+    void (async () => {
       try {
-        if (ws.readyState === WebSocket.OPEN) ws.send(cmd);
-      } catch {
-        /* ignore */
+        await clearBuffer(host);
+        await startReading(host);
+      } catch (e) {
+        setError(e instanceof Error ? e.message : String(e));
+        setListening(false);
+        return;
       }
-    };
 
-    // Protocolo do iTAG (mesmo do posvenda): comanda a leitura pelo próprio WS.
-    ws.onopen = () => {
-      send("limparLeitura");
-      setTimeout(() => send("iniciar"), 300);
-    };
-    const harvest = setInterval(() => send("retornaEAN"), 1500);
-
-    ws.onmessage = (ev) => {
-      if (typeof ev.data === "string") handleText(ev.data);
-      else if (ev.data instanceof Blob)
-        void ev.data.arrayBuffer().then((buf) => {
-          const bytes = new Uint8Array(buf);
-          const hex = Array.from(bytes.slice(0, 48))
-            .map((b) => b.toString(16).padStart(2, "0"))
-            .join(" ");
-          const printable = bytesToPrintable(buf);
-          setRaw((prev) => [
-            ...prev.slice(-19),
-            `[bin ${bytes.length}B] ${printable.replace(/\n+/g, "·").slice(0, 140)} | hex: ${hex}`,
-          ]);
-          ingest(extractEpcs(printable).filter((e) => !seen.has(e)));
-        });
-    };
-    ws.onerror = () => setError(`Não conectou em ${url}`);
-
-    setTimeout(() => {
-      clearInterval(harvest);
-      send("parar");
-      try {
-        ws.close();
-      } catch {
-        /* ignore */
+      const until = Date.now() + 15_000;
+      while (!stopped && Date.now() < until) {
+        try {
+          const poll = await pollItagTags(host);
+          setRaw((prev) => {
+            const line = poll.raw_preview.trim() || "(vazio)";
+            return prev[prev.length - 1] === line ? prev : [...prev.slice(-19), line];
+          });
+          ingest(
+            poll.tags
+              .map((t) => t.trim().toUpperCase())
+              .filter((t) => t && !seen.has(t)),
+          );
+        } catch (e) {
+          setError(e instanceof Error ? e.message : String(e));
+        }
+        await new Promise((r) => setTimeout(r, 700));
       }
+
+      stopped = true;
+      void stopReading(host).catch(() => {});
       setListening(false);
-    }, 15_000);
+    })();
   };
 
   return (
     <Field
-      label="Teste de leitura (WebSocket)"
-      hint="Escuta 15s e mostra o que o iTAG mandar — encoste peças na mesa"
+      label="Teste de leitura (WCF REST)"
+      hint="Inicia a leitura por 15s e mostra o que o iTAG devolver — encoste peças na mesa"
     >
       <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
         <button
@@ -631,7 +614,7 @@ function WsReadTest({ url }: { url: string }) {
           onClick={run}
           disabled={listening}
         >
-          {listening ? "Escutando… (encoste as peças)" : "▶ Escutar WebSocket por 15s"}
+          {listening ? "Lendo… (encoste as peças)" : "▶ Ler pela mesa por 15s"}
         </button>
         {error && <div style={portError}>{error}</div>}
         {epcs.length > 0 && (

@@ -16,18 +16,13 @@ export type ThermalPrinter = {
 
 export type RfidReader = {
   name: string;
-  /** Host do iTAG Monitor (default localhost:9093). Quando matarmos o proxy HTTPS,
-   *  é aqui que apontamos direto. */
+  /** URL base do serviço WCF REST do iTAG Monitor (default http://localhost:9093). */
   itagHost: string;
-  /** Modo de operação atual. HTTP/proxy e serial direto foram aposentados
-   *  (2026-07-30): leitura é via WebSocket do iTAG (Cykeo) ou teclado (ACURA).
-   *  Config antiga salva com outro modo é coagida pra `itag-ws` no parse. */
-  mode: "keyboard-wedge" | "itag-ws";
-  /** Host do proxy HTTPS (legado, default 127.0.0.1:3443). Só usado se mode = via-proxy. */
-  proxyHost: string;
-  /** URL do WebSocket Server do iTAG Monitor (porta 9098) — mesmo caminho que o
-   *  pós-venda usa pra receber leituras em tempo real. Só usado se mode = itag-ws. */
-  wsUrl: string;
+  /** Modo de operação. WebSocket (9098) foi aposentado (2026-07-30): o iTAG
+   *  Monitor da fábrica roda com "Método Execução: Monitor Web Service WCF",
+   *  então quem controla o leitor é o serviço REST na 9093 — o WS aceitava os
+   *  comandos mas devolvia `[]` sempre. Config antiga é coagida pra `itag-rest`. */
+  mode: "keyboard-wedge" | "itag-rest";
 };
 
 export type DeviceConfig = {
@@ -42,11 +37,7 @@ const DEFAULT_CONFIG: DeviceConfig = {
   reader: {
     name: "Mesa RFID",
     itagHost: "http://localhost:9093",
-    // Proxy aposentado. Default fala direto com o iTAG Monitor (HTTP local);
-    // "direct-usb" é o alvo (serial USB sem middleware) — ver protocolo.
-    mode: "itag-ws",
-    proxyHost: "https://127.0.0.1:3443",
-    wsUrl: "ws://localhost:9098",
+    mode: "itag-rest",
   },
 };
 
@@ -96,15 +87,13 @@ function parsePrinter(p: unknown): ThermalPrinter | null {
 function parseReader(r: unknown): RfidReader {
   if (!r || typeof r !== "object") return DEFAULT_CONFIG.reader;
   const obj = r as Partial<RfidReader>;
-  // Proxy aposentado: qualquer config legada cai pro iTAG Monitor direto.
+  // Qualquer config legada (ws/proxy/serial) cai pro WCF REST do iTAG Monitor.
   const mode: RfidReader["mode"] =
-    obj.mode === "keyboard-wedge" ? "keyboard-wedge" : "itag-ws";
+    obj.mode === "keyboard-wedge" ? "keyboard-wedge" : "itag-rest";
   return {
     name: obj.name || DEFAULT_CONFIG.reader.name,
     itagHost: obj.itagHost || DEFAULT_CONFIG.reader.itagHost,
     mode,
-    proxyHost: obj.proxyHost || DEFAULT_CONFIG.reader.proxyHost,
-    wsUrl: obj.wsUrl || DEFAULT_CONFIG.reader.wsUrl,
   };
 }
 
@@ -122,10 +111,10 @@ export const READER_MODES: Array<{
   available: boolean;
 }> = [
   {
-    value: "itag-ws",
-    label: "Via iTAG WebSocket",
+    value: "itag-rest",
+    label: "Via iTAG Monitor (WCF REST)",
     description:
-      "Escuta o WebSocket Server do iTAG Monitor (porta 9098) — o mesmo caminho de leitura do pós-venda",
+      "Comanda o serviço WCF REST do iTAG Monitor (porta 9093) — o modo que o Monitor executa na fábrica (doc oficial iTAG)",
     available: true,
   },
   {
