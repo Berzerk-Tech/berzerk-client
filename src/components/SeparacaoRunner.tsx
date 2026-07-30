@@ -52,6 +52,17 @@ function itemSize(it: OrderItem): string | null {
   return null;
 }
 
+/** Mesma normalização de GTIN do nexus: só dígitos, sem zeros à esquerda. */
+function normGtin(v: string | null | undefined): string | null {
+  const d = v?.replace(/\D/g, "").replace(/^0+/, "");
+  return d || null;
+}
+
+function normSku(v: string | null | undefined): string | null {
+  const s = v?.trim().toUpperCase();
+  return s || null;
+}
+
 type Phase = "loading" | "separating" | "empty" | "error";
 
 /** Progresso de conferência de um item. */
@@ -131,17 +142,35 @@ export function SeparacaoRunner({ title, kicker, claim, emptyHint, queue, onBack
     }
   }, [completing, collectedTags, fetchNext]);
 
-  // Acha o item esperado que casa com a tag lida (EAN exato → fallback SKU).
+  // Acha o item esperado que casa com a tag lida (EAN normalizado → fallback
+  // SKU). Comparação CRUA não serve: o EAN do Tiny pode vir como GTIN-14/zero à
+  // esquerda e o da tag vem EAN-13 puro — mesma normalização do nexus (normGtin).
   const matchItem = useCallback((ord: Order, look: EpcLookupItem): OrderItem | null => {
     const prog = progressRef.current;
     const remaining = (it: OrderItem) => it.quantidade - (prog.get(it.id)?.count ?? 0);
-    // 1) EAN exato
-    const byEan = ord.items.find((it) => it.ean && it.ean === look.ean13 && remaining(it) > 0);
+    const lookEan = normGtin(look.ean13);
+    const lookSku = normSku(look.sku);
+    // 1) EAN normalizado
+    const byEan = ord.items.find(
+      (it) => lookEan && normGtin(it.ean) === lookEan && remaining(it) > 0,
+    );
     if (byEan) return byEan;
     // 2) skuEquivalence: mesmo SKU (EAN legado do mesmo produto/tamanho)
-    const bySku = ord.items.find((it) => it.sku && look.sku && it.sku === look.sku && remaining(it) > 0);
+    const bySku = ord.items.find(
+      (it) => lookSku && normSku(it.sku) === lookSku && remaining(it) > 0,
+    );
     if (bySku) return bySku;
     return null;
+  }, []);
+
+  // Última tag lida que NÃO pertence ao pedido — mostrada num banner pra
+  // operadora (e pra debug em campo: diz o que a tag É, não só que falhou).
+  const [reject, setReject] = useState<string | null>(null);
+  const rejectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const showReject = useCallback((msg: string) => {
+    setReject(msg);
+    if (rejectTimerRef.current) clearTimeout(rejectTimerRef.current);
+    rejectTimerRef.current = setTimeout(() => setReject(null), 8000);
   }, []);
 
   // Handler de tags lido sempre fresco via ref — assim a sessão de leitura NÃO
@@ -165,9 +194,16 @@ export function SeparacaoRunner({ title, kicker, claim, emptyHint, queue, onBack
           beepOk();
         } else {
           beepError();
+          if (look) {
+            const desc = [look.name, look.size, look.ean13].filter(Boolean).join(" · ");
+            showReject(`Peça lida não pertence a este pedido: ${desc}`);
+          } else {
+            showReject(`Tag não identificada em nenhuma fonte: ${epc.toUpperCase()}`);
+          }
         }
       }
       if (changed) {
+        setReject(null);
         tick();
         if (allDone(ord)) void finish();
       }
@@ -234,6 +270,7 @@ export function SeparacaoRunner({ title, kicker, claim, emptyHint, queue, onBack
           </button>
         </div>
       )}
+      {reject && <div style={rejectBanner}>⚠ {reject}</div>}
 
       <div style={layoutRow}>
         {queue && <QueueSidebar mode={queue.mode} size={queue.size} currentOrder={order} />}
@@ -862,6 +899,15 @@ const mesaDownBanner: CSSProperties = {
   background: "var(--danger-bg, var(--warning-bg))",
   color: "var(--danger-text, var(--warning-text))",
   fontSize: 13,
+  textAlign: "center",
+};
+
+const rejectBanner: CSSProperties = {
+  padding: "10px 32px",
+  background: "var(--warning-bg)",
+  color: "var(--warning-text)",
+  fontSize: 13,
+  fontWeight: 600,
   textAlign: "center",
 };
 
