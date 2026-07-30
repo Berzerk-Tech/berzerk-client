@@ -69,11 +69,21 @@ export function HomeMenu({ email, onEnter }: Props) {
           />
           <HwChip
             label="Leitor"
-            tone={devices.reader.mode === "direct-usb" ? "ok" : "neutral"}
+            tone={
+              devices.reader.mode === "direct-usb" ||
+              devices.reader.mode === "keyboard-wedge" ||
+              devices.reader.mode === "itag-ws"
+                ? "ok"
+                : "neutral"
+            }
             title={
-              devices.reader.mode === "via-proxy"
-                ? "Leitor RFID via proxy HTTPS"
-                : "Leitor RFID direto"
+              devices.reader.mode === "keyboard-wedge"
+                ? "Leitor RFID em modo teclado (plug and play)"
+                : devices.reader.mode === "itag-ws"
+                  ? "Leitor via WebSocket do iTAG (porta 9098)"
+                  : devices.reader.mode === "via-proxy"
+                    ? "Leitor RFID via proxy HTTPS"
+                    : "Leitor RFID direto"
             }
             onClick={() => onEnter("settings")}
           />

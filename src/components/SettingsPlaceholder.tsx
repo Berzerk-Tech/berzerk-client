@@ -12,7 +12,16 @@ import {
   type ThermalPrinter,
   type RfidReader,
 } from "../lib/devices";
-import { pingItag, type ConnectionStatus } from "../lib/rfid";
+import {
+  clearBuffer,
+  pingItag,
+  pollItagTags,
+  startReading,
+  stopReading,
+  type ConnectionStatus,
+} from "../lib/rfid";
+import { epcLookup } from "../services/orders";
+import { extractEpcs } from "../contexts/RfidContext";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { supabase } from "../lib/supabase";
 import { signInWithGoogle } from "../lib/auth";
@@ -438,6 +447,39 @@ function ReaderCard({
         </div>
       </Field>
 
+      {draft.mode === "itag-ws" && (
+        <>
+          <Field
+            label="URL do WebSocket"
+            hint="WebSocket Server do iTAG Monitor (porta 9098)"
+          >
+            <input
+              style={input}
+              className="berzerk-input"
+              value={draft.wsUrl}
+              onChange={(e) => setDraft({ ...draft, wsUrl: e.target.value })}
+              placeholder="ws://localhost:9098"
+              spellCheck={false}
+            />
+          </Field>
+          <WsReadTest url={draft.wsUrl} />
+        </>
+      )}
+
+      {draft.mode === "keyboard-wedge" && (
+        <Field
+          label="Teste do leitor"
+          hint="Clique no campo e encoste uma tag — o EPC deve aparecer digitado"
+        >
+          <input
+            style={input}
+            className="berzerk-input"
+            placeholder="Encoste uma tag no leitor…"
+            spellCheck={false}
+          />
+        </Field>
+      )}
+
       {draft.mode === "direct-usb" && <SerialSniffer />}
 
       {draft.mode === "direct-itag" && (
@@ -486,6 +528,8 @@ function ReaderCard({
         </div>
       )}
 
+      {draft.mode === "direct-itag" && <MesaReadTest host={draft.itagHost} />}
+
       {dirty && (
         <div style={cardActions}>
           <button
@@ -507,6 +551,219 @@ function ReaderCard({
         </div>
       )}
     </div>
+  );
+}
+
+// === WS Read Test — escuta o WebSocket do iTAG e mostra TUDO que chega ===
+
+/**
+ * Escuta o WS do iTAG por 15s: mostra as mensagens CRUAS (pra descobrirmos o
+ * formato exato em campo) + os EPCs extraídos + resolução EPC→EAN pela API.
+ */
+function WsReadTest({ url }: { url: string }) {
+  const [listening, setListening] = useState(false);
+  const [raw, setRaw] = useState<string[]>([]);
+  const [epcs, setEpcs] = useState<string[]>([]);
+  const [resolved, setResolved] = useState<Map<string, string>>(new Map());
+  const [error, setError] = useState<string | null>(null);
+
+  const run = () => {
+    setListening(true);
+    setError(null);
+    setRaw([]);
+    setEpcs([]);
+    setResolved(new Map());
+    const seen = new Set<string>();
+
+    let ws: WebSocket;
+    try {
+      ws = new WebSocket(url);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+      setListening(false);
+      return;
+    }
+
+    const handleText = (text: string) => {
+      setRaw((prev) => [...prev.slice(-19), text.slice(0, 300)]);
+      const fresh = extractEpcs(text).filter((e) => !seen.has(e));
+      if (fresh.length > 0) {
+        for (const e of fresh) seen.add(e);
+        setEpcs(Array.from(seen));
+        void epcLookup(fresh)
+          .then(({ items }) => {
+            setResolved((prev) => {
+              const m = new Map(prev);
+              for (const it of items) {
+                m.set(
+                  it.epc.toUpperCase(),
+                  `${it.ean13}${it.size ? ` · ${it.size}` : ""}`,
+                );
+              }
+              return m;
+            });
+          })
+          .catch(() => {});
+      }
+    };
+
+    ws.onmessage = (ev) => {
+      if (typeof ev.data === "string") handleText(ev.data);
+      else if (ev.data instanceof Blob) void ev.data.text().then(handleText);
+    };
+    ws.onerror = () => setError(`Não conectou em ${url}`);
+
+    setTimeout(() => {
+      try {
+        ws.close();
+      } catch {
+        /* ignore */
+      }
+      setListening(false);
+    }, 15_000);
+  };
+
+  return (
+    <Field
+      label="Teste de leitura (WebSocket)"
+      hint="Escuta 15s e mostra o que o iTAG mandar — encoste peças na mesa"
+    >
+      <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+        <button
+          type="button"
+          style={btnGhost}
+          className="berzerk-btn-ghost"
+          onClick={run}
+          disabled={listening}
+        >
+          {listening ? "Escutando… (encoste as peças)" : "▶ Escutar WebSocket por 15s"}
+        </button>
+        {error && <div style={portError}>{error}</div>}
+        {epcs.length > 0 && (
+          <div style={mesaReadList}>
+            {epcs.map((epc) => (
+              <div key={epc} style={mesaReadRow}>
+                <code style={mesaReadEpc}>{epc}</code>
+                <span style={resolved.has(epc) ? mesaReadOk : mesaReadMiss}>
+                  {resolved.get(epc) ?? "não resolvido no inventário"}
+                </span>
+              </div>
+            ))}
+            <span style={mesaReadCount}>
+              {epcs.length} {epcs.length === 1 ? "EPC extraído" : "EPCs extraídos"}
+            </span>
+          </div>
+        )}
+        {raw.length > 0 && (
+          <div style={wsRawBox}>
+            {raw.map((m, i) => (
+              <code key={i} style={wsRawLine}>
+                {m}
+              </code>
+            ))}
+          </div>
+        )}
+      </div>
+    </Field>
+  );
+}
+
+// === Mesa Read Test — debug de leitura (pedido do Leonardo) ===
+
+/**
+ * Lê a mesa por 10s e mostra os EPCs capturados + resolução EPC→EAN pela API.
+ * Pra debugar em campo: separa "mesa não lê" de "mesa lê mas o EPC não resolve".
+ */
+function MesaReadTest({ host }: { host: string }) {
+  const [reading, setReading] = useState(false);
+  const [secondsLeft, setSecondsLeft] = useState(0);
+  const [epcs, setEpcs] = useState<string[]>([]);
+  const [resolved, setResolved] = useState<Map<string, string>>(new Map());
+  const [error, setError] = useState<string | null>(null);
+
+  const run = async () => {
+    setReading(true);
+    setError(null);
+    setEpcs([]);
+    setResolved(new Map());
+    const seen = new Set<string>();
+    try {
+      await clearBuffer(host);
+      await startReading(host);
+      const end = Date.now() + 10_000;
+      while (Date.now() < end) {
+        setSecondsLeft(Math.ceil((end - Date.now()) / 1000));
+        const poll = await pollItagTags(host);
+        const fresh = poll.tags
+          .map((t) => t.trim().toUpperCase())
+          .filter((t) => t && !seen.has(t));
+        if (fresh.length > 0) {
+          for (const t of fresh) seen.add(t);
+          setEpcs(Array.from(seen));
+          // Resolução best-effort — falha da API não derruba o teste.
+          void epcLookup(fresh)
+            .then(({ items }) => {
+              setResolved((prev) => {
+                const m = new Map(prev);
+                for (const it of items) {
+                  m.set(
+                    it.epc.toUpperCase(),
+                    `${it.ean13}${it.size ? ` · ${it.size}` : ""}${it.sku ? ` · ${it.sku}` : ""}`,
+                  );
+                }
+                return m;
+              });
+            })
+            .catch(() => {});
+        }
+        await new Promise((r) => setTimeout(r, 600));
+      }
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setReading(false);
+      void stopReading(host).catch(() => {});
+    }
+  };
+
+  return (
+    <Field
+      label="Teste de leitura"
+      hint="Lê a mesa por 10s e mostra os EPCs + EAN resolvido"
+    >
+      <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+        <button
+          type="button"
+          style={btnGhost}
+          className="berzerk-btn-ghost"
+          onClick={() => void run()}
+          disabled={reading}
+        >
+          {reading ? `Lendo… ${secondsLeft}s (encoste as peças)` : "▶ Ler da mesa por 10s"}
+        </button>
+        {error && <div style={portError}>{error}</div>}
+        {epcs.length > 0 && (
+          <div style={mesaReadList}>
+            {epcs.map((epc) => (
+              <div key={epc} style={mesaReadRow}>
+                <code style={mesaReadEpc}>{epc}</code>
+                <span style={resolved.has(epc) ? mesaReadOk : mesaReadMiss}>
+                  {resolved.get(epc) ?? "não resolvido no inventário"}
+                </span>
+              </div>
+            ))}
+            <span style={mesaReadCount}>
+              {epcs.length} {epcs.length === 1 ? "tag lida" : "tags lidas"}
+            </span>
+          </div>
+        )}
+        {!reading && epcs.length === 0 && !error && (
+          <span style={mesaReadIdle}>
+            Nenhuma leitura ainda — clique no botão e encoste peças na mesa.
+          </span>
+        )}
+      </div>
+    </Field>
   );
 }
 
@@ -1133,6 +1390,74 @@ const btnDanger: CSSProperties = {
   color: "var(--text-muted)",
 };
 
+
+// --- Teste de leitura da mesa ---
+
+const mesaReadList: CSSProperties = {
+  display: "flex",
+  flexDirection: "column",
+  gap: 6,
+  padding: "10px 12px",
+  background: "var(--bg-input)",
+  border: "1px solid var(--border)",
+  borderRadius: 8,
+};
+
+const mesaReadRow: CSSProperties = {
+  display: "flex",
+  alignItems: "center",
+  justifyContent: "space-between",
+  gap: 12,
+};
+
+const mesaReadEpc: CSSProperties = {
+  fontFamily: "var(--font-mono)",
+  fontSize: 12,
+  color: "var(--text)",
+};
+
+const mesaReadOk: CSSProperties = {
+  fontFamily: "var(--font-mono)",
+  fontSize: 11,
+  color: "var(--success-text)",
+};
+
+const mesaReadMiss: CSSProperties = {
+  fontFamily: "var(--font-mono)",
+  fontSize: 11,
+  color: "var(--warning-text)",
+};
+
+const mesaReadCount: CSSProperties = {
+  fontSize: 11,
+  color: "var(--text-muted)",
+  paddingTop: 4,
+  borderTop: "1px solid var(--border)",
+};
+
+const mesaReadIdle: CSSProperties = {
+  fontSize: 12,
+  color: "var(--text-muted)",
+};
+
+const wsRawBox: CSSProperties = {
+  display: "flex",
+  flexDirection: "column",
+  gap: 4,
+  padding: "8px 10px",
+  background: "var(--bg)",
+  border: "1px dashed var(--border)",
+  borderRadius: 8,
+  maxHeight: 180,
+  overflowY: "auto",
+};
+
+const wsRawLine: CSSProperties = {
+  fontFamily: "var(--font-mono)",
+  fontSize: 10,
+  color: "var(--text-muted)",
+  wordBreak: "break-all",
+};
 
 const infoCard: CSSProperties = {
   background: "var(--bg-card)",

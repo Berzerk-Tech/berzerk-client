@@ -37,6 +37,149 @@ type RfidContextValue = {
 
 const RfidContext = createContext<RfidContextValue | null>(null);
 
+/** Healthcheck do WS: conecta, resolve true no open, false em erro/timeout. */
+function pingWebSocket(url: string, timeoutMs: number): Promise<boolean> {
+  return new Promise((resolve) => {
+    let done = false;
+    const finish = (ok: boolean, ws?: WebSocket) => {
+      if (done) return;
+      done = true;
+      try {
+        ws?.close();
+      } catch {
+        /* ignore */
+      }
+      resolve(ok);
+    };
+    try {
+      const ws = new WebSocket(url);
+      const timer = setTimeout(() => finish(false, ws), timeoutMs);
+      ws.onopen = () => {
+        clearTimeout(timer);
+        finish(true, ws);
+      };
+      ws.onerror = () => {
+        clearTimeout(timer);
+        finish(false, ws);
+      };
+    } catch {
+      finish(false);
+    }
+  });
+}
+
+/**
+ * Extrai EPCs de uma mensagem do WebSocket do iTAG (formato varia por versão):
+ * qualquer sequência hex de 16–32 dígitos vale como EPC candidato. Robusto a
+ * JSON, texto puro ou CSV — o posvenda consome esse mesmo WS.
+ */
+export function extractEpcs(message: string): string[] {
+  const found = message.toUpperCase().match(/[0-9A-F]{16,32}/g);
+  return found ? Array.from(new Set(found)) : [];
+}
+
+/**
+ * Sessão de leitura via WebSocket Server do iTAG Monitor (porta 9098) — o
+ * caminho de leitura do pós-venda. Reconecta sozinha a cada 2s se cair.
+ */
+function startWsSession(
+  url: string,
+  onTags: (newEpcs: string[]) => void,
+  onStatus: (up: boolean, err?: string) => void,
+): () => void {
+  const seen = new Set<string>();
+  let stopped = false;
+  let ws: WebSocket | null = null;
+  let retry: ReturnType<typeof setTimeout> | null = null;
+
+  const handleText = (text: string) => {
+    const fresh = extractEpcs(text).filter((e) => !seen.has(e));
+    if (fresh.length > 0) {
+      for (const e of fresh) seen.add(e);
+      onTags(fresh);
+    }
+  };
+
+  const connect = () => {
+    if (stopped) return;
+    try {
+      ws = new WebSocket(url);
+    } catch (e) {
+      onStatus(false, e instanceof Error ? e.message : String(e));
+      retry = setTimeout(connect, 2000);
+      return;
+    }
+    ws.onopen = () => onStatus(true);
+    ws.onmessage = (ev) => {
+      if (typeof ev.data === "string") handleText(ev.data);
+      else if (ev.data instanceof Blob) void ev.data.text().then(handleText);
+    };
+    ws.onclose = () => {
+      if (!stopped) {
+        onStatus(false, "WebSocket do iTAG caiu — reconectando…");
+        retry = setTimeout(connect, 2000);
+      }
+    };
+    ws.onerror = () => {
+      /* onclose cuida do retry */
+    };
+  };
+  connect();
+
+  return () => {
+    stopped = true;
+    if (retry) clearTimeout(retry);
+    try {
+      ws?.close();
+    } catch {
+      /* ignore */
+    }
+  };
+}
+
+/**
+ * Sessão de leitura pra leitor em modo TECLADO (keyboard wedge — ex.: ACURA
+ * AC01v2, que digita o EPC como um teclado USB e finaliza com Enter).
+ *
+ * Heurística anti-falso-positivo: só aceita rajadas RÁPIDAS (gap < 150ms entre
+ * teclas — humano digita mais devagar) de caracteres hex com 16+ dígitos,
+ * finalizadas por Enter. Dedupe por sessão, igual ao modo iTAG.
+ */
+function startWedgeSession(onTags: (newEpcs: string[]) => void): () => void {
+  const seen = new Set<string>();
+  let buffer = "";
+  let lastKeyAt = 0;
+
+  const MAX_GAP_MS = 150;
+  const MIN_LEN = 16;
+
+  const onKeyDown = (ev: KeyboardEvent) => {
+    const now = Date.now();
+    if (now - lastKeyAt > MAX_GAP_MS) buffer = "";
+    lastKeyAt = now;
+
+    if (ev.key === "Enter") {
+      const epc = buffer.toUpperCase();
+      buffer = "";
+      if (epc.length >= MIN_LEN && /^[0-9A-F]+$/.test(epc) && !seen.has(epc)) {
+        seen.add(epc);
+        onTags([epc]);
+      }
+      return;
+    }
+    if (ev.key.length === 1 && /^[0-9A-Fa-f]$/.test(ev.key)) {
+      buffer += ev.key;
+    } else {
+      buffer = "";
+    }
+  };
+
+  window.addEventListener("keydown", onKeyDown, true);
+  return () => {
+    window.removeEventListener("keydown", onKeyDown, true);
+  };
+}
+
 export function RfidProvider({ children }: { children: ReactNode }) {
   const [connected, setConnected] = useState(false);
   const [host, setHost] = useState(() => getDeviceConfig().reader.itagHost);
@@ -44,7 +187,23 @@ export function RfidProvider({ children }: { children: ReactNode }) {
   const cacheRef = useRef<Map<string, EpcLookupItem>>(new Map());
 
   const ping = useCallback(async () => {
-    const h = getDeviceConfig().reader.itagHost;
+    const reader = getDeviceConfig().reader;
+    // Keyboard wedge: não há o que pingar — o leitor é um teclado USB.
+    if (reader.mode === "keyboard-wedge") {
+      setHost("leitor-teclado");
+      setConnected(true);
+      setLastError(null);
+      return;
+    }
+    // iTAG WebSocket: tenta abrir a conexão por 3s como healthcheck.
+    if (reader.mode === "itag-ws") {
+      setHost(reader.wsUrl);
+      const ok = await pingWebSocket(reader.wsUrl, 3000);
+      setConnected(ok);
+      setLastError(ok ? null : "WebSocket do iTAG não respondeu");
+      return;
+    }
+    const h = reader.itagHost;
     setHost(h);
     try {
       const status = await pingItag(h);
@@ -70,7 +229,17 @@ export function RfidProvider({ children }: { children: ReactNode }) {
   }, [ping]);
 
   const startReadingSession = useCallback((onTags: (newEpcs: string[]) => void) => {
-    const h = getDeviceConfig().reader.itagHost;
+    const reader = getDeviceConfig().reader;
+    if (reader.mode === "keyboard-wedge") {
+      return startWedgeSession(onTags);
+    }
+    if (reader.mode === "itag-ws") {
+      return startWsSession(reader.wsUrl, onTags, (up, err) => {
+        setConnected(up);
+        setLastError(up ? null : err ?? null);
+      });
+    }
+    const h = reader.itagHost;
     const seen = new Set<string>();
     let stopped = false;
     let timer: ReturnType<typeof setTimeout> | null = null;
