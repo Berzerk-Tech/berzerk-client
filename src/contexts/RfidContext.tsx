@@ -81,10 +81,23 @@ export function extractEpcs(message: string): string[] {
     if (/^\d{13}$/.test(s)) out.add(s); // EAN-13
     else if (/^[0-9A-F]{16,32}$/.test(s)) out.add(s); // EPC hex
   };
+  const pushAny = (t: unknown) => {
+    if (t && typeof t === "object") {
+      for (const v of Object.values(t as Record<string, unknown>)) push(String(v));
+    } else {
+      push(String(t));
+    }
+  };
   try {
-    const parsed = JSON.parse(message) as { tags?: unknown[] };
-    if (Array.isArray(parsed.tags)) {
-      for (const t of parsed.tags) push(String(t));
+    const parsed = JSON.parse(message) as unknown;
+    // retornaEAN devolve array PURO (["789...", ...]); outras versões usam {tags:[...]}.
+    if (Array.isArray(parsed)) {
+      for (const t of parsed) pushAny(t);
+      return Array.from(out);
+    }
+    const obj = parsed as { tags?: unknown[] };
+    if (obj && Array.isArray(obj.tags)) {
+      for (const t of obj.tags) pushAny(t);
       return Array.from(out);
     }
   } catch {
@@ -114,9 +127,10 @@ export function bytesToPrintable(buf: ArrayBuffer): string {
 
 /**
  * Sessão de leitura via WebSocket Server do iTAG Monitor (porta 9098) — o
- * caminho do pós-venda. O protocolo é COMANDO via WS (não streaming passivo):
- * `limparLeitura` → `iniciar` e colheita periódica com `retornaEAN`; `parar`
- * ao encerrar. Reconecta sozinha a cada 2s se cair.
+ * caminho do pós-venda. O protocolo exige o CICLO completo (validado em campo:
+ * `retornaEAN` no meio da leitura devolve `[]`):
+ *   limparLeitura → iniciar → janela de leitura → parar → retornaEAN → repete.
+ * Tags também chegam em frames binários durante a leitura. Reconecta em 2s.
  */
 function startWsSession(
   url: string,
@@ -127,7 +141,6 @@ function startWsSession(
   let stopped = false;
   let ws: WebSocket | null = null;
   let retry: ReturnType<typeof setTimeout> | null = null;
-  let harvest: ReturnType<typeof setInterval> | null = null;
 
   const send = (cmd: string) => {
     try {
@@ -137,11 +150,29 @@ function startWsSession(
     }
   };
 
+  const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
   const handleText = (text: string) => {
     const fresh = extractEpcs(text).filter((e) => !seen.has(e));
     if (fresh.length > 0) {
       for (const e of fresh) seen.add(e);
       onTags(fresh);
+    }
+  };
+
+  // Mesmos tempos do posvenda (300ms entre comandos, ~2s de janela).
+  const runCycles = async () => {
+    while (!stopped && ws?.readyState === WebSocket.OPEN) {
+      send("limparLeitura");
+      await sleep(300);
+      if (stopped) break;
+      send("iniciar");
+      await sleep(2000);
+      if (stopped) break;
+      send("parar");
+      await sleep(300);
+      send("retornaEAN");
+      await sleep(700);
     }
   };
 
@@ -156,10 +187,7 @@ function startWsSession(
     }
     ws.onopen = () => {
       onStatus(true);
-      send("limparLeitura");
-      setTimeout(() => send("iniciar"), 300);
-      if (harvest) clearInterval(harvest);
-      harvest = setInterval(() => send("retornaEAN"), 1500);
+      void runCycles();
     };
     ws.onmessage = (ev) => {
       if (typeof ev.data === "string") handleText(ev.data);
@@ -167,7 +195,6 @@ function startWsSession(
         void ev.data.arrayBuffer().then((b) => handleText(bytesToPrintable(b)));
     };
     ws.onclose = () => {
-      if (harvest) clearInterval(harvest);
       if (!stopped) {
         onStatus(false, "WebSocket do iTAG caiu — reconectando…");
         retry = setTimeout(connect, 2000);
@@ -182,7 +209,6 @@ function startWsSession(
   return () => {
     stopped = true;
     if (retry) clearTimeout(retry);
-    if (harvest) clearInterval(harvest);
     send("parar");
     try {
       ws?.close();

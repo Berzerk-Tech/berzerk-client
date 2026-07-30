@@ -12,14 +12,7 @@ import {
   type ThermalPrinter,
   type RfidReader,
 } from "../lib/devices";
-import {
-  clearBuffer,
-  pingItag,
-  pollItagTags,
-  startReading,
-  stopReading,
-  type ConnectionStatus,
-} from "../lib/rfid";
+import { type ConnectionStatus } from "../lib/rfid";
 import { epcLookup } from "../services/orders";
 import { bytesToPrintable, extractEpcs } from "../contexts/RfidContext";
 import { decodeSgtin96 } from "../lib/sgtin";
@@ -27,7 +20,6 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import { supabase } from "../lib/supabase";
 import { signInWithGoogle } from "../lib/auth";
 import { listSerialPorts, describePort, type SerialPortInfo } from "../lib/usb";
-import { SerialSniffer } from "./SerialSniffer";
 import {
   getIprintConfig,
   setIprintConfig,
@@ -394,29 +386,10 @@ function ReaderCard({
   onSave: (r: RfidReader) => void;
 }) {
   const [draft, setDraft] = useState(reader);
-  const [testing, setTesting] = useState(false);
-  const [testResult, setTestResult] = useState<ConnectionStatus | null>(null);
   const dirty = JSON.stringify(draft) !== JSON.stringify(reader);
 
   // Atualiza o draft quando os defaults externos mudam (Salvar reseta)
   useEffect(() => { setDraft(reader); }, [reader]);
-
-  async function handleTest() {
-    setTesting(true);
-    setTestResult(null);
-    try {
-      const status = await pingItag(draft.itagHost);
-      setTestResult(status);
-    } catch (err) {
-      setTestResult({
-        ok: false,
-        host: draft.itagHost,
-        message: err instanceof Error ? err.message : String(err),
-      });
-    } finally {
-      setTesting(false);
-    }
-  }
 
   return (
     <div style={configCard}>
@@ -481,56 +454,6 @@ function ReaderCard({
         </Field>
       )}
 
-      {draft.mode === "direct-usb" && <SerialSniffer />}
-
-      {draft.mode === "direct-itag" && (
-        <Field
-          label="Endereço do iTAG Monitor"
-          hint="App fala HTTP direto — sem proxy"
-        >
-          <div style={inputWithButton}>
-            <input
-              style={{ ...input, flex: 1 }}
-              className="berzerk-input"
-              value={draft.itagHost}
-              onChange={(e) => setDraft({ ...draft, itagHost: e.target.value })}
-            />
-            <button
-              type="button"
-              style={btnGhost}
-              className="berzerk-btn-ghost"
-              onClick={handleTest}
-              disabled={testing}
-            >
-              {testing ? "Testando…" : "Testar conexão"}
-            </button>
-          </div>
-        </Field>
-      )}
-
-      {testResult && (
-        <div
-          style={{
-            ...testBox,
-            background: testResult.ok ? "var(--success-bg)" : "var(--danger-bg)",
-            color: testResult.ok ? "var(--success-text)" : "var(--danger-text)",
-            borderColor: testResult.ok ? "var(--success-border)" : "var(--danger-border)",
-          }}
-        >
-          <span style={testIcon}>{testResult.ok ? "●" : "○"}</span>
-          <div style={testCopy}>
-            <strong style={testTitle}>
-              {testResult.ok ? "iTAG Monitor respondeu" : "Não consegui conectar"}
-            </strong>
-            {testResult.message && (
-              <code style={testDetail}>{testResult.message}</code>
-            )}
-          </div>
-        </div>
-      )}
-
-      {draft.mode === "direct-itag" && <MesaReadTest host={draft.itagHost} />}
-
       {dirty && (
         <div style={cardActions}>
           <button
@@ -555,6 +478,34 @@ function ReaderCard({
   );
 }
 
+/** EAN "efetivo" de uma leitura: decodificado do EPC SGTIN ou EAN-13 direto. */
+function eanForTag(tag: string): string | null {
+  return decodeSgtin96(tag) ?? (/^\d{13}$/.test(tag) ? tag : null);
+}
+
+/**
+ * EAN→tamanho pela `rfid_epc_inventory` do Supabase: o par ean13↔size DENTRO da
+ * mesma linha é confiável (a corrupção conhecida é na associação EPC→linha).
+ */
+async function fetchEanSizes(eans: string[]): Promise<Map<string, string>> {
+  const out = new Map<string, string>();
+  const list = Array.from(new Set(eans)).filter(Boolean);
+  if (list.length === 0) return out;
+  try {
+    const { data } = await supabase
+      .from("rfid_epc_inventory")
+      .select("ean13, size")
+      .in("ean13", list)
+      .limit(1000);
+    for (const r of (data ?? []) as { ean13: string | null; size: string | null }[]) {
+      if (r.ean13 && r.size && !out.has(r.ean13)) out.set(r.ean13, r.size);
+    }
+  } catch {
+    /* sem tamanho é melhor do que quebrar o teste */
+  }
+  return out;
+}
+
 // === WS Read Test — escuta o WebSocket do iTAG e mostra TUDO que chega ===
 
 /**
@@ -566,6 +517,7 @@ function WsReadTest({ url }: { url: string }) {
   const [raw, setRaw] = useState<string[]>([]);
   const [epcs, setEpcs] = useState<string[]>([]);
   const [resolved, setResolved] = useState<Map<string, string>>(new Map());
+  const [sizes, setSizes] = useState<Map<string, string>>(new Map());
   const [error, setError] = useState<string | null>(null);
 
   const run = () => {
@@ -574,6 +526,7 @@ function WsReadTest({ url }: { url: string }) {
     setRaw([]);
     setEpcs([]);
     setResolved(new Map());
+    setSizes(new Map());
     const seen = new Set<string>();
 
     let ws: WebSocket;
@@ -585,13 +538,20 @@ function WsReadTest({ url }: { url: string }) {
       return;
     }
 
-    const handleText = (text: string) => {
-      setRaw((prev) => [...prev.slice(-19), text.slice(0, 300)]);
-      const fresh = extractEpcs(text).filter((e) => !seen.has(e));
-      if (fresh.length > 0) {
-        for (const e of fresh) seen.add(e);
-        setEpcs(Array.from(seen));
-        void epcLookup(fresh)
+    const ingest = (fresh: string[]) => {
+      if (fresh.length === 0) return;
+      for (const e of fresh) seen.add(e);
+      setEpcs(Array.from(seen));
+      const eans = fresh.map(eanForTag).filter((e): e is string => !!e);
+      if (eans.length > 0) {
+        void fetchEanSizes(eans).then((m) =>
+          setSizes((prev) => new Map([...prev, ...m])),
+        );
+      }
+      // API só pro que não decodifica localmente
+      const misses = fresh.filter((e) => !eanForTag(e));
+      if (misses.length > 0) {
+        void epcLookup(misses)
           .then(({ items }) => {
             setResolved((prev) => {
               const m = new Map(prev);
@@ -606,6 +566,11 @@ function WsReadTest({ url }: { url: string }) {
           })
           .catch(() => {});
       }
+    };
+
+    const handleText = (text: string) => {
+      setRaw((prev) => [...prev.slice(-19), text.slice(0, 300)]);
+      ingest(extractEpcs(text).filter((e) => !seen.has(e)));
     };
 
     const send = (cmd: string) => {
@@ -636,11 +601,7 @@ function WsReadTest({ url }: { url: string }) {
             ...prev.slice(-19),
             `[bin ${bytes.length}B] ${printable.replace(/\n+/g, "·").slice(0, 140)} | hex: ${hex}`,
           ]);
-          const fresh = extractEpcs(printable).filter((e) => !seen.has(e));
-          if (fresh.length > 0) {
-            for (const e of fresh) seen.add(e);
-            setEpcs(Array.from(seen));
-          }
+          ingest(extractEpcs(printable).filter((e) => !seen.has(e)));
         });
     };
     ws.onerror = () => setError(`Não conectou em ${url}`);
@@ -680,15 +641,15 @@ function WsReadTest({ url }: { url: string }) {
                 <code style={mesaReadEpc}>{epc}</code>
                 <span
                   style={
-                    resolved.has(epc) || decodeSgtin96(epc)
-                      ? mesaReadOk
-                      : mesaReadMiss
+                    eanForTag(epc) || resolved.has(epc) ? mesaReadOk : mesaReadMiss
                   }
                 >
-                  {resolved.get(epc) ??
-                    (decodeSgtin96(epc)
-                      ? `${decodeSgtin96(epc)} · decodificado da tag`
-                      : "não resolvido")}
+                  {(() => {
+                    const ean = eanForTag(epc);
+                    if (!ean) return resolved.get(epc) ?? "não resolvido";
+                    const size = sizes.get(ean);
+                    return `${ean}${size ? ` · ${size}` : ""} · da tag`;
+                  })()}
                 </span>
               </div>
             ))}
@@ -705,114 +666,6 @@ function WsReadTest({ url }: { url: string }) {
               </code>
             ))}
           </div>
-        )}
-      </div>
-    </Field>
-  );
-}
-
-// === Mesa Read Test — debug de leitura (pedido do Leonardo) ===
-
-/**
- * Lê a mesa por 10s e mostra os EPCs capturados + resolução EPC→EAN pela API.
- * Pra debugar em campo: separa "mesa não lê" de "mesa lê mas o EPC não resolve".
- */
-function MesaReadTest({ host }: { host: string }) {
-  const [reading, setReading] = useState(false);
-  const [secondsLeft, setSecondsLeft] = useState(0);
-  const [epcs, setEpcs] = useState<string[]>([]);
-  const [resolved, setResolved] = useState<Map<string, string>>(new Map());
-  const [error, setError] = useState<string | null>(null);
-
-  const run = async () => {
-    setReading(true);
-    setError(null);
-    setEpcs([]);
-    setResolved(new Map());
-    const seen = new Set<string>();
-    try {
-      await clearBuffer(host);
-      await startReading(host);
-      const end = Date.now() + 10_000;
-      while (Date.now() < end) {
-        setSecondsLeft(Math.ceil((end - Date.now()) / 1000));
-        const poll = await pollItagTags(host);
-        const fresh = poll.tags
-          .map((t) => t.trim().toUpperCase())
-          .filter((t) => t && !seen.has(t));
-        if (fresh.length > 0) {
-          for (const t of fresh) seen.add(t);
-          setEpcs(Array.from(seen));
-          // Resolução best-effort — falha da API não derruba o teste.
-          void epcLookup(fresh)
-            .then(({ items }) => {
-              setResolved((prev) => {
-                const m = new Map(prev);
-                for (const it of items) {
-                  m.set(
-                    it.epc.toUpperCase(),
-                    `${it.ean13}${it.size ? ` · ${it.size}` : ""}${it.sku ? ` · ${it.sku}` : ""}`,
-                  );
-                }
-                return m;
-              });
-            })
-            .catch(() => {});
-        }
-        await new Promise((r) => setTimeout(r, 600));
-      }
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
-    } finally {
-      setReading(false);
-      void stopReading(host).catch(() => {});
-    }
-  };
-
-  return (
-    <Field
-      label="Teste de leitura"
-      hint="Lê a mesa por 10s e mostra os EPCs + EAN resolvido"
-    >
-      <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-        <button
-          type="button"
-          style={btnGhost}
-          className="berzerk-btn-ghost"
-          onClick={() => void run()}
-          disabled={reading}
-        >
-          {reading ? `Lendo… ${secondsLeft}s (encoste as peças)` : "▶ Ler da mesa por 10s"}
-        </button>
-        {error && <div style={portError}>{error}</div>}
-        {epcs.length > 0 && (
-          <div style={mesaReadList}>
-            {epcs.map((epc) => (
-              <div key={epc} style={mesaReadRow}>
-                <code style={mesaReadEpc}>{epc}</code>
-                <span
-                  style={
-                    resolved.has(epc) || decodeSgtin96(epc)
-                      ? mesaReadOk
-                      : mesaReadMiss
-                  }
-                >
-                  {resolved.get(epc) ??
-                    (decodeSgtin96(epc)
-                      ? `${decodeSgtin96(epc)} · decodificado da tag`
-                      : "não resolvido")}
-                </span>
-              </div>
-            ))}
-            <span style={mesaReadCount}>
-              {epcs.length} {epcs.length === 1 ? "tag lida" : "tags lidas"}
-            </span>
-          </div>
-        )}
-        {!reading && epcs.length === 0 && !error && (
-          <span style={mesaReadIdle}>
-            Nenhuma leitura ainda — clique no botão e encoste peças na mesa.
-          </span>
         )}
       </div>
     </Field>
@@ -1255,12 +1108,6 @@ const input: CSSProperties = {
   transition: "border-color 120ms",
 };
 
-const inputWithButton: CSSProperties = {
-  display: "flex",
-  gap: 8,
-  alignItems: "stretch",
-};
-
 const portList: CSSProperties = {
   display: "flex",
   flexDirection: "column",
@@ -1485,11 +1332,6 @@ const mesaReadCount: CSSProperties = {
   color: "var(--text-muted)",
   paddingTop: 4,
   borderTop: "1px solid var(--border)",
-};
-
-const mesaReadIdle: CSSProperties = {
-  fontSize: 12,
-  color: "var(--text-muted)",
 };
 
 const wsRawBox: CSSProperties = {

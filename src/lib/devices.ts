@@ -19,8 +19,10 @@ export type RfidReader = {
   /** Host do iTAG Monitor (default localhost:9093). Quando matarmos o proxy HTTPS,
    *  é aqui que apontamos direto. */
   itagHost: string;
-  /** Modo de operação atual */
-  mode: "via-proxy" | "direct-itag" | "direct-usb" | "keyboard-wedge" | "itag-ws";
+  /** Modo de operação atual. HTTP/proxy e serial direto foram aposentados
+   *  (2026-07-30): leitura é via WebSocket do iTAG (Cykeo) ou teclado (ACURA).
+   *  Config antiga salva com outro modo é coagida pra `itag-ws` no parse. */
+  mode: "keyboard-wedge" | "itag-ws";
   /** Host do proxy HTTPS (legado, default 127.0.0.1:3443). Só usado se mode = via-proxy. */
   proxyHost: string;
   /** URL do WebSocket Server do iTAG Monitor (porta 9098) — mesmo caminho que o
@@ -42,7 +44,7 @@ const DEFAULT_CONFIG: DeviceConfig = {
     itagHost: "http://localhost:9093",
     // Proxy aposentado. Default fala direto com o iTAG Monitor (HTTP local);
     // "direct-usb" é o alvo (serial USB sem middleware) — ver protocolo.
-    mode: "direct-itag",
+    mode: "itag-ws",
     proxyHost: "https://127.0.0.1:3443",
     wsUrl: "ws://localhost:9098",
   },
@@ -96,11 +98,7 @@ function parseReader(r: unknown): RfidReader {
   const obj = r as Partial<RfidReader>;
   // Proxy aposentado: qualquer config legada cai pro iTAG Monitor direto.
   const mode: RfidReader["mode"] =
-    obj.mode === "direct-usb" ||
-    obj.mode === "keyboard-wedge" ||
-    obj.mode === "itag-ws"
-      ? obj.mode
-      : "direct-itag";
+    obj.mode === "keyboard-wedge" ? "keyboard-wedge" : "itag-ws";
   return {
     name: obj.name || DEFAULT_CONFIG.reader.name,
     itagHost: obj.itagHost || DEFAULT_CONFIG.reader.itagHost,
@@ -135,18 +133,6 @@ export const READER_MODES: Array<{
     label: "Teclado (keyboard wedge)",
     description:
       "O leitor digita o EPC como um teclado USB (ACURA AC01v2 e similares) — plug and play, sem driver",
-    available: true,
-  },
-  {
-    value: "direct-usb",
-    label: "Direto via USB",
-    description: "App fala serial USB direto com a mesa — sem iTAG Monitor",
-    available: true,
-  },
-  {
-    value: "direct-itag",
-    label: "Via iTAG Monitor (HTTP)",
-    description: "App chama localhost:9093 — o iTAG Monitor fala USB com a mesa",
     available: true,
   },
 ];
