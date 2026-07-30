@@ -607,6 +607,21 @@ function WsReadTest({ url }: { url: string }) {
       }
     };
 
+    const send = (cmd: string) => {
+      try {
+        if (ws.readyState === WebSocket.OPEN) ws.send(cmd);
+      } catch {
+        /* ignore */
+      }
+    };
+
+    // Protocolo do iTAG (mesmo do posvenda): comanda a leitura pelo próprio WS.
+    ws.onopen = () => {
+      send("limparLeitura");
+      setTimeout(() => send("iniciar"), 300);
+    };
+    const harvest = setInterval(() => send("retornaEAN"), 1500);
+
     ws.onmessage = (ev) => {
       if (typeof ev.data === "string") handleText(ev.data);
       else if (ev.data instanceof Blob) void ev.data.text().then(handleText);
@@ -614,6 +629,8 @@ function WsReadTest({ url }: { url: string }) {
     ws.onerror = () => setError(`Não conectou em ${url}`);
 
     setTimeout(() => {
+      clearInterval(harvest);
+      send("parar");
       try {
         ws.close();
       } catch {

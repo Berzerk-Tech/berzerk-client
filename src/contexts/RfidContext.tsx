@@ -69,18 +69,37 @@ function pingWebSocket(url: string, timeoutMs: number): Promise<boolean> {
 }
 
 /**
- * Extrai EPCs de uma mensagem do WebSocket do iTAG (formato varia por versão):
- * qualquer sequência hex de 16–32 dígitos vale como EPC candidato. Robusto a
- * JSON, texto puro ou CSV — o posvenda consome esse mesmo WS.
+ * Extrai identificadores de tag de uma mensagem do WS do iTAG. Formatos reais
+ * (engenharia reversa do console RFID do posvenda): JSON `{tags:[...]}`, linhas
+ * de EAN-13 (13 dígitos — o iTAG já resolve EPC→EAN internamente) ou EPC hex.
  */
 export function extractEpcs(message: string): string[] {
-  const found = message.toUpperCase().match(/[0-9A-F]{16,32}/g);
-  return found ? Array.from(new Set(found)) : [];
+  const out = new Set<string>();
+  const push = (v: string) => {
+    const s = v.trim().toUpperCase();
+    if (/^\d{13}$/.test(s)) out.add(s); // EAN-13
+    else if (/^[0-9A-F]{16,32}$/.test(s)) out.add(s); // EPC hex
+  };
+  try {
+    const parsed = JSON.parse(message) as { tags?: unknown[] };
+    if (Array.isArray(parsed.tags)) {
+      for (const t of parsed.tags) push(String(t));
+      return Array.from(out);
+    }
+  } catch {
+    /* não é JSON — segue pro parse de texto */
+  }
+  for (const line of message.split(/[\r\n,;]+/)) push(line);
+  // fallback: EPCs hex embutidos em texto maior
+  for (const hex of message.toUpperCase().match(/[0-9A-F]{16,32}/g) ?? []) out.add(hex);
+  return Array.from(out);
 }
 
 /**
  * Sessão de leitura via WebSocket Server do iTAG Monitor (porta 9098) — o
- * caminho de leitura do pós-venda. Reconecta sozinha a cada 2s se cair.
+ * caminho do pós-venda. O protocolo é COMANDO via WS (não streaming passivo):
+ * `limparLeitura` → `iniciar` e colheita periódica com `retornaEAN`; `parar`
+ * ao encerrar. Reconecta sozinha a cada 2s se cair.
  */
 function startWsSession(
   url: string,
@@ -91,6 +110,15 @@ function startWsSession(
   let stopped = false;
   let ws: WebSocket | null = null;
   let retry: ReturnType<typeof setTimeout> | null = null;
+  let harvest: ReturnType<typeof setInterval> | null = null;
+
+  const send = (cmd: string) => {
+    try {
+      if (ws?.readyState === WebSocket.OPEN) ws.send(cmd);
+    } catch {
+      /* ignore */
+    }
+  };
 
   const handleText = (text: string) => {
     const fresh = extractEpcs(text).filter((e) => !seen.has(e));
@@ -109,12 +137,19 @@ function startWsSession(
       retry = setTimeout(connect, 2000);
       return;
     }
-    ws.onopen = () => onStatus(true);
+    ws.onopen = () => {
+      onStatus(true);
+      send("limparLeitura");
+      setTimeout(() => send("iniciar"), 300);
+      if (harvest) clearInterval(harvest);
+      harvest = setInterval(() => send("retornaEAN"), 1500);
+    };
     ws.onmessage = (ev) => {
       if (typeof ev.data === "string") handleText(ev.data);
       else if (ev.data instanceof Blob) void ev.data.text().then(handleText);
     };
     ws.onclose = () => {
+      if (harvest) clearInterval(harvest);
       if (!stopped) {
         onStatus(false, "WebSocket do iTAG caiu — reconectando…");
         retry = setTimeout(connect, 2000);
@@ -129,6 +164,8 @@ function startWsSession(
   return () => {
     stopped = true;
     if (retry) clearTimeout(retry);
+    if (harvest) clearInterval(harvest);
+    send("parar");
     try {
       ws?.close();
     } catch {
@@ -185,8 +222,12 @@ export function RfidProvider({ children }: { children: ReactNode }) {
   const [host, setHost] = useState(() => getDeviceConfig().reader.itagHost);
   const [lastError, setLastError] = useState<string | null>(null);
   const cacheRef = useRef<Map<string, EpcLookupItem>>(new Map());
+  // Sessão WS ativa + última sondagem: o iTAG mostra um POPUP a cada conexão
+  // nova no WS dele — então o healthcheck não pode abrir conexão a cada 5s.
+  const wsSessionActiveRef = useRef(false);
+  const lastWsProbeRef = useRef(0);
 
-  const ping = useCallback(async () => {
+  const ping = useCallback(async (force = false) => {
     const reader = getDeviceConfig().reader;
     // Keyboard wedge: não há o que pingar — o leitor é um teclado USB.
     if (reader.mode === "keyboard-wedge") {
@@ -195,9 +236,15 @@ export function RfidProvider({ children }: { children: ReactNode }) {
       setLastError(null);
       return;
     }
-    // iTAG WebSocket: tenta abrir a conexão por 3s como healthcheck.
+    // iTAG WebSocket: com sessão ativa, quem informa o status é a sessão.
+    // Ocioso, sonda no máximo 1x/min (cada conexão dispara popup no iTAG);
+    // o botão "reconectar" força na hora.
     if (reader.mode === "itag-ws") {
       setHost(reader.wsUrl);
+      if (wsSessionActiveRef.current) return;
+      const now = Date.now();
+      if (!force && now - lastWsProbeRef.current < 60_000) return;
+      lastWsProbeRef.current = now;
       const ok = await pingWebSocket(reader.wsUrl, 3000);
       setConnected(ok);
       setLastError(ok ? null : "WebSocket do iTAG não respondeu");
@@ -234,10 +281,15 @@ export function RfidProvider({ children }: { children: ReactNode }) {
       return startWedgeSession(onTags);
     }
     if (reader.mode === "itag-ws") {
-      return startWsSession(reader.wsUrl, onTags, (up, err) => {
+      wsSessionActiveRef.current = true;
+      const stop = startWsSession(reader.wsUrl, onTags, (up, err) => {
         setConnected(up);
         setLastError(up ? null : err ?? null);
       });
+      return () => {
+        wsSessionActiveRef.current = false;
+        stop();
+      };
     }
     const h = reader.itagHost;
     const seen = new Set<string>();
@@ -294,6 +346,11 @@ export function RfidProvider({ children }: { children: ReactNode }) {
       const result = new Map<string, EpcLookupItem>();
       const misses: string[] = [];
       for (const e of norm) {
+        // EAN-13 direto (iTAG WS já resolve EPC→EAN): não precisa de lookup.
+        if (/^\d{13}$/.test(e)) {
+          result.set(e, { epc: e, ean13: e, sku: null, size: null, batchCode: null });
+          continue;
+        }
         const cached = cacheRef.current.get(e);
         if (cached) result.set(e, cached);
         else misses.push(e);
@@ -319,7 +376,8 @@ export function RfidProvider({ children }: { children: ReactNode }) {
     connected,
     host,
     lastError,
-    reconnect: ping,
+    // Reconectar manual força a sondagem (ignora o rate-limit anti-popup).
+    reconnect: () => ping(true),
     startReadingSession,
     resolveEpcs,
   };
