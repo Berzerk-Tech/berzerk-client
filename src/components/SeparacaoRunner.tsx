@@ -13,12 +13,15 @@ import { OperatorChip } from "./OperatorChip";
 import { useRfid } from "../contexts/RfidContext";
 import { beepError, beepOk } from "../lib/beep";
 import { subscribeQueueChanged } from "../lib/realtime";
+import { SupervisorModal } from "./SupervisorModal";
 import {
   completeSeparacao,
   getQueueList,
   releaseSeparacao,
   type ClaimResponse,
   type EpcLookupItem,
+  type LiberacaoFaltante,
+  type LiberacaoSupervisor,
   type Order,
   type OrderItem,
   type QueueListItem,
@@ -26,7 +29,6 @@ import {
   type SeparationMode,
 } from "../services/orders";
 
-const MAX_TAGS_PER_ITEM = 2;
 const SHADOW = import.meta.env.VITE_SEPARACAO_SHADOW === "true";
 
 /** Tamanhos conhecidos pra extrair do nome quando o item vem sem `tamanho`. */
@@ -160,6 +162,35 @@ export function SeparacaoRunner({ title, kicker, claim, emptyHint, queue, onBack
     }
   }, [completing, collectedTags, fetchNext]);
 
+  // === Liberação por supervisor (concluir SEM todas as peças no RFID) ===
+  const [supervisorOpen, setSupervisorOpen] = useState(false);
+
+  /** Itens com saldo não lido — contexto do modal + auditoria no nexus. */
+  const faltantes = useCallback((): LiberacaoFaltante[] => {
+    const ord = orderRef.current;
+    if (!ord) return [];
+    return ord.items
+      .map((it) => ({
+        itemId: it.id,
+        nome: it.nome,
+        tamanho: itemSize(it),
+        faltam: it.quantidade - (progressRef.current.get(it.id)?.count ?? 0),
+      }))
+      .filter((f) => f.faltam > 0);
+  }, []);
+
+  const supervisorConfirm = useCallback(
+    async (liberacao: LiberacaoSupervisor) => {
+      const ord = orderRef.current;
+      if (!ord) return;
+      // Erros sobem pro modal (PIN errado etc.) — só fecha quando concluir.
+      await completeSeparacao(ord.id, collectedTags(), liberacao);
+      setSupervisorOpen(false);
+      await fetchNext();
+    },
+    [collectedTags, fetchNext],
+  );
+
   // Acha o item esperado que casa com a tag lida. Casa por QUALQUER
   // identificador GTIN dos dois lados (ean OU sku-que-é-código-de-barras,
   // normalizados — Tiny mistura os campos), com fallback de SKU textual.
@@ -208,7 +239,8 @@ export function SeparacaoRunner({ title, kicker, claim, emptyHint, queue, onBack
         if (item) {
           const prog = progressRef.current.get(item.id) ?? { count: 0, epcs: [] };
           prog.count += 1;
-          if (prog.epcs.length < MAX_TAGS_PER_ITEM) prog.epcs.push(epc.toUpperCase());
+          // Uma tag por unidade lida (o nexus valida rfidTags.length vs grade).
+          prog.epcs.push(epc.toUpperCase());
           progressRef.current.set(item.id, prog);
           changed = true;
           beepOk();
@@ -329,10 +361,19 @@ export function SeparacaoRunner({ title, kicker, claim, emptyHint, queue, onBack
               completing={completing}
               onComplete={() => void finish()}
               onSkip={handleBack}
+              onSupervisor={() => setSupervisorOpen(true)}
             />
           )}
         </main>
       </div>
+
+      {supervisorOpen && (
+        <SupervisorModal
+          faltantes={faltantes()}
+          onCancel={() => setSupervisorOpen(false)}
+          onConfirm={supervisorConfirm}
+        />
+      )}
     </div>
   );
 }
@@ -477,12 +518,14 @@ function OrderView({
   completing,
   onComplete,
   onSkip,
+  onSupervisor,
 }: {
   order: Order;
   progress: Map<string, ItemProgress>;
   completing: boolean;
   onComplete: () => void;
   onSkip: () => void;
+  onSupervisor: () => void;
 }) {
   const totalExpected = order.items.reduce((a, it) => a + it.quantidade, 0);
   const totalDone = order.items.reduce(
@@ -555,6 +598,11 @@ function OrderView({
         <button style={ghostBtn} onClick={onSkip} disabled={completing}>
           Devolver à fila
         </button>
+        {!done && (
+          <button style={supervisorBtn} onClick={onSupervisor} disabled={completing}>
+            🔓 Liberar com supervisor
+          </button>
+        )}
         <button
           style={done && !completing ? primaryBtn : primaryBtnDisabled}
           onClick={onComplete}
@@ -1227,6 +1275,12 @@ const ghostBtn: CSSProperties = {
   cursor: "pointer",
   fontSize: 14,
   fontWeight: 600,
+};
+
+const supervisorBtn: CSSProperties = {
+  ...ghostBtn,
+  color: "var(--warning-text)",
+  border: "1px dashed var(--border-strong)",
 };
 
 const errorBox: CSSProperties = {

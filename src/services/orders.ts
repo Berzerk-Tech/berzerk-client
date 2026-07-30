@@ -136,11 +136,47 @@ export function claimNextMixed(sizes?: string[]): Promise<ClaimResponse> {
   });
 }
 
-export function completeSeparacao(orderId: string, rfidTags: string[]): Promise<Order> {
+/** Item que faltou no RFID quando o supervisor liberou (auditoria). */
+export type LiberacaoFaltante = {
+  itemId: string;
+  nome: string | null;
+  tamanho: string | null;
+  faltam: number;
+};
+
+/** Credencial de liberação de supervisor (validada server-side no nexus). */
+export type LiberacaoSupervisor = {
+  supervisorId: string;
+  pin: string;
+  motivo: string;
+  faltantes: LiberacaoFaltante[];
+};
+
+export type SupervisorInfo = { id: string; nome: string; temPin: boolean };
+
+export function completeSeparacao(
+  orderId: string,
+  rfidTags: string[],
+  liberacao?: LiberacaoSupervisor,
+): Promise<Order> {
   return apiRequest<Order>(`/separacao/${orderId}/complete`, {
     method: "POST",
-    body: { rfidTags },
+    body: liberacao ? { rfidTags, liberacao } : { rfidTags },
   });
+}
+
+/** Supervisores disponíveis pro fluxo de liberação (picker da estação). */
+export function getSupervisores(): Promise<{ supervisores: SupervisorInfo[] }> {
+  return apiRequest<{ supervisores: SupervisorInfo[] }>("/separacao/supervisores");
+}
+
+/** Define/troca o PIN do supervisor — server-side, vale em toda estação na hora. */
+export function alterarPinSupervisor(req: {
+  supervisorId: string;
+  pinAtual?: string;
+  pinNovo: string;
+}): Promise<{ ok: true }> {
+  return apiRequest<{ ok: true }>("/separacao/supervisor-pin", { method: "POST", body: req });
 }
 
 export function releaseSeparacao(orderId: string): Promise<Order> {
