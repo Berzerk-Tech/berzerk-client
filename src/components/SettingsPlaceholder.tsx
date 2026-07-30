@@ -21,7 +21,8 @@ import {
   type ConnectionStatus,
 } from "../lib/rfid";
 import { epcLookup } from "../services/orders";
-import { extractEpcs } from "../contexts/RfidContext";
+import { bytesToPrintable, extractEpcs } from "../contexts/RfidContext";
+import { decodeSgtin96 } from "../lib/sgtin";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { supabase } from "../lib/supabase";
 import { signInWithGoogle } from "../lib/auth";
@@ -624,7 +625,23 @@ function WsReadTest({ url }: { url: string }) {
 
     ws.onmessage = (ev) => {
       if (typeof ev.data === "string") handleText(ev.data);
-      else if (ev.data instanceof Blob) void ev.data.text().then(handleText);
+      else if (ev.data instanceof Blob)
+        void ev.data.arrayBuffer().then((buf) => {
+          const bytes = new Uint8Array(buf);
+          const hex = Array.from(bytes.slice(0, 48))
+            .map((b) => b.toString(16).padStart(2, "0"))
+            .join(" ");
+          const printable = bytesToPrintable(buf);
+          setRaw((prev) => [
+            ...prev.slice(-19),
+            `[bin ${bytes.length}B] ${printable.replace(/\n+/g, "·").slice(0, 140)} | hex: ${hex}`,
+          ]);
+          const fresh = extractEpcs(printable).filter((e) => !seen.has(e));
+          if (fresh.length > 0) {
+            for (const e of fresh) seen.add(e);
+            setEpcs(Array.from(seen));
+          }
+        });
     };
     ws.onerror = () => setError(`Não conectou em ${url}`);
 
@@ -661,8 +678,17 @@ function WsReadTest({ url }: { url: string }) {
             {epcs.map((epc) => (
               <div key={epc} style={mesaReadRow}>
                 <code style={mesaReadEpc}>{epc}</code>
-                <span style={resolved.has(epc) ? mesaReadOk : mesaReadMiss}>
-                  {resolved.get(epc) ?? "não resolvido no inventário"}
+                <span
+                  style={
+                    resolved.has(epc) || decodeSgtin96(epc)
+                      ? mesaReadOk
+                      : mesaReadMiss
+                  }
+                >
+                  {resolved.get(epc) ??
+                    (decodeSgtin96(epc)
+                      ? `${decodeSgtin96(epc)} · decodificado da tag`
+                      : "não resolvido")}
                 </span>
               </div>
             ))}
@@ -764,8 +790,17 @@ function MesaReadTest({ host }: { host: string }) {
             {epcs.map((epc) => (
               <div key={epc} style={mesaReadRow}>
                 <code style={mesaReadEpc}>{epc}</code>
-                <span style={resolved.has(epc) ? mesaReadOk : mesaReadMiss}>
-                  {resolved.get(epc) ?? "não resolvido no inventário"}
+                <span
+                  style={
+                    resolved.has(epc) || decodeSgtin96(epc)
+                      ? mesaReadOk
+                      : mesaReadMiss
+                  }
+                >
+                  {resolved.get(epc) ??
+                    (decodeSgtin96(epc)
+                      ? `${decodeSgtin96(epc)} · decodificado da tag`
+                      : "não resolvido")}
                 </span>
               </div>
             ))}

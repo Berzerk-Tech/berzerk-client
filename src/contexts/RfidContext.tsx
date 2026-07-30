@@ -13,6 +13,7 @@ import {
 } from "react";
 import { getDeviceConfig } from "../lib/devices";
 import { clearBuffer, pingItag, pollItagTags, startReading, stopReading } from "../lib/rfid";
+import { decodeSgtin96 } from "../lib/sgtin";
 import { epcLookup, type EpcLookupItem } from "../services/orders";
 
 /** Intervalo entre polls durante uma sessão de leitura contínua. */
@@ -90,9 +91,25 @@ export function extractEpcs(message: string): string[] {
     /* não é JSON — segue pro parse de texto */
   }
   for (const line of message.split(/[\r\n,;]+/)) push(line);
-  // fallback: EPCs hex embutidos em texto maior
+  // fallbacks: EPC hex ou EAN-13 embutidos em texto/lixo binário
   for (const hex of message.toUpperCase().match(/[0-9A-F]{16,32}/g) ?? []) out.add(hex);
+  for (const run of message.match(/\d{13,}/g) ?? []) {
+    if (run.length === 13) out.add(run);
+  }
   return Array.from(out);
+}
+
+/**
+ * Frame binário do WS do iTAG → texto: bytes imprimíveis ficam, o resto vira
+ * quebra de linha (os EPC/EAN vêm em ASCII no meio de padding binário).
+ */
+export function bytesToPrintable(buf: ArrayBuffer): string {
+  const bytes = new Uint8Array(buf);
+  let out = "";
+  for (const b of bytes) {
+    out += b >= 0x20 && b <= 0x7e ? String.fromCharCode(b) : "\n";
+  }
+  return out;
 }
 
 /**
@@ -146,7 +163,8 @@ function startWsSession(
     };
     ws.onmessage = (ev) => {
       if (typeof ev.data === "string") handleText(ev.data);
-      else if (ev.data instanceof Blob) void ev.data.text().then(handleText);
+      else if (ev.data instanceof Blob)
+        void ev.data.arrayBuffer().then((b) => handleText(bytesToPrintable(b)));
     };
     ws.onclose = () => {
       if (harvest) clearInterval(harvest);
@@ -349,6 +367,14 @@ export function RfidProvider({ children }: { children: ReactNode }) {
         // EAN-13 direto (iTAG WS já resolve EPC→EAN): não precisa de lookup.
         if (/^\d{13}$/.test(e)) {
           result.set(e, { epc: e, ean13: e, sku: null, size: null, batchCode: null });
+          continue;
+        }
+        // DECODE-FIRST: EPC SGTIN-96 carrega o EAN nos próprios bits (mesmo
+        // caminho do posvenda). Instantâneo, offline e imune a inventário
+        // desatualizado/errado. API só pra EPC fora do padrão SGTIN.
+        const decoded = decodeSgtin96(e);
+        if (decoded) {
+          result.set(e, { epc: e, ean13: decoded, sku: null, size: null, batchCode: null });
           continue;
         }
         const cached = cacheRef.current.get(e);
