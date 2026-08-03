@@ -868,7 +868,11 @@ function cardBodyHeight(cardW: number): number {
  */
 function useFitCards(nMain: number, nOff: number) {
   const ref = useRef<HTMLDivElement | null>(null);
-  const [fit, setFit] = useState<{ cardW: number; fits: boolean }>({ cardW: 250, fits: true });
+  const [fit, setFit] = useState<{ cardW: number; cols: number; fits: boolean }>({
+    cardW: 250,
+    cols: 4,
+    fits: true,
+  });
 
   useEffect(() => {
     const el = ref.current;
@@ -887,19 +891,26 @@ function useFitCards(nMain: number, nOff: number) {
       const W = el.clientWidth;
       const H = el.clientHeight;
       if (!W || !H || total === 0) return;
-      let best: number | null = null;
+      let best: { w: number; cols: number } | null = null;
       // Máx. 5 colunas (pedido do Leonardo): mais que isso vira mosaico difícil
       // de bater o olho — pedido grande prefere rolar a espremer 6+ por linha.
+      // O nº de colunas vencedor também CAPA A LARGURA do grid lá no estilo:
+      // só limitar o tamanho do card não basta, o auto-fit enfiava a 6ª coluna
+      // sempre que a ALTURA encolhia o card e sobrava largura.
       for (let cols = 1; cols <= Math.min(total, 5); cols++) {
         const rows = Math.ceil(nMain / cols) + (nOff > 0 ? Math.ceil(nOff / cols) : 0);
         const wByWidth = Math.min((W - (cols - 1) * GAP) / cols, MAXW);
         const rowH = (H - SLACK - BANNER - (rows - 1) * GAP) / rows;
         const w = Math.floor(Math.min(wByWidth, rowH - cardBodyHeight(wByWidth)));
-        if (w >= MINW) best = Math.max(best ?? 0, w);
+        if (w >= MINW && (!best || w > best.w)) best = { w, cols };
       }
       setFit((prev) => {
-        const next = best ? { cardW: best, fits: true } : { cardW: 150, fits: false };
-        return prev.cardW === next.cardW && prev.fits === next.fits ? prev : next;
+        const next = best
+          ? { cardW: best.w, cols: best.cols, fits: true }
+          : { cardW: 150, cols: 5, fits: false };
+        return prev.cardW === next.cardW && prev.cols === next.cols && prev.fits === next.fits
+          ? prev
+          : next;
       });
     };
     compute();
@@ -953,10 +964,15 @@ function OrderView({
   const mainItems = isMixed ? order.items.filter((it) => !differs(it)) : order.items;
   const offSizeItems = isMixed ? order.items.filter(differs) : [];
 
-  const { ref: fitRef, cardW } = useFitCards(mainItems.length, offSizeItems.length);
+  const { ref: fitRef, cardW, cols } = useFitCards(mainItems.length, offSizeItems.length);
   const grid: CSSProperties = {
     ...cardsGrid,
     gridTemplateColumns: `repeat(auto-fit, ${cardW}px)`,
+    // Trava física do teto de colunas: com largura ≤ cols faixas, o auto-fit
+    // não tem onde criar a coluna extra.
+    maxWidth: cols * cardW + (cols - 1) * 14,
+    margin: "0 auto",
+    width: "100%",
   };
 
   return (
