@@ -888,7 +888,9 @@ function useFitCards(nMain: number, nOff: number) {
       const H = el.clientHeight;
       if (!W || !H || total === 0) return;
       let best: number | null = null;
-      for (let cols = 1; cols <= Math.min(total, 12); cols++) {
+      // Máx. 5 colunas (pedido do Leonardo): mais que isso vira mosaico difícil
+      // de bater o olho — pedido grande prefere rolar a espremer 6+ por linha.
+      for (let cols = 1; cols <= Math.min(total, 5); cols++) {
         const rows = Math.ceil(nMain / cols) + (nOff > 0 ? Math.ceil(nOff / cols) : 0);
         const wByWidth = Math.min((W - (cols - 1) * GAP) / cols, MAXW);
         const rowH = (H - SLACK - BANNER - (rows - 1) * GAP) / rows;
