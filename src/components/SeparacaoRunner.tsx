@@ -851,6 +851,57 @@ function QueueCard({
   );
 }
 
+/** Corpo do card: paddings + nome + rodapé (compacto quando o card estreita). */
+function cardBodyHeight(cardW: number): number {
+  return cardW < 200 ? 64 : 88;
+}
+
+/**
+ * Tamanho de card que faz o pedido INTEIRO caber no espaço disponível, sem
+ * scroll — o scrollbar no meio da tela parecia um divisor e era o incômodo
+ * número 1 das operadoras. Mede o container de verdade (ResizeObserver) e
+ * testa contagens de coluna: pra cada uma, o card é limitado pela largura da
+ * coluna E pela altura da linha (imagem quadrada + corpo); vence a maior.
+ * Só quando nem o card mínimo cabe (pedido gigante, ~0,5%) o container rola.
+ */
+function useFitCards(nMain: number, nOff: number) {
+  const ref = useRef<HTMLDivElement | null>(null);
+  const [fit, setFit] = useState<{ cardW: number; fits: boolean }>({ cardW: 250, fits: true });
+
+  useEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    const GAP = 14;
+    const MAXW = 260;
+    const MINW = 140;
+    const BANNER = nOff > 0 ? 46 + GAP : 0;
+    const total = nMain + nOff;
+    const compute = () => {
+      const W = el.clientWidth;
+      const H = el.clientHeight;
+      if (!W || !H || total === 0) return;
+      let best: number | null = null;
+      for (let cols = 1; cols <= Math.min(total, 12); cols++) {
+        const rows = Math.ceil(nMain / cols) + (nOff > 0 ? Math.ceil(nOff / cols) : 0);
+        const wByWidth = Math.min((W - (cols - 1) * GAP) / cols, MAXW);
+        const rowH = (H - BANNER - (rows - 1) * GAP) / rows;
+        const w = Math.floor(Math.min(wByWidth, rowH - cardBodyHeight(wByWidth)));
+        if (w >= MINW) best = Math.max(best ?? 0, w);
+      }
+      setFit((prev) => {
+        const next = best ? { cardW: best, fits: true } : { cardW: 150, fits: false };
+        return prev.cardW === next.cardW && prev.fits === next.fits ? prev : next;
+      });
+    };
+    compute();
+    const ro = new ResizeObserver(compute);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [nMain, nOff]);
+
+  return { ref, ...fit };
+}
+
 function OrderView({
   order,
   progress,
@@ -880,10 +931,6 @@ function OrderView({
   // Itens do pedido com unidade excedente lida — o card fica vermelho.
   const excedidos = new Set(extras.map((e) => e.itemId).filter(Boolean) as string[]);
 
-  // Densidade adaptativa: pedido típico (≤10 itens) cabe SEM scroll — cards
-  // encolhem conforme a quantidade; só pedidos grandes (raros, ~0,5%) rolam.
-  const dense = totalExpected > 6;
-
   // Mesma leitura do posvenda: itens do tamanho da fila em cima; os de tamanho
   // diferente (pedido misto) ficam numa seção própria, com divisor de alerta.
   // Compara pelo tamanho EFETIVO (campo ou nome, normalizado); item sem tamanho
@@ -896,6 +943,12 @@ function OrderView({
   };
   const mainItems = isMixed ? order.items.filter((it) => !differs(it)) : order.items;
   const offSizeItems = isMixed ? order.items.filter(differs) : [];
+
+  const { ref: fitRef, cardW, fits } = useFitCards(mainItems.length, offSizeItems.length);
+  const grid: CSSProperties = {
+    ...cardsGrid,
+    gridTemplateColumns: `repeat(auto-fit, ${cardW}px)`,
+  };
 
   return (
     <div style={orderWrap}>
@@ -921,41 +974,43 @@ function OrderView({
 
       {order.items.length === 0 && <div style={emptyText}>Pedido sem itens cadastrados.</div>}
 
-      <div style={dense ? cardsGridDense : cardsGrid}>
-        {mainItems.map((it) => (
-          <ItemCard
-            key={it.id}
-            item={it}
-            count={progress.get(it.id)?.count ?? 0}
-            dense={dense}
-            excedido={excedidos.has(it.id)}
-          />
-        ))}
-      </div>
+      <div ref={fitRef} style={fits ? cardsArea : cardsAreaScroll}>
+        <div style={grid}>
+          {mainItems.map((it) => (
+            <ItemCard
+              key={it.id}
+              item={it}
+              count={progress.get(it.id)?.count ?? 0}
+              cardW={cardW}
+              excedido={excedidos.has(it.id)}
+            />
+          ))}
+        </div>
 
-      {offSizeItems.length > 0 && (
-        <>
-          <div style={sizeBanner}>
-            ⚠{" "}
-            {offSizeItems.length === 1
-              ? "1 item de tamanho diferente neste pedido"
-              : `${offSizeItems.length} itens de tamanho diferente neste pedido`}{" "}
-            — confira antes de concluir
-          </div>
-          <div style={dense ? cardsGridDense : cardsGrid}>
-            {offSizeItems.map((it) => (
-              <ItemCard
-                key={it.id}
-                item={it}
-                count={progress.get(it.id)?.count ?? 0}
-                dense={dense}
-                excedido={excedidos.has(it.id)}
-                offSize
-              />
-            ))}
-          </div>
-        </>
-      )}
+        {offSizeItems.length > 0 && (
+          <>
+            <div style={sizeBanner}>
+              ⚠{" "}
+              {offSizeItems.length === 1
+                ? "1 item de tamanho diferente neste pedido"
+                : `${offSizeItems.length} itens de tamanho diferente neste pedido`}{" "}
+              — confira antes de concluir
+            </div>
+            <div style={grid}>
+              {offSizeItems.map((it) => (
+                <ItemCard
+                  key={it.id}
+                  item={it}
+                  count={progress.get(it.id)?.count ?? 0}
+                  cardW={cardW}
+                  excedido={excedidos.has(it.id)}
+                  offSize
+                />
+              ))}
+            </div>
+          </>
+        )}
+      </div>
 
       <div style={actionsRow}>
         <button style={ghostBtn} onClick={onSkip} disabled={completing}>
@@ -994,17 +1049,18 @@ function ItemCard({
   item,
   count,
   offSize,
-  dense,
+  cardW,
   excedido,
 }: {
   item: OrderItem;
   count: number;
   offSize?: boolean;
-  /** Densidade compacta (pedido com muitos itens — tudo cabe sem scroll). */
-  dense?: boolean;
+  /** Largura calculada pelo fit — abaixo de 200px o corpo compacta. */
+  cardW: number;
   /** Unidade sobressalente lida deste produto — card fica vermelho. */
   excedido?: boolean;
 }) {
+  const dense = cardW < 200;
   const ok = count >= item.quantidade && !excedido;
   const size = itemSize(item);
   return (
@@ -1135,17 +1191,20 @@ const layoutRow: CSSProperties = {
   display: "flex",
 };
 
+/** Sem overflow aqui: quem decide rolar (só no pedido gigante) é a área de
+    cards — o scrollbar no meio da tela parecia um divisor entre o pedido e a
+    Leitura ao vivo. */
 const main: CSSProperties = {
   position: "relative",
   flex: 1,
   display: "flex",
   flexDirection: "column",
-  padding: "32px",
+  padding: "24px 32px",
   maxWidth: 1100,
   width: "100%",
   margin: "0 auto",
   boxSizing: "border-box",
-  overflowY: "auto",
+  overflow: "hidden",
   minHeight: 0,
 };
 
@@ -1381,7 +1440,36 @@ const inlineReconnect: CSSProperties = {
   fontWeight: 700,
 };
 
-const orderWrap: CSSProperties = { display: "flex", flexDirection: "column", gap: 20, width: "100%" };
+/** Preenche o main inteiro — a área de cards (flex 1) é quem dita o fit. */
+const orderWrap: CSSProperties = {
+  display: "flex",
+  flexDirection: "column",
+  gap: 16,
+  width: "100%",
+  flex: 1,
+  minHeight: 0,
+};
+
+/**
+ * Área dos cards no modo FIT (o normal): sem scroll nenhum — o useFitCards
+ * dimensiona os cards pra caber; conteúdo centralizado verticalmente.
+ */
+const cardsArea: CSSProperties = {
+  flex: 1,
+  minHeight: 0,
+  overflow: "hidden",
+  display: "flex",
+  flexDirection: "column",
+  justifyContent: "center",
+  gap: 14,
+};
+
+/** Fallback pra pedido gigante (~0,5%): aí sim rola, com card mínimo. */
+const cardsAreaScroll: CSSProperties = {
+  ...cardsArea,
+  overflowY: "auto",
+  justifyContent: "flex-start",
+};
 
 const orderHeader: CSSProperties = {
   display: "flex",
@@ -1738,14 +1826,6 @@ const sidebarHint: CSSProperties = {
   margin: "6px 14px 0",
   fontSize: 11,
   color: "var(--text-faint)",
-};
-
-/** Densidade compacta: pedido de 7–10 itens cabe inteiro sem scroll. */
-const cardsGridDense: CSSProperties = {
-  display: "grid",
-  gridTemplateColumns: "repeat(auto-fit, minmax(140px, 180px))",
-  gap: 10,
-  justifyContent: "center",
 };
 
 const cardExcedido: CSSProperties = {
