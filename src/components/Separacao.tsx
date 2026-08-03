@@ -6,7 +6,13 @@ import { SeparacaoRunner } from "./SeparacaoRunner";
 import { useRfid } from "../contexts/RfidContext";
 import { ApiError } from "../lib/api";
 import { subscribeQueueChanged } from "../lib/realtime";
-import { claimNext, claimNextMixed, getQueueCounts, type QueueCounts } from "../services/orders";
+import {
+  claimNext,
+  claimNextMixed,
+  getQueueCounts,
+  type QueueCounts,
+  type QueueFilters,
+} from "../services/orders";
 
 type Props = { onBack: () => void };
 
@@ -84,12 +90,16 @@ export function Separacao({ onBack }: Props) {
     };
   }, []);
 
-  const claim = useCallback(() => {
-    if (!confirmed) return claimNext([""]);
-    return confirmed.mode === "mistos"
-      ? claimNextMixed(confirmed.sizes)
-      : claimNext(confirmed.sizes);
-  }, [confirmed]);
+  // Os filtros de picking moram no runner (por estação) e valem no claim.
+  const claim = useCallback(
+    (filters?: QueueFilters) => {
+      if (!confirmed) return claimNext([""], filters);
+      return confirmed.mode === "mistos"
+        ? claimNextMixed(confirmed.sizes, filters)
+        : claimNext(confirmed.sizes, filters);
+    },
+    [confirmed],
+  );
 
   if (confirmed) {
     const isMixed = confirmed.mode === "mistos";

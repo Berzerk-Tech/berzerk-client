@@ -14,7 +14,11 @@ import { useRfid } from "../contexts/RfidContext";
 import { beepError, beepOk } from "../lib/beep";
 import { subscribeQueueChanged } from "../lib/realtime";
 import { SupervisorModal } from "./SupervisorModal";
+import { SeparacaoHistoryModal } from "./SeparacaoHistoryModal";
+import { PickingFiltersModal, emptyFilters, loadFilters, saveFilters } from "./PickingFiltersModal";
+import { ApiError } from "../lib/api";
 import {
+  claimOrder,
   completeSeparacao,
   getQueueList,
   releaseSeparacao,
@@ -24,6 +28,7 @@ import {
   type LiberacaoSupervisor,
   type Order,
   type OrderItem,
+  type QueueFilters,
   type QueueListItem,
   type QueueListResponse,
   type SeparationMode,
@@ -88,11 +93,37 @@ type Phase = "loading" | "separating" | "empty" | "error";
 /** Progresso de conferência de um item. */
 type ItemProgress = { count: number; epcs: string[] };
 
+/**
+ * Sobressalente: tag lida que NÃO cabe no pedido. `excedente` = unidade a mais
+ * de um produto do pedido; `alheia` = peça de outro pedido; `desconhecida` =
+ * EPC que nenhuma fonte resolveu. Enquanto houver sobressalente o pedido NÃO
+ * conclui (paridade com o legado: ele garantia só o faltante; aqui garantimos
+ * também que não vai peça a mais) — a operadora tira a peça da mesa e
+ * reinicia a leitura (R).
+ */
+type ExtraTag = {
+  epc: string;
+  label: string;
+  kind: "excedente" | "alheia" | "desconhecida";
+  /** Item do pedido excedido (pinta o card de vermelho). */
+  itemId?: string;
+};
+
+/** Entrada do console de leitura (o que o leitor viu e como resolvemos). */
+type LogEntry = {
+  ts: number;
+  epc: string;
+  desc: string;
+  status: "ok" | "extra" | "unknown";
+};
+
+const LOG_MAX = 50;
+
 type Props = {
   title: string;
   kicker: string;
   /** Como puxar o próximo pedido (fila normal por tamanho, ou mistos). */
-  claim: () => Promise<ClaimResponse>;
+  claim: (filters?: QueueFilters) => Promise<ClaimResponse>;
   /** Texto quando a fila esvazia. */
   emptyHint: string;
   /** Fila ativa (mode+size) — habilita a sidebar com os próximos pedidos. */
@@ -108,17 +139,44 @@ export function SeparacaoRunner({ title, kicker, claim, emptyHint, queue, onBack
   const [completing, setCompleting] = useState(false);
   // progresso por item (ref pra ler dentro do closure de leitura; state pra render)
   const progressRef = useRef<Map<string, ItemProgress>>(new Map());
+  // Sobressalentes por EPC (bloqueiam o Concluir até reiniciar a leitura).
+  const extrasRef = useRef<Map<string, ExtraTag>>(new Map());
+  // Console de leitura (mais novo primeiro, cap LOG_MAX).
+  const logRef = useRef<LogEntry[]>([]);
   const [, forceRender] = useState(0);
   const tick = () => forceRender((n) => n + 1);
   const orderRef = useRef<Order | null>(null);
   orderRef.current = order;
+  // Época da sessão de leitura: bump = para a sessão atual e abre outra (o
+  // buffer da mesa é limpo no arranque) — é o "Reiniciar (R)".
+  const [sessionEpoch, setSessionEpoch] = useState(0);
+  // Filtros de picking (data + produtos) — por estação, sobrevivem a reload.
+  const [filters, setFilters] = useState<QueueFilters>(() => loadFilters());
+  const filtersRef = useRef(filters);
+  filtersRef.current = filters;
+  // Troca de pedido por clique em andamento (não deixa concorrer com claim).
+  const switchingRef = useRef(false);
+  // Aviso não-bloqueante (claim por clique falhou, degradação de endpoint…).
+  const [notice, setNotice] = useState<string | null>(null);
+  const noticeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const showNotice = useCallback((msg: string) => {
+    setNotice(msg);
+    if (noticeTimerRef.current) clearTimeout(noticeTimerRef.current);
+    noticeTimerRef.current = setTimeout(() => setNotice(null), 8000);
+  }, []);
+
+  const resetLeitura = useCallback(() => {
+    progressRef.current = new Map();
+    extrasRef.current = new Map();
+    logRef.current = [];
+  }, []);
 
   const fetchNext = useCallback(async () => {
     setPhase("loading");
     setError(null);
-    progressRef.current = new Map();
+    resetLeitura();
     try {
-      const { order: next } = await claim();
+      const { order: next } = await claim(filtersRef.current);
       if (!next) {
         setOrder(null);
         setPhase("empty");
@@ -130,7 +188,7 @@ export function SeparacaoRunner({ title, kicker, claim, emptyHint, queue, onBack
       setError(e instanceof Error ? e.message : String(e));
       setPhase("error");
     }
-  }, [claim]);
+  }, [claim, resetLeitura]);
 
   // Primeiro pedido ao montar.
   useEffect(() => {
@@ -150,17 +208,85 @@ export function SeparacaoRunner({ title, kicker, claim, emptyHint, queue, onBack
 
   const finish = useCallback(async () => {
     const ord = orderRef.current;
-    if (!ord || completing) return;
+    // Sobressalente na mesa TRAVA o complete — senão iria peça a mais.
+    if (!ord || completing || extrasRef.current.size > 0) return;
     setCompleting(true);
     try {
       await completeSeparacao(ord.id, collectedTags());
       await fetchNext();
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      // Banner (não setError): a fase segue "separating" e o setError só
+      // renderiza na fase de erro — sem isso a falha do complete ficava muda.
+      showNotice(
+        `Falha ao concluir: ${e instanceof Error ? e.message : String(e)} — tenta de novo ou chama o suporte.`,
+      );
     } finally {
       setCompleting(false);
     }
-  }, [completing, collectedTags, fetchNext]);
+  }, [completing, collectedTags, fetchNext, showNotice]);
+
+  /**
+   * Reinicia a conferência do pedido atual: a operadora tirou a peça errada da
+   * mesa e relê tudo do zero (as peças certas continuam lá e voltam no próximo
+   * inventário). Zera progresso/sobressalentes/console e reabre a sessão de
+   * leitura — o arranque limpa o buffer físico da mesa.
+   */
+  const restartLeitura = useCallback(() => {
+    if (completing) return;
+    resetLeitura();
+    setSessionEpoch((n) => n + 1);
+    tick();
+  }, [completing, resetLeitura]);
+
+  /**
+   * Avança pra um pedido ESPECÍFICO clicado na fila (ex.: o atual espera
+   * reposição). Sem duplicação: devolve o atual (release) e claima o clicado
+   * ATOMICAMENTE no nexus — se outra estação levou primeiro, avisa e volta
+   * pro fluxo normal. Nexus antigo (sem o endpoint) degrada com aviso.
+   */
+  const jumpToOrder = useCallback(
+    async (target: QueueListItem) => {
+      if (switchingRef.current || completing) return;
+      const ord = orderRef.current;
+      if (ord && ord.id === target.id) return;
+      switchingRef.current = true;
+      setPhase("loading");
+      setError(null);
+      try {
+        if (ord && ord.status === "separating") {
+          orderRef.current = null;
+          setOrder(null);
+          await releaseSeparacao(ord.id).catch(() => {
+            /* best-effort: o janitor recupera */
+          });
+        }
+        resetLeitura();
+        const { order: next } = await claimOrder(target.id);
+        if (!next) {
+          await fetchNext();
+          return;
+        }
+        setOrder(next);
+        setPhase("separating");
+      } catch (e) {
+        if (e instanceof ApiError && e.status === 409) {
+          showNotice(
+            `O pedido #${target.numero ?? ""} acabou de ser puxado por outra estação — seguindo com o próximo da fila.`,
+          );
+        } else if (e instanceof ApiError && e.status === 404) {
+          showNotice(
+            "O servidor ainda não suporta avançar por clique (aguardando atualização do nexus) — puxando o próximo da fila.",
+          );
+        } else {
+          showNotice(e instanceof Error ? e.message : String(e));
+        }
+        await fetchNext();
+      } finally {
+        switchingRef.current = false;
+      }
+    },
+    [completing, fetchNext, resetLeitura, showNotice],
+  );
 
   // === Liberação por supervisor (concluir SEM todas as peças no RFID) ===
   const [supervisorOpen, setSupervisorOpen] = useState(false);
@@ -214,6 +340,22 @@ export function SeparacaoRunner({ title, kicker, claim, emptyHint, queue, onBack
     return null;
   }, []);
 
+  /**
+   * Item do pedido que a tag referencia IGNORANDO o saldo — usado pra
+   * classificar sobressalente: se casa aqui mas não no matchItem, é unidade a
+   * MAIS de um produto do pedido (excedente), não peça alheia.
+   */
+  const itemDoPedido = useCallback((ord: Order, look: EpcLookupItem): OrderItem | null => {
+    const tagGtins = gtinCandidates(look.ean13, look.sku);
+    const byGtin = ord.items.find((it) => {
+      const itemGtins = gtinCandidates(it.ean, it.sku);
+      return tagGtins.some((g) => itemGtins.includes(g));
+    });
+    if (byGtin) return byGtin;
+    const lookSku = normSku(look.sku);
+    return ord.items.find((it) => lookSku && normSku(it.sku) === lookSku) ?? null;
+  }, []);
+
   // Última tag lida que NÃO pertence ao pedido — mostrada num banner pra
   // operadora (e pra debug em campo: diz o que a tag É, não só que falhou).
   const [reject, setReject] = useState<string | null>(null);
@@ -222,6 +364,11 @@ export function SeparacaoRunner({ title, kicker, claim, emptyHint, queue, onBack
     setReject(msg);
     if (rejectTimerRef.current) clearTimeout(rejectTimerRef.current);
     rejectTimerRef.current = setTimeout(() => setReject(null), 8000);
+  }, []);
+
+  /** Registra uma entrada no console de leitura (mais novo primeiro). */
+  const pushLog = useCallback((entry: Omit<LogEntry, "ts">) => {
+    logRef.current = [{ ...entry, ts: Date.now() }, ...logRef.current].slice(0, LOG_MAX);
   }, []);
 
   // Handler de tags lido sempre fresco via ref — assim a sessão de leitura NÃO
@@ -234,51 +381,114 @@ export function SeparacaoRunner({ title, kicker, claim, emptyHint, queue, onBack
       const resolved = await rfid.resolveEpcs(newEpcs);
       let changed = false;
       for (const epc of newEpcs) {
-        const look = resolved.get(epc.toUpperCase());
+        const epcU = epc.toUpperCase();
+        const look = resolved.get(epcU);
         const item = look ? matchItem(ord, look) : null;
         if (item) {
           const prog = progressRef.current.get(item.id) ?? { count: 0, epcs: [] };
           prog.count += 1;
           // Uma tag por unidade lida (o nexus valida rfidTags.length vs grade).
-          prog.epcs.push(epc.toUpperCase());
+          prog.epcs.push(epcU);
           progressRef.current.set(item.id, prog);
+          pushLog({
+            epc: epcU,
+            desc: [look!.name ?? item.nome, look!.size, look!.ean13].filter(Boolean).join(" · "),
+            status: "ok",
+          });
           changed = true;
           beepOk();
         } else {
           beepError();
           if (look) {
             const desc = [look.name, look.size, look.ean13].filter(Boolean).join(" · ");
-            // Diagnóstico de campo: mostra os códigos que o pedido ainda espera
-            // (ean/sku dos itens com saldo) pra divergência aparecer na hora.
-            const esperados = ord.items
-              .filter((it) => it.quantidade - (progressRef.current.get(it.id)?.count ?? 0) > 0)
-              .map((it) => it.ean ?? it.sku ?? "?")
-              .slice(0, 5)
-              .join(", ");
-            showReject(
-              `Peça lida não pertence a este pedido: ${desc} — pedido espera: ${esperados}`,
-            );
+            // Excedente do próprio pedido (produto certo, unidade a mais) ou
+            // peça de outro pedido? Muda a mensagem E o card que fica vermelho.
+            const excedido = itemDoPedido(ord, look);
+            extrasRef.current.set(epcU, {
+              epc: epcU,
+              label: desc || epcU,
+              kind: excedido ? "excedente" : "alheia",
+              itemId: excedido?.id,
+            });
+            pushLog({ epc: epcU, desc: desc || "(sem descrição)", status: "extra" });
+            if (excedido) {
+              showReject(
+                `Peça SOBRESSALENTE: ${desc} — o pedido já tem as unidades desse produto. Tire a peça da mesa e reinicie (R).`,
+              );
+            } else {
+              // Diagnóstico de campo: mostra os códigos que o pedido ainda espera
+              // (ean/sku dos itens com saldo) pra divergência aparecer na hora.
+              const esperados = ord.items
+                .filter((it) => it.quantidade - (progressRef.current.get(it.id)?.count ?? 0) > 0)
+                .map((it) => it.ean ?? it.sku ?? "?")
+                .slice(0, 5)
+                .join(", ");
+              showReject(
+                `Peça lida não pertence a este pedido: ${desc} — pedido espera: ${esperados}. Tire a peça da mesa e reinicie (R).`,
+              );
+            }
           } else {
-            showReject(`Tag não identificada em nenhuma fonte: ${epc.toUpperCase()}`);
+            extrasRef.current.set(epcU, { epc: epcU, label: epcU, kind: "desconhecida" });
+            pushLog({ epc: epcU, desc: "não identificada em nenhuma fonte", status: "unknown" });
+            showReject(`Tag não identificada em nenhuma fonte: ${epcU}`);
           }
+          tick();
         }
       }
       if (changed) {
-        setReject(null);
         tick();
-        if (allDone(ord)) void finish();
+        if (allDone(ord) && extrasRef.current.size === 0) {
+          setReject(null);
+          void finish();
+        }
       }
     })();
   };
 
-  // Sessão de leitura contínua enquanto há pedido em separação. Só reinicia ao
-  // trocar de pedido (deps mínimas).
+  // Sessão de leitura contínua enquanto há pedido em separação. Reinicia ao
+  // trocar de pedido ou quando a operadora pede "Reiniciar (R)" (sessionEpoch).
   useEffect(() => {
     if (phase !== "separating" || !order) return;
     const stop = rfid.startReadingSession((newEpcs) => onTagsRef.current(newEpcs));
     return stop;
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [phase, order?.id, rfid]);
+  }, [phase, order?.id, rfid, sessionEpoch]);
+
+  // Atalhos migrados do posvenda (as atendentes já têm decorado):
+  //   K = liberar com supervisor (era o "Concluir sem RFID (K)" — aqui a
+  //       exceção passa pelo PIN do supervisor);
+  //   R = reiniciar a leitura (sobressalente/divergência na mesa).
+  // Ignorados digitando em input/textarea/select (e modificadores).
+  useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.ctrlKey || e.metaKey || e.altKey) return;
+      const target = e.target as HTMLElement | null;
+      if (target) {
+        const tag = target.tagName;
+        if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT" || target.isContentEditable)
+          return;
+      }
+      const key = e.key.toLowerCase();
+      if (key === "k") {
+        if (phase !== "separating" || !orderRef.current || completing || supervisorOpen) return;
+        e.preventDefault();
+        setSupervisorOpen(true);
+        return;
+      }
+      if (key === "r") {
+        if (phase !== "separating" || !orderRef.current || completing || supervisorOpen) return;
+        const temLeitura =
+          extrasRef.current.size > 0 ||
+          Array.from(progressRef.current.values()).some((p) => p.count > 0);
+        if (!temLeitura) return;
+        e.preventDefault();
+        restartLeitura();
+      }
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [phase, completing, supervisorOpen, restartLeitura]);
 
   // Devolve o pedido pra fila se sair no meio.
   useEffect(() => {
@@ -301,6 +511,19 @@ export function SeparacaoRunner({ title, kicker, claim, emptyHint, queue, onBack
     onBack();
   };
 
+  const [historyOpen, setHistoryOpen] = useState(false);
+  const [filtersOpen, setFiltersOpen] = useState(false);
+  const extras = Array.from(extrasRef.current.values());
+  const filtrosAtivos =
+    (filters.includeProducts?.length ?? 0) +
+    (filters.excludeProducts?.length ?? 0) +
+    (filters.dateFrom || filters.dateTo ? 1 : 0);
+
+  const aplicarFiltros = (f: QueueFilters) => {
+    setFilters(f);
+    saveFilters(f);
+  };
+
   return (
     <div style={page}>
       <AmbientBackground />
@@ -310,6 +533,12 @@ export function SeparacaoRunner({ title, kicker, claim, emptyHint, queue, onBack
           <span style={kickerStyle}>― {kicker} ―</span>
           <h1 style={titleStyle}>{title}</h1>
         </div>
+        <button style={topBarBtn} onClick={() => setFiltersOpen(true)}>
+          Filtros{filtrosAtivos > 0 ? ` (${filtrosAtivos})` : ""}
+        </button>
+        <button style={topBarBtn} onClick={() => setHistoryOpen(true)}>
+          🕐 Histórico
+        </button>
         <OperatorChip />
         <MesaStatus
           connected={rfid.connected}
@@ -331,10 +560,29 @@ export function SeparacaoRunner({ title, kicker, claim, emptyHint, queue, onBack
           </button>
         </div>
       )}
-      {reject && <div style={rejectBanner}>⚠ {reject}</div>}
+      {extras.length > 0 && (
+        <div style={extrasBanner}>
+          ⛔{" "}
+          {extras.length === 1
+            ? "1 peça sobressalente na mesa"
+            : `${extras.length} peças sobressalentes na mesa`}{" "}
+          — tire da mesa e aperte <strong>R</strong> pra reiniciar a leitura. O pedido não
+          conclui com peça a mais.
+        </div>
+      )}
+      {reject && extras.length === 0 && <div style={rejectBanner}>⚠ {reject}</div>}
+      {notice && <div style={noticeBanner}>ℹ {notice}</div>}
 
       <div style={layoutRow}>
-        {queue && <QueueSidebar mode={queue.mode} size={queue.size} currentOrder={order} />}
+        {queue && (
+          <QueueSidebar
+            mode={queue.mode}
+            size={queue.size}
+            currentOrder={order}
+            filters={filters}
+            onJump={(item) => void jumpToOrder(item)}
+          />
+        )}
         <main style={main}>
           {phase === "loading" && <Centered>Puxando próximo pedido…</Centered>}
           {phase === "error" && (
@@ -349,6 +597,14 @@ export function SeparacaoRunner({ title, kicker, claim, emptyHint, queue, onBack
             <Centered>
               <div style={emptyTitle}>Fila vazia</div>
               <p style={emptyText}>{emptyHint}</p>
+              {filtrosAtivos > 0 && (
+                <p style={emptyText}>
+                  Você tem filtros de picking ativos — eles também valem pro claim.{" "}
+                  <button style={inlineReconnect} onClick={() => setFiltersOpen(true)}>
+                    revisar filtros
+                  </button>
+                </p>
+              )}
               <button style={primaryBtn} onClick={() => void fetchNext()}>
                 Procurar de novo
               </button>
@@ -358,13 +614,18 @@ export function SeparacaoRunner({ title, kicker, claim, emptyHint, queue, onBack
             <OrderView
               order={order}
               progress={progressRef.current}
+              extras={extras}
               completing={completing}
               onComplete={() => void finish()}
+              onRestart={restartLeitura}
               onSkip={handleBack}
               onSupervisor={() => setSupervisorOpen(true)}
             />
           )}
         </main>
+        {phase === "separating" && order && (
+          <ReadLogPanel entries={logRef.current} reading={rfid.connected} />
+        )}
       </div>
 
       {supervisorOpen && (
@@ -374,7 +635,66 @@ export function SeparacaoRunner({ title, kicker, claim, emptyHint, queue, onBack
           onConfirm={supervisorConfirm}
         />
       )}
+      {historyOpen && <SeparacaoHistoryModal onClose={() => setHistoryOpen(false)} />}
+      {filtersOpen && (
+        <PickingFiltersModal
+          filters={filters}
+          onApply={(f) => {
+            aplicarFiltros(f);
+            setFiltersOpen(false);
+          }}
+          onClear={() => {
+            aplicarFiltros(emptyFilters());
+            setFiltersOpen(false);
+          }}
+          onClose={() => setFiltersOpen(false)}
+        />
+      )}
     </div>
+  );
+}
+
+/**
+ * Console de leitura ao vivo (coluna direita — o espaço que sobrava): cada tag
+ * que o leitor viu e COMO foi resolvida (peça do pedido, sobressalente, não
+ * identificada). É o feedback visual que a operadora tinha no posvenda.
+ */
+function ReadLogPanel({ entries, reading }: { entries: LogEntry[]; reading: boolean }) {
+  return (
+    <aside style={logPanel}>
+      <div style={logHeader}>
+        <span style={{ ...logDot, background: reading ? "var(--success-dot)" : "var(--danger-text)" }} />
+        <span style={logTitle}>Leitura ao vivo</span>
+        <span style={logCount}>{entries.length > 0 ? `${entries.length}` : ""}</span>
+      </div>
+      <div style={logList}>
+        {entries.length === 0 && (
+          <span style={logEmpty}>
+            Aproxime as peças da mesa — cada tag lida aparece aqui com o que ela é.
+          </span>
+        )}
+        {entries.map((e) => (
+          <div key={`${e.epc}-${e.ts}`} style={logEntryStyle(e.status)}>
+            <div style={logEntryTop}>
+              <span style={logStatusIcon}>
+                {e.status === "ok" ? "✓" : e.status === "extra" ? "⛔" : "?"}
+              </span>
+              <span style={logDesc}>{e.desc}</span>
+            </div>
+            <div style={logMetaRow}>
+              <span style={logEpc}>{e.epc}</span>
+              <span style={logTime}>
+                {new Date(e.ts).toLocaleTimeString("pt-BR", {
+                  hour: "2-digit",
+                  minute: "2-digit",
+                  second: "2-digit",
+                })}
+              </span>
+            </div>
+          </div>
+        ))}
+      </div>
+    </aside>
   );
 }
 
@@ -388,10 +708,15 @@ function QueueSidebar({
   mode,
   size,
   currentOrder,
+  filters,
+  onJump,
 }: {
   mode: SeparationMode;
   size: string;
   currentOrder: Order | null;
+  filters: QueueFilters;
+  /** Clique num card: avança pra ESTE pedido (release do atual + claim dele). */
+  onJump: (item: QueueListItem) => void;
 }) {
   const [data, setData] = useState<QueueListResponse | null>(null);
   const [search, setSearch] = useState("");
@@ -406,7 +731,7 @@ function QueueSidebar({
   useEffect(() => {
     let alive = true;
     const load = () => {
-      getQueueList({ mode, size, q: q || undefined, limit: 50 })
+      getQueueList({ mode, size, q: q || undefined, filters, limit: 50 })
         .then((d) => {
           if (alive) setData(d);
         })
@@ -422,7 +747,7 @@ function QueueSidebar({
       clearInterval(id);
       unsubscribe();
     };
-  }, [mode, size, q]);
+  }, [mode, size, q, filters]);
 
   const searching = q.length > 0;
   const current = !searching && currentOrder ? queueItemFromOrder(currentOrder) : null;
@@ -442,9 +767,12 @@ function QueueSidebar({
         placeholder="Buscar pedido, cliente ou item…"
         spellCheck={false}
       />
+      <span style={sidebarHint}>Clique num pedido pra avançar direto pra ele.</span>
       <div style={sidebarList}>
         {current && <QueueCard item={current} pinned />}
-        {data?.items.map((it) => <QueueCard key={it.id} item={it} />)}
+        {data?.items.map((it) => (
+          <QueueCard key={it.id} item={it} onClick={() => onJump(it)} />
+        ))}
         {data && data.items.length === 0 && !current && (
           <span style={sidebarEmpty}>
             {searching ? "Nada encontrado nessa fila." : "Fila vazia."}
@@ -478,15 +806,26 @@ function queueItemFromOrder(order: Order): QueueListItem {
   };
 }
 
-function QueueCard({ item, pinned }: { item: QueueListItem; pinned?: boolean }) {
+function QueueCard({
+  item,
+  pinned,
+  onClick,
+}: {
+  item: QueueListItem;
+  pinned?: boolean;
+  onClick?: () => void;
+}) {
   const shownThumbs = item.imagens.slice(0, 3);
   const extra = item.itemCount - shownThumbs.length;
   return (
     <div
+      onClick={onClick}
+      title={onClick ? "Avançar pra este pedido" : undefined}
       style={{
         ...qCard,
         ...(item.prioritario ? qCardPrio : null),
         ...(pinned ? qCardActive : null),
+        ...(onClick ? { cursor: "pointer" } : null),
       }}
     >
       <span style={qPos}>{pinned ? "▶" : String(item.position).padStart(2, "0")}</span>
@@ -515,15 +854,19 @@ function QueueCard({ item, pinned }: { item: QueueListItem; pinned?: boolean }) 
 function OrderView({
   order,
   progress,
+  extras,
   completing,
   onComplete,
+  onRestart,
   onSkip,
   onSupervisor,
 }: {
   order: Order;
   progress: Map<string, ItemProgress>;
+  extras: ExtraTag[];
   completing: boolean;
   onComplete: () => void;
+  onRestart: () => void;
   onSkip: () => void;
   onSupervisor: () => void;
 }) {
@@ -532,7 +875,14 @@ function OrderView({
     (a, it) => a + Math.min(progress.get(it.id)?.count ?? 0, it.quantidade),
     0,
   );
-  const done = totalExpected > 0 && totalDone >= totalExpected;
+  const temExtras = extras.length > 0;
+  const done = totalExpected > 0 && totalDone >= totalExpected && !temExtras;
+  // Itens do pedido com unidade excedente lida — o card fica vermelho.
+  const excedidos = new Set(extras.map((e) => e.itemId).filter(Boolean) as string[]);
+
+  // Densidade adaptativa: pedido típico (≤10 itens) cabe SEM scroll — cards
+  // encolhem conforme a quantidade; só pedidos grandes (raros, ~0,5%) rolam.
+  const dense = totalExpected > 6;
 
   // Mesma leitura do posvenda: itens do tamanho da fila em cima; os de tamanho
   // diferente (pedido misto) ficam numa seção própria, com divisor de alerta.
@@ -571,9 +921,15 @@ function OrderView({
 
       {order.items.length === 0 && <div style={emptyText}>Pedido sem itens cadastrados.</div>}
 
-      <div style={cardsGrid}>
+      <div style={dense ? cardsGridDense : cardsGrid}>
         {mainItems.map((it) => (
-          <ItemCard key={it.id} item={it} count={progress.get(it.id)?.count ?? 0} />
+          <ItemCard
+            key={it.id}
+            item={it}
+            count={progress.get(it.id)?.count ?? 0}
+            dense={dense}
+            excedido={excedidos.has(it.id)}
+          />
         ))}
       </div>
 
@@ -586,9 +942,16 @@ function OrderView({
               : `${offSizeItems.length} itens de tamanho diferente neste pedido`}{" "}
             — confira antes de concluir
           </div>
-          <div style={cardsGrid}>
+          <div style={dense ? cardsGridDense : cardsGrid}>
             {offSizeItems.map((it) => (
-              <ItemCard key={it.id} item={it} count={progress.get(it.id)?.count ?? 0} offSize />
+              <ItemCard
+                key={it.id}
+                item={it}
+                count={progress.get(it.id)?.count ?? 0}
+                dense={dense}
+                excedido={excedidos.has(it.id)}
+                offSize
+              />
             ))}
           </div>
         </>
@@ -598,17 +961,28 @@ function OrderView({
         <button style={ghostBtn} onClick={onSkip} disabled={completing}>
           Devolver à fila
         </button>
+        {temExtras && (
+          <button style={restartBtn} onClick={onRestart} disabled={completing}>
+            ↺ Reiniciar leitura (R)
+          </button>
+        )}
         {!done && (
           <button style={supervisorBtn} onClick={onSupervisor} disabled={completing}>
-            🔓 Liberar com supervisor
+            🔓 Liberar com supervisor (K)
           </button>
         )}
         <button
-          style={done && !completing ? primaryBtn : primaryBtnDisabled}
+          style={done && !completing ? primaryBtn : temExtras ? primaryBtnBlocked : primaryBtnDisabled}
           onClick={onComplete}
           disabled={!done || completing}
         >
-          {completing ? "Concluindo…" : done ? "Concluir separação" : "Aguardando leitura…"}
+          {completing
+            ? "Concluindo…"
+            : done
+              ? "Concluir separação"
+              : temExtras
+                ? "Sobressalente na mesa — reinicie (R)"
+                : "Aguardando leitura…"}
         </button>
       </div>
     </div>
@@ -620,12 +994,18 @@ function ItemCard({
   item,
   count,
   offSize,
+  dense,
+  excedido,
 }: {
   item: OrderItem;
   count: number;
   offSize?: boolean;
+  /** Densidade compacta (pedido com muitos itens — tudo cabe sem scroll). */
+  dense?: boolean;
+  /** Unidade sobressalente lida deste produto — card fica vermelho. */
+  excedido?: boolean;
 }) {
-  const ok = count >= item.quantidade;
+  const ok = count >= item.quantidade && !excedido;
   const size = itemSize(item);
   return (
     <div
@@ -633,6 +1013,7 @@ function ItemCard({
         ...card,
         ...(offSize ? cardOffSize : null),
         ...(ok ? cardDone : null),
+        ...(excedido ? cardExcedido : null),
       }}
     >
       <div style={cardImageWrap}>
@@ -640,20 +1021,22 @@ function ItemCard({
           <img src={item.imagemUrl} alt="" style={cardImage} loading="lazy" />
         ) : (
           <div style={cardImageEmpty}>
-            <IconShirt style={emptyShirtIcon} />
+            <IconShirt style={dense ? emptyShirtIconDense : emptyShirtIcon} />
             sem imagem
           </div>
         )}
         <span style={item.quantidade > 1 ? qtyBadgeMulti : qtyBadge}>x{item.quantidade}</span>
-        <span style={checkRing(ok)}>{ok ? "✓" : ""}</span>
+        <span style={checkRing(ok)}>{ok ? "✓" : excedido ? "!" : ""}</span>
       </div>
-      <div style={cardBody}>
-        <span style={cardName}>{item.nome ?? item.sku ?? item.ean ?? "Item"}</span>
+      <div style={dense ? cardBodyDense : cardBody}>
+        <span style={dense ? cardNameDense : cardName}>
+          {item.nome ?? item.sku ?? item.ean ?? "Item"}
+        </span>
         <div style={cardFooter}>
           <span style={cardEan}>{item.ean ?? item.sku ?? "—"}</span>
           <span style={cardFooterRight}>
-            <span style={cardCount}>
-              {Math.min(count, item.quantidade)}/{item.quantidade}
+            <span style={excedido ? cardCountExcedido : cardCount}>
+              {excedido ? `${count}/${item.quantidade}!` : `${Math.min(count, item.quantidade)}/${item.quantidade}`}
             </span>
             {size && (
               <span style={offSize ? sizeChipOff : sizeChip}>
@@ -1316,3 +1699,206 @@ const mesaChip: CSSProperties = {
 const mesaDot: CSSProperties = { width: 8, height: 8, borderRadius: "50%" };
 
 const mesaText: CSSProperties = { fontSize: 12, fontWeight: 600 };
+
+// --- Novidades v0.5: sobressalentes, console de leitura, filtros, histórico ---
+
+const topBarBtn: CSSProperties = {
+  padding: "8px 14px",
+  background: "var(--bg-card)",
+  border: "1px solid var(--border)",
+  borderRadius: 999,
+  color: "var(--text-secondary)",
+  fontSize: 12,
+  fontWeight: 700,
+  cursor: "pointer",
+  whiteSpace: "nowrap",
+};
+
+/** Sobressalente é BLOQUEIO, não aviso — vermelho de verdade, como no legado. */
+const extrasBanner: CSSProperties = {
+  padding: "12px 32px",
+  background: "var(--danger-bg)",
+  color: "var(--danger-text)",
+  border: "1px solid var(--danger-border)",
+  fontSize: 14,
+  fontWeight: 700,
+  textAlign: "center",
+};
+
+const noticeBanner: CSSProperties = {
+  padding: "9px 32px",
+  background: "var(--info-bg)",
+  color: "var(--info-text)",
+  fontSize: 13,
+  fontWeight: 600,
+  textAlign: "center",
+};
+
+const sidebarHint: CSSProperties = {
+  margin: "6px 14px 0",
+  fontSize: 11,
+  color: "var(--text-faint)",
+};
+
+/** Densidade compacta: pedido de 7–10 itens cabe inteiro sem scroll. */
+const cardsGridDense: CSSProperties = {
+  display: "grid",
+  gridTemplateColumns: "repeat(auto-fit, minmax(140px, 180px))",
+  gap: 10,
+  justifyContent: "center",
+};
+
+const cardExcedido: CSSProperties = {
+  border: "1px solid var(--danger-border)",
+  boxShadow: "0 0 0 2px var(--danger-border)",
+};
+
+const cardBodyDense: CSSProperties = {
+  display: "flex",
+  flexDirection: "column",
+  gap: 4,
+  padding: "8px 10px 10px",
+};
+
+const cardNameDense: CSSProperties = {
+  fontSize: 12,
+  fontWeight: 600,
+  color: "var(--text)",
+  lineHeight: 1.25,
+  minHeight: 0,
+  overflow: "hidden",
+  display: "-webkit-box",
+  WebkitLineClamp: 2,
+  WebkitBoxOrient: "vertical",
+};
+
+const cardCountExcedido: CSSProperties = {
+  fontFamily: "var(--font-mono)",
+  fontSize: 13,
+  fontWeight: 800,
+  color: "var(--danger-text)",
+};
+
+const emptyShirtIconDense: CSSProperties = { width: 26, height: 26, opacity: 0.6 };
+
+const restartBtn: CSSProperties = {
+  padding: "13px 20px",
+  background: "var(--danger-bg)",
+  color: "var(--danger-text)",
+  border: "1px solid var(--danger-border)",
+  borderRadius: 10,
+  cursor: "pointer",
+  fontSize: 14,
+  fontWeight: 800,
+};
+
+/** Concluir travado por sobressalente: vermelho apagado, mensagem no botão. */
+const primaryBtnBlocked: CSSProperties = {
+  padding: "13px 24px",
+  background: "var(--danger-bg)",
+  border: "1px solid var(--danger-border)",
+  color: "var(--danger-text)",
+  borderRadius: 10,
+  cursor: "not-allowed",
+  fontSize: 15,
+  fontWeight: 700,
+};
+
+// --- Console de leitura (coluna direita) ---
+
+const logPanel: CSSProperties = {
+  width: 300,
+  flexShrink: 0,
+  display: "flex",
+  flexDirection: "column",
+  borderLeft: "1px solid var(--border)",
+  background: "var(--bg-elevated)",
+  minHeight: 0,
+};
+
+const logHeader: CSSProperties = {
+  display: "flex",
+  alignItems: "center",
+  gap: 8,
+  padding: "14px 16px",
+  borderBottom: "1px solid var(--border)",
+};
+
+const logDot: CSSProperties = { width: 8, height: 8, borderRadius: "50%", flexShrink: 0 };
+
+const logTitle: CSSProperties = { fontSize: 14, fontWeight: 700, color: "var(--text)", flex: 1 };
+
+const logCount: CSSProperties = {
+  fontFamily: "var(--font-mono)",
+  fontSize: 11,
+  color: "var(--text-muted)",
+};
+
+const logList: CSSProperties = {
+  flex: 1,
+  minHeight: 0,
+  overflowY: "auto",
+  display: "flex",
+  flexDirection: "column",
+  gap: 6,
+  padding: 12,
+};
+
+const logEmpty: CSSProperties = {
+  fontSize: 12,
+  color: "var(--text-muted)",
+  lineHeight: 1.5,
+  padding: "8px 4px",
+};
+
+const logEntryStyle = (status: LogEntry["status"]): CSSProperties => ({
+  display: "flex",
+  flexDirection: "column",
+  gap: 3,
+  padding: "8px 10px",
+  borderRadius: 10,
+  background:
+    status === "ok" ? "var(--success-bg)" : status === "extra" ? "var(--danger-bg)" : "var(--warning-bg)",
+  border: `1px solid ${
+    status === "ok"
+      ? "var(--success-border)"
+      : status === "extra"
+        ? "var(--danger-border)"
+        : "var(--warning-border)"
+  }`,
+});
+
+const logEntryTop: CSSProperties = { display: "flex", alignItems: "baseline", gap: 7 };
+
+const logStatusIcon: CSSProperties = { fontSize: 12, fontWeight: 800, flexShrink: 0 };
+
+const logDesc: CSSProperties = {
+  fontSize: 12,
+  fontWeight: 600,
+  color: "var(--text)",
+  lineHeight: 1.3,
+  minWidth: 0,
+};
+
+const logMetaRow: CSSProperties = {
+  display: "flex",
+  alignItems: "center",
+  justifyContent: "space-between",
+  gap: 8,
+};
+
+const logEpc: CSSProperties = {
+  fontFamily: "var(--font-mono)",
+  fontSize: 10,
+  color: "var(--text-muted)",
+  overflow: "hidden",
+  textOverflow: "ellipsis",
+  whiteSpace: "nowrap",
+};
+
+const logTime: CSSProperties = {
+  fontFamily: "var(--font-mono)",
+  fontSize: 10,
+  color: "var(--text-faint)",
+  flexShrink: 0,
+};
