@@ -63,6 +63,15 @@ export function SupervisorModal({ faltantes, onCancel, onConfirm }: Props) {
   const [pinNovo2, setPinNovo2] = useState("");
   const [pinOk, setPinOk] = useState<string | null>(null);
 
+  // ESC fecha (não no meio de uma chamada — o PIN pode estar sendo validado).
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape" && !busy) onCancel();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [busy, onCancel]);
+
   useEffect(() => {
     let alive = true;
     getSupervisores()

@@ -48,6 +48,15 @@ export function SeparacaoHistoryModal({ onClose }: { onClose: () => void }) {
   const [manualTo, setManualTo] = useState("");
   const [page, setPage] = useState(0);
 
+  // ESC fecha (padrão do posvenda que as atendentes esperam).
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") onClose();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onClose]);
+
   // Debounce da busca (o servidor é quem filtra).
   useEffect(() => {
     const t = setTimeout(() => {

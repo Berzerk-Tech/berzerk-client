@@ -639,6 +639,7 @@ export function SeparacaoRunner({ title, kicker, claim, emptyHint, queue, onBack
       {filtersOpen && (
         <PickingFiltersModal
           filters={filters}
+          queue={queue}
           onApply={(f) => {
             aplicarFiltros(f);
             setFiltersOpen(false);

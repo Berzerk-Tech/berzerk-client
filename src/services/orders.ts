@@ -184,6 +184,39 @@ export function claimOrder(orderId: string): Promise<ClaimResponse> {
 }
 
 // ---------------------------------------------------------------------------
+// Produtos da fila (Filtro Inteligente — checkbox por produto, como o posvenda)
+// ---------------------------------------------------------------------------
+
+export type QueueProduct = {
+  /** Nome do item como aparece nos pedidos — é o termo usado nos filtros. */
+  nome: string;
+  tamanho: string | null;
+  ean: string | null;
+  imagemUrl: string | null;
+  quantidade: number;
+  pedidos: number;
+  /** Pedidos que o contêm — base do "X pedidos serão ocultados". */
+  orderIds: string[];
+};
+
+/** Produtos distintos da fila consultada (404 = nexus antigo → degradar). */
+export function getQueueProducts(params: {
+  mode: SeparationMode;
+  size?: string;
+  dateFrom?: string;
+  dateTo?: string;
+}): Promise<{ products: QueueProduct[] }> {
+  return apiRequest<{ products: QueueProduct[] }>("/separacao/queue-products", {
+    query: {
+      mode: params.mode,
+      size: params.size,
+      dateFrom: params.dateFrom || undefined,
+      dateTo: params.dateTo || undefined,
+    },
+  });
+}
+
+// ---------------------------------------------------------------------------
 // Histórico da operadora (paridade com o "Histórico" do posvenda)
 // ---------------------------------------------------------------------------
 
