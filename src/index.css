@@ -181,3 +181,10 @@ input {
 .berzerk-logo-light { display: none; }
 :root[data-theme="light"] .berzerk-logo-dark { display: none; }
 :root[data-theme="light"] .berzerk-logo-light { display: inline; }
+
+/* Scrollbar mínima (galpão): fininha, sem trilho — usada nas listas da
+   Separação (cards do pedido, fila, console de leitura). */
+.thin-scroll { scrollbar-width: thin; scrollbar-color: var(--border-strong) transparent; }
+.thin-scroll::-webkit-scrollbar { width: 5px; height: 5px; }
+.thin-scroll::-webkit-scrollbar-track { background: transparent; }
+.thin-scroll::-webkit-scrollbar-thumb { background: var(--border-strong); border-radius: 999px; }

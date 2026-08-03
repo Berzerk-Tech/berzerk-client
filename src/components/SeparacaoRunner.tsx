@@ -668,7 +668,7 @@ function ReadLogPanel({ entries, reading }: { entries: LogEntry[]; reading: bool
         <span style={logTitle}>Leitura ao vivo</span>
         <span style={logCount}>{entries.length > 0 ? `${entries.length}` : ""}</span>
       </div>
-      <div style={logList}>
+      <div className="thin-scroll" style={logList}>
         {entries.length === 0 && (
           <span style={logEmpty}>
             Aproxime as peças da mesa — cada tag lida aparece aqui com o que ela é.
@@ -769,7 +769,7 @@ function QueueSidebar({
         spellCheck={false}
       />
       <span style={sidebarHint}>Clique num pedido pra avançar direto pra ele.</span>
-      <div style={sidebarList}>
+      <div className="thin-scroll" style={sidebarList}>
         {current && <QueueCard item={current} pinned />}
         {data?.items.map((it) => (
           <QueueCard key={it.id} item={it} onClick={() => onJump(it)} />
@@ -852,9 +852,10 @@ function QueueCard({
   );
 }
 
-/** Corpo do card: paddings + nome + rodapé (compacto quando o card estreita). */
+/** Corpo do card: paddings + nome + rodapé (compacto quando o card estreita).
+    Estimativa CONSERVADORA — subestimar corta fileira no overflow. */
 function cardBodyHeight(cardW: number): number {
-  return cardW < 200 ? 64 : 88;
+  return cardW < 200 ? 74 : 96;
 }
 
 /**
@@ -875,6 +876,11 @@ function useFitCards(nMain: number, nOff: number) {
     const GAP = 14;
     const MAXW = 260;
     const MINW = 140;
+    // Folga de segurança: se a estimativa do corpo errar por poucos px pro
+    // lado otimista, o layout "acha" que coube e o overflow decepa uma fileira
+    // (bug visto em campo no misto de 14 itens). Melhor card 8px menor que
+    // fileira cortada — e o viewport rola de qualquer jeito se estourar.
+    const SLACK = 8;
     const BANNER = nOff > 0 ? 46 + GAP : 0;
     const total = nMain + nOff;
     const compute = () => {
@@ -885,7 +891,7 @@ function useFitCards(nMain: number, nOff: number) {
       for (let cols = 1; cols <= Math.min(total, 12); cols++) {
         const rows = Math.ceil(nMain / cols) + (nOff > 0 ? Math.ceil(nOff / cols) : 0);
         const wByWidth = Math.min((W - (cols - 1) * GAP) / cols, MAXW);
-        const rowH = (H - BANNER - (rows - 1) * GAP) / rows;
+        const rowH = (H - SLACK - BANNER - (rows - 1) * GAP) / rows;
         const w = Math.floor(Math.min(wByWidth, rowH - cardBodyHeight(wByWidth)));
         if (w >= MINW) best = Math.max(best ?? 0, w);
       }
@@ -945,7 +951,7 @@ function OrderView({
   const mainItems = isMixed ? order.items.filter((it) => !differs(it)) : order.items;
   const offSizeItems = isMixed ? order.items.filter(differs) : [];
 
-  const { ref: fitRef, cardW, fits } = useFitCards(mainItems.length, offSizeItems.length);
+  const { ref: fitRef, cardW } = useFitCards(mainItems.length, offSizeItems.length);
   const grid: CSSProperties = {
     ...cardsGrid,
     gridTemplateColumns: `repeat(auto-fit, ${cardW}px)`,
@@ -975,7 +981,11 @@ function OrderView({
 
       {order.items.length === 0 && <div style={emptyText}>Pedido sem itens cadastrados.</div>}
 
-      <div ref={fitRef} style={fits ? cardsArea : cardsAreaScroll}>
+      {/* Viewport SEMPRE rolável (roda do mouse; barra fininha .thin-scroll) —
+          centralização via margin:auto do conteúdo, que ao contrário do
+          justify-content:center NÃO decepa o topo quando estoura. */}
+      <div ref={fitRef} className="thin-scroll" style={cardsViewport}>
+        <div style={cardsContent}>
         <div style={grid}>
           {mainItems.map((it) => (
             <ItemCard
@@ -1011,6 +1021,7 @@ function OrderView({
             </div>
           </>
         )}
+        </div>
       </div>
 
       <div style={actionsRow}>
@@ -1452,24 +1463,26 @@ const orderWrap: CSSProperties = {
 };
 
 /**
- * Área dos cards no modo FIT (o normal): sem scroll nenhum — o useFitCards
- * dimensiona os cards pra caber; conteúdo centralizado verticalmente.
+ * Viewport dos cards: SEMPRE aceita rolagem (no caso normal o useFitCards faz
+ * tudo caber e a barra nem aparece; no pedido gigante rola com barra fininha).
  */
-const cardsArea: CSSProperties = {
+const cardsViewport: CSSProperties = {
   flex: 1,
   minHeight: 0,
-  overflow: "hidden",
+  overflowY: "auto",
+  overflowX: "hidden",
   display: "flex",
   flexDirection: "column",
-  justifyContent: "center",
-  gap: 14,
 };
 
-/** Fallback pra pedido gigante (~0,5%): aí sim rola, com card mínimo. */
-const cardsAreaScroll: CSSProperties = {
-  ...cardsArea,
-  overflowY: "auto",
-  justifyContent: "flex-start",
+/** margin:auto centraliza quando sobra espaço SEM decepar o topo no overflow
+    (justify-content:center cortava — o começo ficava inalcançável). */
+const cardsContent: CSSProperties = {
+  display: "flex",
+  flexDirection: "column",
+  gap: 14,
+  margin: "auto 0",
+  paddingBottom: 2,
 };
 
 const orderHeader: CSSProperties = {
