@@ -65,6 +65,9 @@ type Flow =
 
 const PACKING_MS = 5000;
 const RESOLVE_DEBOUNCE_MS = 250;
+// Peças na mesa sem pedido resolvido (separação atrasada, rede, etc.): tenta de
+// novo sozinho — o operador não tem mouse/teclado, "Nova leitura" é exceção.
+const RESOLVE_RETRY_MS = 4000;
 const BUFFER_WARN = 12;
 /**
  * Uma peça é considerada "na mesa" enquanto foi lida nos últimos PRESENCE_TTL ms.
@@ -171,6 +174,9 @@ export function Expedicao({ onBack }: Props) {
   const descCacheRef = useRef<Map<string, string>>(new Map());
   const lastPresentSigRef = useRef<string>("");
   const lastSigRef = useRef<string>("");
+  // Assinatura do último conjunto que FALHOU no match — os retries desse mesmo
+  // conjunto são silenciosos (sem beep/aviso repetido).
+  const lastFailSigRef = useRef<string>("");
   const resolveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const modoRef = useRef<ExpedicaoMode>(modo);
   modoRef.current = modo;
@@ -205,6 +211,7 @@ export function Expedicao({ onBack }: Props) {
     presentRef.current = new Map();
     lastPresentSigRef.current = "";
     lastSigRef.current = "";
+    lastFailSigRef.current = "";
     setProgress(new Map());
     setReadLog([]);
     setBufferSize(0);
@@ -220,28 +227,43 @@ export function Expedicao({ onBack }: Props) {
     if (epcs.length === 0) {
       if (k === "reading" || k === "choose" || k === "identified" || k === "error") setFlow({ kind: "idle" });
       lastSigRef.current = "";
+      lastFailSigRef.current = "";
       return;
     }
     // Não interrompe impressão/embalagem/conclusão.
     if (k === "printing" || k === "packing" || k === "done") return;
 
-    setFlow({ kind: "reading" });
+    // Mesmo conjunto que acabou de falhar → retry automático SILENCIOSO (sem
+    // piscar a tela nem repetir beep/aviso). Assim que o pedido ficar pronto no
+    // nexus (ou a rede voltar), identifica sozinho — sem "Nova leitura".
+    const sigNow = epcs.slice().sort().join(",");
+    const retrying = sigNow === lastFailSigRef.current;
+    if (!retrying) setFlow({ kind: "reading" });
+    const scheduleRetry = () => {
+      lastFailSigRef.current = sigNow;
+      if (resolveTimer.current) clearTimeout(resolveTimer.current);
+      resolveTimer.current = setTimeout(() => void doResolve(), RESOLVE_RETRY_MS);
+    };
     try {
       const { matches, unmatchedEpcs, jaExpedidos } = await epcMatch(epcs);
       if (matches.length === 0) {
-        beepError();
+        if (!retrying) beepError();
         if (jaExpedidos.length > 0) {
           setFlow({ kind: "error", code: "ja_expedido", message: jaExpedidoMsg(jaExpedidos) });
+          scheduleRetry();
           return;
         }
-        showNotice(
-          unmatchedEpcs.length > 0
-            ? `Peça(s) sem pedido pronto na mesa (${unmatchedEpcs.length}). Confira se o pedido foi separado.`
-            : "Nenhum pedido encontrado pra essas tags.",
-        );
+        if (!retrying)
+          showNotice(
+            unmatchedEpcs.length > 0
+              ? `Peça(s) sem pedido pronto na mesa (${unmatchedEpcs.length}). Aguardando aparecer no sistema…`
+              : "Nenhum pedido encontrado pra essas tags. Aguardando aparecer no sistema…",
+          );
         setFlow({ kind: "idle" });
+        scheduleRetry();
         return;
       }
+      lastFailSigRef.current = "";
       if (matches.length > 1) {
         beepError();
         setFlow({ kind: "choose", matches });
@@ -257,6 +279,7 @@ export function Expedicao({ onBack }: Props) {
       await identifica(m);
     } catch (e) {
       handleResolveError(e);
+      scheduleRetry();
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [showNotice]);
