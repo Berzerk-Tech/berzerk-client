@@ -629,7 +629,6 @@ export function Expedicao({ onBack }: Props) {
         <main style={stage}>
           <StageCenter
             flow={flow}
-            modo={modo}
             progress={progress}
             packingProgress={packingProgress}
             autoPrint={autoPrint}
@@ -672,7 +671,6 @@ export function Expedicao({ onBack }: Props) {
 // ============================================================
 function StageCenter({
   flow,
-  modo,
   progress,
   packingProgress,
   autoPrint,
@@ -683,7 +681,6 @@ function StageCenter({
   onRestart,
 }: {
   flow: Flow;
-  modo: ExpedicaoMode;
   progress: Map<string, number>;
   packingProgress: number;
   autoPrint: boolean;

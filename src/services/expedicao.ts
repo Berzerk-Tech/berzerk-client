@@ -138,7 +138,7 @@ export type DanfeData = {
 
 export type Documentos = {
   danfe: DanfeData | null;
-  etiqueta: { base64: string; formato: string } | null;
+  etiqueta: { base64: string; formato: "pdf" | "png" } | null;
   trackingNumber: string | null;
 };
 
