@@ -7,7 +7,7 @@ import { getStationShortId } from "./lib/station";
 import { Login } from "./components/Login";
 import { BatchBrowser } from "./components/BatchBrowser";
 import { HomeMenu, type Screen } from "./components/HomeMenu";
-import { NotaFiscalPlaceholder } from "./components/NotaFiscalPlaceholder";
+import { Expedicao } from "./components/Expedicao";
 import { PieceTrace } from "./components/PieceTrace";
 import { Separacao } from "./components/Separacao";
 import { SettingsPlaceholder } from "./components/SettingsPlaceholder";
@@ -81,7 +81,7 @@ export default function App() {
     const email = session.user.email ?? "(sem email)";
     const stationShortId = getStationShortId();
     if (screen === "rfid") content = withBanner(<BatchBrowser session={session} onBack={back} />);
-    else if (screen === "nf") content = withBanner(<NotaFiscalPlaceholder onBack={back} />);
+    else if (screen === "nf") content = withBanner(<Expedicao onBack={back} />);
     else if (screen === "rastreio") content = withBanner(<PieceTrace onBack={back} />);
     else if (screen === "separacao") content = withBanner(<Separacao onBack={back} />);
     else if (screen === "settings") content = withBanner(<SettingsPlaceholder onBack={back} />);

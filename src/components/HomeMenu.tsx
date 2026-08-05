@@ -130,12 +130,12 @@ export function HomeMenu({ email, onEnter }: Props) {
           />
           <ModuleCard
             label="Expedição"
-            description="Bipa etiqueta, identifica pedido, imprime DANFE automática"
+            description="Bipa a etiqueta, identifica o pedido e imprime a etiqueta/DANFE automaticamente"
             icon={<IconReceipt />}
             iconBg="var(--warning-bg)"
             iconColor="var(--warning-text)"
             onClick={() => onEnter("nf")}
-            status="preview"
+            status="ready"
           />
         </div>
       </main>

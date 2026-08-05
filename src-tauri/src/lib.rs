@@ -1,6 +1,7 @@
 mod itag_client;
 mod itag_iprint;
 mod oauth_loopback;
+mod printing;
 mod rfid_usb;
 mod usb_devices;
 
@@ -23,6 +24,10 @@ pub fn run() {
             itag_iprint::itag_epc_details,
             usb_devices::list_serial_ports,
             rfid_usb::serial_sniff,
+            printing::print_pdf_silent,
+            printing::print_image_silent,
+            printing::list_windows_printers,
+            printing::print_engine_status,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

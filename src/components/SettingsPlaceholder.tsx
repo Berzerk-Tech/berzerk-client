@@ -31,6 +31,15 @@ import {
   toRustConfig,
   type IprintConfig,
 } from "../services/iprintConfig";
+import {
+  getExpedicaoMode,
+  setModoTeste,
+  isExpedicaoSimulacao,
+  setExpedicaoSimulacao,
+} from "../services/expedicaoMode";
+import { listPrinters, printEngineStatus, type PrintEngineStatus, type PrintOutcome } from "../lib/printer";
+import { getLabelPrinter, setLabelPrinter } from "../services/printerConfig";
+import { imprimirTeste } from "../lib/testPrint";
 import { invoke } from "@tauri-apps/api/core";
 
 type Props = { onBack: () => void };
@@ -74,6 +83,16 @@ export function SettingsPlaceholder({ onBack }: Props) {
             reader={config.reader}
             onSave={(r) => { setReader(r); refresh(); }}
           />
+        </div>
+
+        <div style={section}>
+          <SectionHeader kicker="Operação" label="Expedição" />
+          <ExpedicaoCard />
+        </div>
+
+        <div style={section}>
+          <SectionHeader kicker="Expedição" label="Impressora de documentos" />
+          <LabelPrinterCard />
         </div>
 
         <div style={section}>
@@ -803,6 +822,205 @@ function IprintCard() {
   );
 }
 
+// === Expedição Card (modo teste / simulação) ===
+
+/**
+ * Flags de operação da Expedição — DENTRO do app (não no .env). Persistem por
+ * estação. Modo teste é a trava de segurança: ligado, a mesa roda o fluxo
+ * inteiro mas NÃO expede nada no sistema.
+ */
+function ExpedicaoCard() {
+  const [teste, setTeste] = useState(() => getExpedicaoMode() === "teste");
+  const [simulacao, setSimulacao] = useState(() => isExpedicaoSimulacao());
+
+  const onTeste = (on: boolean) => {
+    setModoTeste(on);
+    setTeste(on);
+  };
+  const onSimulacao = (on: boolean) => {
+    setExpedicaoSimulacao(on);
+    setSimulacao(on);
+  };
+
+  return (
+    <div style={configCard}>
+      <ToggleRow
+        label="Modo teste"
+        hint="Roda o fluxo inteiro (identifica, confere, imprime), mas NÃO marca o pedido como expedido. Nenhum efeito no sistema. Pode refazer à vontade."
+        checked={teste}
+        onChange={onTeste}
+      />
+
+      {!teste && (
+        <div style={expWarn}>
+          ⚠ MODO OFICIAL — ao fechar o pacote, o pedido é marcado como <strong>expedido</strong> e
+          a movimentação é replicada pro Tiny. Use só quando for pra valer.
+        </div>
+      )}
+
+      <div style={{ height: 1, background: "var(--border)" }} />
+
+      <ToggleRow
+        label="Simulação (sem servidor)"
+        hint="Usa pedidos fictícios pra treinar/validar a tela quando o servidor de expedição ainda não responde. Deixe desligado pra usar dados reais."
+        checked={simulacao}
+        onChange={onSimulacao}
+      />
+    </div>
+  );
+}
+
+function ToggleRow({
+  label,
+  hint,
+  checked,
+  onChange,
+}: {
+  label: string;
+  hint: string;
+  checked: boolean;
+  onChange: (on: boolean) => void;
+}) {
+  return (
+    <div style={toggleRow}>
+      <div style={toggleCopy}>
+        <span style={toggleLabel}>{label}</span>
+        <span style={toggleHint}>{hint}</span>
+      </div>
+      <button
+        type="button"
+        role="switch"
+        aria-checked={checked}
+        onClick={() => onChange(!checked)}
+        style={{
+          ...toggleTrack,
+          background: checked ? "var(--success-dot)" : "var(--bg-input)",
+          borderColor: checked ? "var(--success-dot)" : "var(--border-strong)",
+          justifyContent: checked ? "flex-end" : "flex-start",
+        }}
+      >
+        <span style={toggleKnob} />
+      </button>
+    </div>
+  );
+}
+
+// === Impressora de documentos (Expedição) — etiqueta J&T + DANFE ===
+
+/**
+ * Escolhe a impressora do Windows pra etiqueta/DANFE (SumatraPDF -print-to) e
+ * dá um teste isolado — separa "a impressora funciona?" de "o pedido tem
+ * etiqueta?". Vazio = impressora padrão do Windows.
+ */
+function LabelPrinterCard() {
+  const [printers, setPrinters] = useState<string[]>([]);
+  const [selected, setSelected] = useState<string>(() => getLabelPrinter() ?? "");
+  const [engine, setEngine] = useState<PrintEngineStatus | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [testing, setTesting] = useState(false);
+  const [result, setResult] = useState<PrintOutcome | null>(null);
+
+  const load = () => {
+    setLoading(true);
+    void Promise.all([listPrinters(), printEngineStatus().catch(() => null)])
+      .then(([ps, eng]) => {
+        setPrinters(ps);
+        setEngine(eng);
+      })
+      .finally(() => setLoading(false));
+  };
+  useEffect(() => {
+    load();
+  }, []);
+
+  const pick = (name: string) => {
+    setSelected(name);
+    setLabelPrinter(name || null);
+  };
+
+  const test = () => {
+    setTesting(true);
+    setResult(null);
+    void imprimirTeste(selected || null)
+      .then(setResult)
+      .catch((e) =>
+        setResult({ ok: false, printer: selected || null, message: e instanceof Error ? e.message : String(e), engine: "sumatra" }),
+      )
+      .finally(() => setTesting(false));
+  };
+
+  return (
+    <div style={configCard}>
+      <div
+        style={{
+          ...testBox,
+          background: engine?.ok ? "var(--success-bg)" : "var(--warning-bg)",
+          color: engine?.ok ? "var(--success-text)" : "var(--warning-text)",
+          borderColor: engine?.ok ? "var(--success-border)" : "var(--warning-border)",
+        }}
+      >
+        <span style={testIcon}>{engine?.ok ? "●" : "○"}</span>
+        <div style={testCopy}>
+          <strong style={testTitle}>
+            {engine === null ? "Verificando motor de impressão…" : engine.ok ? "SumatraPDF encontrado" : "SumatraPDF NÃO encontrado"}
+          </strong>
+          {engine?.path && <code style={testDetail}>{engine.path}</code>}
+          {engine && !engine.ok && engine.message && <code style={testDetail}>{engine.message}</code>}
+        </div>
+      </div>
+
+      <Field
+        label="Impressora"
+        hint={`${printers.length} impressora(s) no Windows · a etiqueta/DANFE vai por aqui`}
+      >
+        <select
+          style={input}
+          className="berzerk-input"
+          value={selected}
+          onChange={(e) => pick(e.target.value)}
+        >
+          <option value="">Padrão do Windows</option>
+          {printers.map((p) => (
+            <option key={p} value={p}>
+              {p}
+            </option>
+          ))}
+        </select>
+      </Field>
+
+      <div style={cardActions}>
+        <button type="button" style={btnGhost} className="berzerk-btn-ghost" onClick={load} disabled={loading}>
+          {loading ? "Atualizando…" : "↻ Atualizar lista"}
+        </button>
+        <button type="button" style={btnPrimary} className="berzerk-btn-primary" onClick={test} disabled={testing}>
+          {testing ? "Imprimindo…" : "Imprimir teste"}
+        </button>
+      </div>
+
+      {result && (
+        <div
+          style={{
+            ...testBox,
+            background: result.ok ? "var(--success-bg)" : "var(--danger-bg)",
+            color: result.ok ? "var(--success-text)" : "var(--danger-text)",
+            borderColor: result.ok ? "var(--success-border)" : "var(--danger-border)",
+          }}
+        >
+          <span style={testIcon}>{result.ok ? "●" : "○"}</span>
+          <div style={testCopy}>
+            <strong style={testTitle}>
+              {result.ok
+                ? `Enviado pra ${result.printer ?? "impressora padrão"}`
+                : "Falha na impressão de teste"}
+            </strong>
+            {result.message && <code style={testDetail}>{result.message}</code>}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 // === Helpers ===
 
 function SectionHeader({ kicker, label }: { kicker: string; label: string }) {
@@ -1283,6 +1501,63 @@ const wsRawLine: CSSProperties = {
   fontSize: 10,
   color: "var(--text-muted)",
   wordBreak: "break-all",
+};
+
+const toggleRow: CSSProperties = {
+  display: "flex",
+  alignItems: "center",
+  justifyContent: "space-between",
+  gap: 18,
+};
+
+const toggleCopy: CSSProperties = {
+  display: "flex",
+  flexDirection: "column",
+  gap: 4,
+  flex: 1,
+};
+
+const toggleLabel: CSSProperties = {
+  fontSize: 14,
+  fontWeight: 700,
+  color: "var(--text)",
+};
+
+const toggleHint: CSSProperties = {
+  fontSize: 12,
+  color: "var(--text-muted)",
+  lineHeight: 1.5,
+};
+
+const toggleTrack: CSSProperties = {
+  flexShrink: 0,
+  width: 46,
+  height: 26,
+  borderRadius: 999,
+  border: "1px solid",
+  padding: 2,
+  display: "flex",
+  alignItems: "center",
+  cursor: "pointer",
+  transition: "background 140ms, border-color 140ms",
+};
+
+const toggleKnob: CSSProperties = {
+  width: 20,
+  height: 20,
+  borderRadius: "50%",
+  background: "white",
+  boxShadow: "0 1px 2px rgba(0,0,0,.3)",
+};
+
+const expWarn: CSSProperties = {
+  padding: "10px 12px",
+  background: "var(--danger-bg, var(--warning-bg))",
+  color: "var(--danger-text, var(--warning-text))",
+  border: "1px solid var(--danger-border, var(--warning-border))",
+  borderRadius: 8,
+  fontSize: 12,
+  lineHeight: 1.5,
 };
 
 const infoCard: CSSProperties = {

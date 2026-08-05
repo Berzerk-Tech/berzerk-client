@@ -1,6 +1,18 @@
-// Contexto GLOBAL do leitor RFID (a "mesa"). Substitui o uso por-página do
-// src/lib/rfid.ts: mantém UMA conexão, faz poll contínuo sob demanda, compartilha
-// o cache EPC→EAN entre telas e sinaliza "mesa caiu" sem deslogar.
+// Contexto GLOBAL do leitor RFID (a "mesa"). Mantém UMA conexão e um ÚNICO
+// controlador de leitura para toda a app.
+//
+// CONTROLE DETERMINÍSTICO (corrige o "pisca"/desarma):
+// - O leitor é ARMADO uma vez (`iniciar`) quando a primeira sessão começa a ler
+//   e DESARMADO uma vez (`parar`) quando a última para — com "linger" que
+//   absorve o StrictMode (remonta o efeito em dev) e a troca de tela.
+// - Todos os comandos pro iTAG (iniciar/parar/limpar/poll) são SERIALIZADOS.
+//
+// DOIS MODOS DE LEITURA (o iTAG só ACUMULA — não detecta remoção):
+// - DELTA  (`startReadingSession`): recebe só EPCs NOVOS (dedupe por sessão).
+//   Usado pela Separação, que conta cada peça uma vez.
+// - PRESENÇA (`startPresenceSession`): recebe o CONJUNTO ATUAL na mesa a cada
+//   poll; o buffer é limpo periodicamente (sem desarmar), então tirar/pôr peça
+//   reflete na hora. Usado pela Expedição ("ler o tempo todo, refletir a mesa").
 
 import {
   createContext,
@@ -23,7 +35,6 @@ import {
 import { decodeSgtin96 } from "../lib/sgtin";
 import { epcLookup, type EpcLookupItem } from "../services/orders";
 
-/** Cache persistente EPC→item (mesmo padrão do posvenda: sobrevive a reload). */
 const EPC_CACHE_KEY = "berzerk_epc_resolve_cache_v1";
 const EPC_CACHE_MAX = 5000;
 
@@ -40,58 +51,49 @@ function loadEpcCache(): Map<string, EpcLookupItem> {
 function persistEpcCache(map: Map<string, EpcLookupItem>): void {
   try {
     let entries = Array.from(map.entries());
-    if (entries.length > EPC_CACHE_MAX) {
-      entries = entries.slice(entries.length - EPC_CACHE_MAX);
-    }
+    if (entries.length > EPC_CACHE_MAX) entries = entries.slice(entries.length - EPC_CACHE_MAX);
     localStorage.setItem(EPC_CACHE_KEY, JSON.stringify(entries));
   } catch {
     /* localStorage cheio/indisponível */
   }
 }
 
-/** Intervalo entre polls durante uma sessão de leitura contínua. */
-const POLL_MS = 700;
-/** Intervalo do healthcheck da mesa quando ociosa. */
+const POLL_MS = 400;
 const PING_MS = 5000;
+const LINGER_MS = 900;
+/** De quanto em quanto limpa o buffer no modo presença (reflete remoção).
+ *  Menos frequente = menos "janela cega" logo após limpar (menos "surdo");
+ *  o TTL do lado da Expedição (maior que isto) segura a peça entre limpezas. */
+const PRESENCE_CLEAR_MS = 1500;
+
+type DeltaListener = { cb: (newEpcs: string[]) => void; seen: Set<string> };
+type PresenceListener = { cb: (currentEpcs: string[]) => void };
 
 type RfidContextValue = {
   connected: boolean;
   host: string;
   lastError: string | null;
-  /** Refaz o ping imediatamente (botão "reconectar"). */
   reconnect: () => Promise<void>;
-  /**
-   * Inicia leitura contínua. `onTags` recebe apenas EPCs NOVOS (dedupe interno
-   * por sessão). Retorna uma função pra parar a sessão.
-   */
+  /** Modo DELTA: recebe só EPCs novos (dedupe por sessão). Retorna o stop. */
   startReadingSession: (onTags: (newEpcs: string[]) => void) => () => void;
-  /** Resolve EPC→EAN/SKU com cache compartilhado (RDS via separacao-api). */
+  /** Modo PRESENÇA: recebe o conjunto ATUAL na mesa a cada poll. Retorna o stop. */
+  startPresenceSession: (onPresent: (currentEpcs: string[]) => void) => () => void;
   resolveEpcs: (epcs: string[]) => Promise<Map<string, EpcLookupItem>>;
 };
 
 const RfidContext = createContext<RfidContextValue | null>(null);
 
-/**
- * Sessão de leitura pra leitor em modo TECLADO (keyboard wedge — ex.: ACURA
- * AC01v2, que digita o EPC como um teclado USB e finaliza com Enter).
- *
- * Heurística anti-falso-positivo: só aceita rajadas RÁPIDAS (gap < 150ms entre
- * teclas — humano digita mais devagar) de caracteres hex com 16+ dígitos,
- * finalizadas por Enter. Dedupe por sessão, igual ao modo iTAG.
- */
+/** Leitor em modo TECLADO (keyboard wedge). Não tem armar/desarmar. */
 function startWedgeSession(onTags: (newEpcs: string[]) => void): () => void {
   const seen = new Set<string>();
   let buffer = "";
   let lastKeyAt = 0;
-
   const MAX_GAP_MS = 150;
   const MIN_LEN = 16;
-
   const onKeyDown = (ev: KeyboardEvent) => {
     const now = Date.now();
     if (now - lastKeyAt > MAX_GAP_MS) buffer = "";
     lastKeyAt = now;
-
     if (ev.key === "Enter") {
       const epc = buffer.toUpperCase();
       buffer = "";
@@ -101,17 +103,11 @@ function startWedgeSession(onTags: (newEpcs: string[]) => void): () => void {
       }
       return;
     }
-    if (ev.key.length === 1 && /^[0-9A-Fa-f]$/.test(ev.key)) {
-      buffer += ev.key;
-    } else {
-      buffer = "";
-    }
+    if (ev.key.length === 1 && /^[0-9A-Fa-f]$/.test(ev.key)) buffer += ev.key;
+    else buffer = "";
   };
-
   window.addEventListener("keydown", onKeyDown, true);
-  return () => {
-    window.removeEventListener("keydown", onKeyDown, true);
-  };
+  return () => window.removeEventListener("keydown", onKeyDown, true);
 }
 
 export function RfidProvider({ children }: { children: ReactNode }) {
@@ -119,34 +115,205 @@ export function RfidProvider({ children }: { children: ReactNode }) {
   const [host, setHost] = useState(() => getDeviceConfig().reader.itagHost);
   const [lastError, setLastError] = useState<string | null>(null);
   const cacheRef = useRef<Map<string, EpcLookupItem>>(loadEpcCache());
-  // EPCs que já falharam em TODAS as fontes nesta sessão — evita martelar a
-  // API a cada poll com a mesma tag desconhecida em cima da mesa.
   const unresolvedRef = useRef<Set<string>>(new Set());
+
+  // --- Controlador do leitor ---
+  const armedRef = useRef(false);
+  const deltaRef = useRef<Set<DeltaListener>>(new Set());
+  const presenceRef = useRef<Set<PresenceListener>>(new Set());
+  const pollTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const pollActiveRef = useRef(false);
+  const tearTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const presenceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const cmdChainRef = useRef<Promise<unknown>>(Promise.resolve());
+
+  const anyListeners = () => deltaRef.current.size > 0 || presenceRef.current.size > 0;
+
+  const runExclusive = useCallback(<T,>(fn: () => Promise<T>): Promise<T> => {
+    const next = cmdChainRef.current.then(() => fn(), () => fn());
+    cmdChainRef.current = next.then(() => undefined, () => undefined);
+    return next as Promise<T>;
+  }, []);
+
+  const prepareSession = useCallback(
+    async (h: string) => {
+      await runExclusive(async () => {
+        await clearBuffer(h);
+        if (!armedRef.current) {
+          await startReading(h);
+          armedRef.current = true;
+        }
+      });
+    },
+    [runExclusive],
+  );
+
+  const teardownReader = useCallback(
+    async (h: string) => {
+      if (pollTimerRef.current) {
+        clearTimeout(pollTimerRef.current);
+        pollTimerRef.current = null;
+      }
+      pollActiveRef.current = false;
+      if (presenceTimerRef.current) {
+        clearTimeout(presenceTimerRef.current);
+        presenceTimerRef.current = null;
+      }
+      if (armedRef.current) {
+        armedRef.current = false;
+        await runExclusive(() => stopReading(h));
+      }
+    },
+    [runExclusive],
+  );
+
+  const startPollLoop = useCallback(
+    (h: string) => {
+      if (pollActiveRef.current) return;
+      pollActiveRef.current = true;
+      const loop = async () => {
+        pollTimerRef.current = null;
+        if (!anyListeners()) {
+          pollActiveRef.current = false;
+          return;
+        }
+        try {
+          const poll = await runExclusive(() => pollItagTags(h));
+          setConnected(true);
+          setLastError(null);
+          const all = poll.tags.map((t) => t.trim().toUpperCase()).filter(Boolean);
+          // DELTA: só novos, por sessão.
+          for (const l of deltaRef.current) {
+            const novos = all.filter((t) => !l.seen.has(t));
+            for (const t of novos) l.seen.add(t);
+            if (novos.length > 0) l.cb(novos);
+          }
+          // PRESENÇA: conjunto atual (acumulado desde o último limpar).
+          for (const p of presenceRef.current) p.cb(all);
+        } catch (e) {
+          setConnected(false);
+          setLastError(e instanceof Error ? e.message : String(e));
+        } finally {
+          if (anyListeners()) pollTimerRef.current = setTimeout(loop, POLL_MS);
+          else pollActiveRef.current = false;
+        }
+      };
+      pollTimerRef.current = setTimeout(loop, 0);
+    },
+    [runExclusive],
+  );
+
+  // Limpa o buffer periodicamente enquanto há sessão de PRESENÇA — assim a
+  // remoção de peça reflete (o iTAG só acumula; sem isto ela nunca "sai").
+  const startPresenceRefresh = useCallback(
+    (h: string) => {
+      if (presenceTimerRef.current) return;
+      const tick = async () => {
+        presenceTimerRef.current = null;
+        if (presenceRef.current.size === 0) return;
+        try {
+          await runExclusive(() => clearBuffer(h));
+        } catch {
+          /* segue no próximo tick */
+        }
+        if (presenceRef.current.size > 0) presenceTimerRef.current = setTimeout(tick, PRESENCE_CLEAR_MS);
+      };
+      presenceTimerRef.current = setTimeout(tick, PRESENCE_CLEAR_MS);
+    },
+    [runExclusive],
+  );
+
+  const scheduleTeardown = useCallback(
+    (h: string) => {
+      if (anyListeners()) return;
+      if (tearTimerRef.current) clearTimeout(tearTimerRef.current);
+      tearTimerRef.current = setTimeout(() => {
+        tearTimerRef.current = null;
+        if (!anyListeners()) void teardownReader(h);
+      }, LINGER_MS);
+    },
+    [teardownReader],
+  );
+
+  const startReadingSession = useCallback(
+    (onTags: (newEpcs: string[]) => void) => {
+      const reader = getDeviceConfig().reader;
+      if (reader.mode === "keyboard-wedge") return startWedgeSession(onTags);
+      const h = reader.itagHost;
+      const listener: DeltaListener = { cb: onTags, seen: new Set() };
+      deltaRef.current.add(listener);
+      if (tearTimerRef.current) {
+        clearTimeout(tearTimerRef.current);
+        tearTimerRef.current = null;
+      }
+      void prepareSession(h).then(() => startPollLoop(h)).catch((e) => {
+        setConnected(false);
+        setLastError(e instanceof Error ? e.message : String(e));
+      });
+      return () => {
+        deltaRef.current.delete(listener);
+        scheduleTeardown(h);
+      };
+    },
+    [prepareSession, startPollLoop, scheduleTeardown],
+  );
+
+  const startPresenceSession = useCallback(
+    (onPresent: (currentEpcs: string[]) => void) => {
+      const reader = getDeviceConfig().reader;
+      if (reader.mode === "keyboard-wedge") {
+        // Wedge não tem presença real — emula tratando cada bipada como atual.
+        return startWedgeSession((epcs) => onPresent(epcs));
+      }
+      const h = reader.itagHost;
+      const listener: PresenceListener = { cb: onPresent };
+      presenceRef.current.add(listener);
+      if (tearTimerRef.current) {
+        clearTimeout(tearTimerRef.current);
+        tearTimerRef.current = null;
+      }
+      void prepareSession(h)
+        .then(() => {
+          startPollLoop(h);
+          startPresenceRefresh(h);
+        })
+        .catch((e) => {
+          setConnected(false);
+          setLastError(e instanceof Error ? e.message : String(e));
+        });
+      return () => {
+        presenceRef.current.delete(listener);
+        if (presenceRef.current.size === 0 && presenceTimerRef.current) {
+          clearTimeout(presenceTimerRef.current);
+          presenceTimerRef.current = null;
+        }
+        scheduleTeardown(h);
+      };
+    },
+    [prepareSession, startPollLoop, startPresenceRefresh, scheduleTeardown],
+  );
 
   const ping = useCallback(async () => {
     const reader = getDeviceConfig().reader;
-    // Keyboard wedge: não há o que pingar — o leitor é um teclado USB.
     if (reader.mode === "keyboard-wedge") {
       setHost("leitor-teclado");
       setConnected(true);
       setLastError(null);
       return;
     }
-    // WCF REST: sonda GET /RetornaStatus — só consulta, não abre sessão nem
-    // dispara o overlay "Aguarde!" do iTAG (que aparece a cada `iniciar`).
+    if (anyListeners()) return; // leitura ativa gerencia o status
     const h = reader.itagHost;
     setHost(h);
     try {
-      const status = await pingItag(h);
+      const status = await runExclusive(() => pingItag(h));
       setConnected(status.ok);
       setLastError(status.ok ? null : status.message ?? "mesa não respondeu");
     } catch (e) {
       setConnected(false);
       setLastError(e instanceof Error ? e.message : String(e));
     }
-  }, []);
+  }, [runExclusive]);
 
-  // Healthcheck periódico da mesa (não bloqueia operação).
   useEffect(() => {
     let alive = true;
     void ping();
@@ -159,76 +326,12 @@ export function RfidProvider({ children }: { children: ReactNode }) {
     };
   }, [ping]);
 
-  const startReadingSession = useCallback((onTags: (newEpcs: string[]) => void) => {
-    const reader = getDeviceConfig().reader;
-    if (reader.mode === "keyboard-wedge") {
-      return startWedgeSession(onTags);
-    }
-    // WCF REST (caminho documentado da iTAG): `limparLeitura` + `iniciar` UMA
-    // vez no começo da sessão, depois só GET /RetornaTag em loop — o comando
-    // `iniciar` dispara o overlay "Aguarde!" do iTAG Monitor, então NUNCA pode
-    // rodar em ciclo (era o popup insuportável do modo WS aposentado).
-    const h = reader.itagHost;
-    const seen = new Set<string>();
-    let stopped = false;
-    let timer: ReturnType<typeof setTimeout> | null = null;
-
-    const loop = async () => {
-      if (stopped) return;
-      try {
-        const poll = await pollItagTags(h);
-        if (!stopped) {
-          setConnected(true);
-          const fresh = poll.tags
-            .map((t) => t.trim().toUpperCase())
-            .filter((t) => t && !seen.has(t));
-          for (const t of fresh) seen.add(t);
-          if (fresh.length > 0) onTags(fresh);
-        }
-      } catch (e) {
-        // Mesa caiu durante o uso → banner, sem derrubar a sessão; segue tentando.
-        setConnected(false);
-        setLastError(e instanceof Error ? e.message : String(e));
-      } finally {
-        if (!stopped) timer = setTimeout(loop, POLL_MS);
-      }
-    };
-
-    // Arranca: limpa buffer + inicia leitura, então entra no loop de poll.
-    void (async () => {
-      try {
-        await clearBuffer(h);
-        await startReading(h);
-      } catch (e) {
-        setConnected(false);
-        setLastError(e instanceof Error ? e.message : String(e));
-      }
-      if (!stopped) timer = setTimeout(loop, POLL_MS);
-    })();
-
-    return () => {
-      stopped = true;
-      if (timer) clearTimeout(timer);
-      void stopReading(h).catch(() => {
-        /* best-effort */
-      });
-    };
-  }, []);
-
-  // Resolução EPC→peça em CAMADAS — paridade com o posvenda em produção, que
-  // usa a nuvem da iTAG como fonte da verdade (edge `itag-epc-lookup`). O
-  // decode SGTIN local NÃO basta: a doc do posvenda avisa que as tags em campo
-  // nem sempre são GS1 padrão, e o decode-first da v0.3.6/0.3.7 curto-circuitava
-  // sem nunca trazer nome/tamanho (a raiz do "lê mas não resolve").
   const resolveEpcs = useCallback(
     async (epcs: string[]): Promise<Map<string, EpcLookupItem>> => {
-      const norm = Array.from(
-        new Set(epcs.map((e) => e.trim().toUpperCase()).filter(Boolean)),
-      );
+      const norm = Array.from(new Set(epcs.map((e) => e.trim().toUpperCase()).filter(Boolean)));
       const result = new Map<string, EpcLookupItem>();
       let misses: string[] = [];
       for (const e of norm) {
-        // EAN-13 direto (leitor em modo teclado pode digitar EAN puro).
         if (/^\d{13}$/.test(e)) {
           result.set(e, { epc: e, ean13: e, sku: null, size: null, batchCode: null });
           continue;
@@ -237,11 +340,8 @@ export function RfidProvider({ children }: { children: ReactNode }) {
         if (cached) {
           result.set(e, cached);
         } else if (unresolvedRef.current.has(e)) {
-          // Já falhou em todas as fontes: resolve o que der localmente.
           const decoded = decodeSgtin96(e);
-          if (decoded) {
-            result.set(e, { epc: e, ean13: decoded, sku: null, size: null, batchCode: null });
-          }
+          if (decoded) result.set(e, { epc: e, ean13: decoded, sku: null, size: null, batchCode: null });
         } else {
           misses.push(e);
         }
@@ -255,22 +355,12 @@ export function RfidProvider({ children }: { children: ReactNode }) {
         touchedCache = true;
       };
 
-      // 1) NUVEM DA iTAG (quem imprimiu a tag sabe o que ela é): ean13 + nome
-      //    + tamanho + cor. Tenta o ambiente configurado e o itagalert_berzerk
-      //    (tags da era posvenda).
       if (misses.length > 0) {
         try {
           const details = await lookupEpcDetails(misses);
           for (const d of details) {
             if (d.found && d.ean13) {
-              commit({
-                epc: d.epc,
-                ean13: d.ean13,
-                sku: null,
-                size: d.tamanho,
-                batchCode: null,
-                name: d.nome,
-              });
+              commit({ epc: d.epc, ean13: d.ean13, sku: null, size: d.tamanho, batchCode: null, name: d.nome });
             }
           }
         } catch (e) {
@@ -279,8 +369,6 @@ export function RfidProvider({ children }: { children: ReactNode }) {
         misses = misses.filter((e) => !result.has(e));
       }
 
-      // 2) Nosso inventário (rfid_epc_inventory replicado no nexus): cobre o
-      //    que o app imprimiu caso a iTAG esteja fora/limpa.
       if (misses.length > 0) {
         try {
           const { items } = await epcLookup(misses);
@@ -291,15 +379,10 @@ export function RfidProvider({ children }: { children: ReactNode }) {
         misses = misses.filter((e) => !result.has(e));
       }
 
-      // 3) Último recurso: decodificar SGTIN-96 localmente (EAN sem nome nem
-      //    tamanho — só vale pra tag GS1 de verdade). Não entra no cache
-      //    persistente; marca como esgotado pra não re-consultar a cada poll.
       for (const e of misses) {
         unresolvedRef.current.add(e);
         const decoded = decodeSgtin96(e);
-        if (decoded) {
-          result.set(e, { epc: e, ean13: decoded, sku: null, size: null, batchCode: null });
-        }
+        if (decoded) result.set(e, { epc: e, ean13: decoded, sku: null, size: null, batchCode: null });
       }
 
       if (touchedCache) persistEpcCache(cacheRef.current);
@@ -314,6 +397,7 @@ export function RfidProvider({ children }: { children: ReactNode }) {
     lastError,
     reconnect: () => ping(),
     startReadingSession,
+    startPresenceSession,
     resolveEpcs,
   };
 

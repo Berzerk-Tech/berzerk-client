@@ -447,12 +447,15 @@ export function SeparacaoRunner({ title, kicker, claim, emptyHint, queue, onBack
 
   // Sessão de leitura contínua enquanto há pedido em separação. Reinicia ao
   // trocar de pedido ou quando a operadora pede "Reiniciar (R)" (sessionEpoch).
+  // Depende só de startReadingSession (estável) — NUNCA do objeto `rfid` inteiro,
+  // que é recriado a cada render do provider e reiniciava a leitura à toa.
+  const startReadingSession = rfid.startReadingSession;
   useEffect(() => {
     if (phase !== "separating" || !order) return;
-    const stop = rfid.startReadingSession((newEpcs) => onTagsRef.current(newEpcs));
+    const stop = startReadingSession((newEpcs) => onTagsRef.current(newEpcs));
     return stop;
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [phase, order?.id, rfid, sessionEpoch]);
+  }, [phase, order?.id, startReadingSession, sessionEpoch]);
 
   // Atalhos migrados do posvenda (as atendentes já têm decorado):
   //   K = liberar com supervisor (era o "Concluir sem RFID (K)" — aqui a

@@ -1,0 +1,24 @@
+Motor de impressão silenciosa — SumatraPDF
+==========================================
+
+A Expedição imprime a etiqueta J&T e a DANFE SEM diálogo, usando o SumatraPDF.
+
+PRODUÇÃO (release):
+  Baixe o SumatraPDF portátil de 64 bits em https://www.sumatrapdfreader.org/download-free-pdf-viewer
+  e coloque o executável AQUI, com o nome exato:
+
+      src-tauri/resources/SumatraPDF.exe
+
+  O `bundle.resources` do tauri.conf.json empacota tudo desta pasta no
+  instalador, e o app acha o binário sozinho em runtime.
+
+DEV (bun run tauri dev):
+  Os resources nem sempre são copiados no dev. Instale o SumatraPDF e:
+    - deixe o SumatraPDF.exe no PATH, ou
+    - defina a variável de ambiente BERZERK_SUMATRA_PATH apontando pro .exe.
+
+Sem o SumatraPDF, o app avisa "Motor de impressão indisponível" e, no MODO
+OFICIAL, não expede (a etiqueta J&T é pré-requisito). No MODO TESTE ele segue
+o fluxo sem imprimir.
+
+Este arquivo é só um placeholder pra pasta existir no bundle — pode manter.
