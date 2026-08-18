@@ -107,6 +107,8 @@ type ExtraTag = {
   kind: "excedente" | "alheia" | "desconhecida";
   /** Item do pedido excedido (pinta o card de vermelho). */
   itemId?: string;
+  /** Foto da peça (quando é excedente de item do pedido) — ajuda a achar na mesa. */
+  imagemUrl?: string | null;
 };
 
 /** Entrada do console de leitura (o que o leitor viu e como resolvemos). */
@@ -409,6 +411,7 @@ export function SeparacaoRunner({ title, kicker, claim, emptyHint, queue, onBack
               label: desc || epcU,
               kind: excedido ? "excedente" : "alheia",
               itemId: excedido?.id,
+              imagemUrl: excedido?.imagemUrl ?? null,
             });
             pushLog({ epc: epcU, desc: desc || "(sem descrição)", status: "extra" });
             if (excedido) {
@@ -627,7 +630,7 @@ export function SeparacaoRunner({ title, kicker, claim, emptyHint, queue, onBack
           )}
         </main>
         {phase === "separating" && order && (
-          <ReadLogPanel entries={logRef.current} reading={rfid.connected} />
+          <ReadLogPanel entries={logRef.current} extras={extras} reading={rfid.connected} />
         )}
       </div>
 
@@ -663,7 +666,15 @@ export function SeparacaoRunner({ title, kicker, claim, emptyHint, queue, onBack
  * que o leitor viu e COMO foi resolvida (peça do pedido, sobressalente, não
  * identificada). É o feedback visual que a operadora tinha no posvenda.
  */
-function ReadLogPanel({ entries, reading }: { entries: LogEntry[]; reading: boolean }) {
+function ReadLogPanel({
+  entries,
+  extras,
+  reading,
+}: {
+  entries: LogEntry[];
+  extras: ExtraTag[];
+  reading: boolean;
+}) {
   return (
     <aside style={logPanel}>
       <div style={logHeader}>
@@ -671,6 +682,34 @@ function ReadLogPanel({ entries, reading }: { entries: LogEntry[]; reading: bool
         <span style={logTitle}>Leitura ao vivo</span>
         <span style={logCount}>{entries.length > 0 ? `${entries.length}` : ""}</span>
       </div>
+      {/* Sobressalentes PINADOS fora do scroll: num pedido grande a entrada ⛔
+          afunda no console conforme chegam leituras — a dor do legado era caçar
+          item a item qual peça sobrou. Aqui a peça errada fica cravada no topo,
+          com foto quando dá, até a operadora tirar da mesa e reiniciar (R). */}
+      {extras.length > 0 && (
+        <div style={extrasPinned}>
+          <div style={extrasPinnedTitle}>
+            ⛔ Tire da mesa ({extras.length})
+          </div>
+          {extras.map((x) => (
+            <div key={x.epc} style={extrasPinnedItem}>
+              {x.imagemUrl && <img src={x.imagemUrl} alt="" style={extrasPinnedThumb} />}
+              <div style={extrasPinnedBody}>
+                <span style={extrasPinnedLabel}>{x.label}</span>
+                <span style={extrasPinnedKind}>
+                  {x.kind === "excedente"
+                    ? "unidade a MAIS deste pedido"
+                    : x.kind === "alheia"
+                      ? "peça de OUTRO pedido"
+                      : "tag não identificada"}
+                </span>
+                <span style={logEpc}>{x.epc}</span>
+              </div>
+            </div>
+          ))}
+          <span style={extrasPinnedHint}>Depois de tirar, aperte R pra reler.</span>
+        </div>
+      )}
       <div className="thin-scroll" style={logList}>
         {entries.length === 0 && (
           <span style={logEmpty}>
@@ -1947,6 +1986,69 @@ const logCount: CSSProperties = {
   fontFamily: "var(--font-mono)",
   fontSize: 11,
   color: "var(--text-muted)",
+};
+
+/** Sobressalentes pinados no topo do console — fora do scroll, não afundam. */
+const extrasPinned: CSSProperties = {
+  display: "flex",
+  flexDirection: "column",
+  gap: 8,
+  padding: 12,
+  background: "var(--danger-bg)",
+  borderBottom: "2px solid var(--danger-border)",
+  animation: "extra-pulse 1.6s ease-in-out infinite",
+};
+
+const extrasPinnedTitle: CSSProperties = {
+  fontSize: 13,
+  fontWeight: 800,
+  color: "var(--danger-text)",
+  letterSpacing: 0.3,
+};
+
+const extrasPinnedItem: CSSProperties = {
+  display: "flex",
+  alignItems: "center",
+  gap: 10,
+  padding: "8px 10px",
+  borderRadius: 10,
+  background: "var(--bg-card)",
+  border: "1px solid var(--danger-border)",
+};
+
+const extrasPinnedThumb: CSSProperties = {
+  width: 44,
+  height: 44,
+  objectFit: "cover",
+  borderRadius: 8,
+  flexShrink: 0,
+  border: "1px solid var(--danger-border)",
+};
+
+const extrasPinnedBody: CSSProperties = {
+  display: "flex",
+  flexDirection: "column",
+  gap: 2,
+  minWidth: 0,
+};
+
+const extrasPinnedLabel: CSSProperties = {
+  fontSize: 12,
+  fontWeight: 700,
+  color: "var(--text)",
+  lineHeight: 1.3,
+};
+
+const extrasPinnedKind: CSSProperties = {
+  fontSize: 11,
+  fontWeight: 700,
+  color: "var(--danger-text)",
+};
+
+const extrasPinnedHint: CSSProperties = {
+  fontSize: 11,
+  color: "var(--danger-text)",
+  opacity: 0.85,
 };
 
 const logList: CSSProperties = {

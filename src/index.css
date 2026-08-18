@@ -188,3 +188,10 @@ input {
 .thin-scroll::-webkit-scrollbar { width: 5px; height: 5px; }
 .thin-scroll::-webkit-scrollbar-track { background: transparent; }
 .thin-scroll::-webkit-scrollbar-thumb { background: var(--border-strong); border-radius: 999px; }
+
+/* Pulso do bloco de sobressalentes pinado no console de leitura (Separação):
+   a peça errada precisa GRITAR — a operadora olha a mesa, não a tela. */
+@keyframes extra-pulse {
+  0%, 100% { background-color: var(--danger-bg); }
+  50% { background-color: rgba(239, 68, 68, 0.28); }
+}
