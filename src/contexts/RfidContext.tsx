@@ -37,6 +37,8 @@ import { epcLookup, type EpcLookupItem } from "../services/orders";
 
 const EPC_CACHE_KEY = "berzerk_epc_resolve_cache_v1";
 const EPC_CACHE_MAX = 5000;
+/** Depois de quanto tempo um EPC "não resolvido" pode ser consultado de novo. */
+const UNRESOLVED_RETRY_MS = 5 * 60 * 1000;
 
 function loadEpcCache(): Map<string, EpcLookupItem> {
   try {
@@ -48,11 +50,19 @@ function loadEpcCache(): Map<string, EpcLookupItem> {
   }
 }
 
+/** Poda o cache EM MEMÓRIA também (Map preserva ordem de inserção → remove os
+ *  mais antigos). Sem isto o teto só valia pra cópia do localStorage e o Map
+ *  crescia sem limite num turno inteiro de leituras. */
+function trimEpcCache(map: Map<string, EpcLookupItem>): void {
+  if (map.size <= EPC_CACHE_MAX) return;
+  const excess = map.size - EPC_CACHE_MAX;
+  const oldest = Array.from(map.keys()).slice(0, excess);
+  for (const k of oldest) map.delete(k);
+}
+
 function persistEpcCache(map: Map<string, EpcLookupItem>): void {
   try {
-    let entries = Array.from(map.entries());
-    if (entries.length > EPC_CACHE_MAX) entries = entries.slice(entries.length - EPC_CACHE_MAX);
-    localStorage.setItem(EPC_CACHE_KEY, JSON.stringify(entries));
+    localStorage.setItem(EPC_CACHE_KEY, JSON.stringify(Array.from(map.entries())));
   } catch {
     /* localStorage cheio/indisponível */
   }
@@ -115,7 +125,24 @@ export function RfidProvider({ children }: { children: ReactNode }) {
   const [host, setHost] = useState(() => getDeviceConfig().reader.itagHost);
   const [lastError, setLastError] = useState<string | null>(null);
   const cacheRef = useRef<Map<string, EpcLookupItem>>(loadEpcCache());
-  const unresolvedRef = useRef<Set<string>>(new Set());
+  /** EPCs que falharam na consulta → quando falharam. Com TTL: depois de
+   *  UNRESOLVED_RETRY_MS a gente tenta de novo (peça pode ter sido cadastrada
+   *  no nexus depois da primeira leitura — antes ficava "não identificada"
+   *  até reiniciar o app). */
+  const unresolvedRef = useRef<Map<string, number>>(new Map());
+  const persistTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  /** Persistência com debounce: serializar o cache inteiro (até 5000 entradas)
+   *  a cada batch resolvido era churn constante no main thread — a Expedição
+   *  resolve a mesa o tempo todo. O localStorage é só warm-start; 2s atrás
+   *  do último write não perde nada relevante. */
+  const schedulePersist = useCallback(() => {
+    if (persistTimerRef.current) clearTimeout(persistTimerRef.current);
+    persistTimerRef.current = setTimeout(() => {
+      persistTimerRef.current = null;
+      persistEpcCache(cacheRef.current);
+    }, 2000);
+  }, []);
 
   // --- Controlador do leitor ---
   const armedRef = useRef(false);
@@ -337,12 +364,14 @@ export function RfidProvider({ children }: { children: ReactNode }) {
           continue;
         }
         const cached = cacheRef.current.get(e);
+        const failedAt = unresolvedRef.current.get(e);
         if (cached) {
           result.set(e, cached);
-        } else if (unresolvedRef.current.has(e)) {
+        } else if (failedAt !== undefined && Date.now() - failedAt < UNRESOLVED_RETRY_MS) {
           const decoded = decodeSgtin96(e);
           if (decoded) result.set(e, { epc: e, ean13: decoded, sku: null, size: null, batchCode: null });
         } else {
+          unresolvedRef.current.delete(e); // TTL vencido: tenta de novo
           misses.push(e);
         }
       }
@@ -380,15 +409,18 @@ export function RfidProvider({ children }: { children: ReactNode }) {
       }
 
       for (const e of misses) {
-        unresolvedRef.current.add(e);
+        unresolvedRef.current.set(e, Date.now());
         const decoded = decodeSgtin96(e);
         if (decoded) result.set(e, { epc: e, ean13: decoded, sku: null, size: null, batchCode: null });
       }
 
-      if (touchedCache) persistEpcCache(cacheRef.current);
+      if (touchedCache) {
+        trimEpcCache(cacheRef.current);
+        schedulePersist();
+      }
       return result;
     },
-    [],
+    [schedulePersist],
   );
 
   const value: RfidContextValue = {

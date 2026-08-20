@@ -488,16 +488,27 @@ export function Expedicao({ onBack }: Props) {
   const enqueueRetry = useCallback((orderId: string, lidas: string[], override?: string) => {
     retryQueue.current.push({ orderId, lidas, override });
   }, []);
+  const retryBusyRef = useRef(false);
   useEffect(() => {
     const id = setInterval(() => {
       if (retryQueue.current.length === 0 || modoRef.current !== "oficial") return;
+      if (retryBusyRef.current) return; // não empilha requests se a rede está lenta
+      retryBusyRef.current = true;
       const job = retryQueue.current[0];
       void shipOrder(job.orderId, job.lidas, job.override ? { motivo: job.override } : undefined)
         .then(() => {
           retryQueue.current.shift();
           showNotice(`Expedição de um pedido pendente foi confirmada.`);
         })
-        .catch(() => {});
+        .catch(() => {
+          // Rotaciona: um pedido que falha sempre não pode bloquear os de trás
+          // (head-of-line). Ninguém é descartado — só vai pro fim da fila.
+          const failed = retryQueue.current.shift();
+          if (failed) retryQueue.current.push(failed);
+        })
+        .finally(() => {
+          retryBusyRef.current = false;
+        });
     }, 15000);
     return () => clearInterval(id);
   }, [showNotice]);

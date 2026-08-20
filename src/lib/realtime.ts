@@ -40,6 +40,10 @@ export function subscribeQueueChanged(onChange: () => void): () => void {
     } catch {
       /* sem sessão: tenta mesmo assim; o connect leva 401 e cai no retry */
     }
+    // Re-checa DEPOIS do await: se o unsubscribe rodou enquanto buscávamos o
+    // token, criar o socket aqui vazaria uma conexão viva pra sempre (o
+    // ws?.close() do unsubscribe já passou e não alcança este socket).
+    if (stopped) return;
     const url = token ? `${WS_URL}?token=${encodeURIComponent(token)}` : WS_URL;
 
     try {
