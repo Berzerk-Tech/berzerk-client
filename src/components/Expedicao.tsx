@@ -70,6 +70,36 @@ const RESOLVE_DEBOUNCE_MS = 250;
 const RESOLVE_RETRY_MS = 4000;
 const BUFFER_WARN = 12;
 /**
+ * Fila de `ship` pendente (falha de rede ao fechar o pacote) — PERSISTIDA por
+ * estação. Sem isso, fechar o app com reenvio pendente deixava o pedido
+ * `awaiting_pickup` no nexus e o Tiny sem `enviado`, com a peça já ensacada.
+ */
+const SHIP_RETRY_KEY = "berzerk_expedicao_ship_retry_v1";
+type ShipRetryJob = { orderId: string; numero: string | null; lidas: string[]; override?: string };
+
+function loadShipRetry(): ShipRetryJob[] {
+  try {
+    const raw = localStorage.getItem(SHIP_RETRY_KEY);
+    const parsed: unknown = raw ? JSON.parse(raw) : [];
+    if (!Array.isArray(parsed)) return [];
+    return parsed.filter(
+      (j): j is ShipRetryJob =>
+        !!j && typeof j === "object" && typeof (j as ShipRetryJob).orderId === "string" && Array.isArray((j as ShipRetryJob).lidas),
+    );
+  } catch {
+    return [];
+  }
+}
+
+function saveShipRetry(jobs: ShipRetryJob[]): void {
+  try {
+    if (jobs.length === 0) localStorage.removeItem(SHIP_RETRY_KEY);
+    else localStorage.setItem(SHIP_RETRY_KEY, JSON.stringify(jobs));
+  } catch {
+    /* ignore */
+  }
+}
+/**
  * Uma peça é considerada "na mesa" enquanto foi lida nos últimos PRESENCE_TTL ms.
  * Passou disso sem ser relida (o leitor limpa o buffer periodicamente), ela sai
  * do conjunto — é assim que a remoção reflete sem desarmar/piscar o leitor.
@@ -472,7 +502,7 @@ export function Expedicao({ onBack }: Props) {
     } catch (e) {
       const code = expedicaoErrorCode(e);
       if (!code) {
-        enqueueRetry(order.id, lidas, override);
+        enqueueRetry(order.id, order.numero, lidas, override);
         showNotice(`Sem confirmar a expedição de #${order.numero ?? ""} (rede). Enfileirado pra reenvio — a mesa segue.`);
         registra(true);
       } else {
@@ -484,27 +514,46 @@ export function Expedicao({ onBack }: Props) {
   }, [showNotice]);
 
   // ---- fila de retry do ship ----
-  const retryQueue = useRef<Array<{ orderId: string; lidas: string[]; override?: string }>>([]);
-  const enqueueRetry = useCallback((orderId: string, lidas: string[], override?: string) => {
-    retryQueue.current.push({ orderId, lidas, override });
+  // Sobrevive a fechar/reabrir o app (localStorage) — ver SHIP_RETRY_KEY.
+  const retryQueue = useRef<ShipRetryJob[]>(loadShipRetry());
+  const enqueueRetry = useCallback((orderId: string, numero: string | null, lidas: string[], override?: string) => {
+    // Mesmo pedido já na fila → substitui (tags/override mais recentes).
+    retryQueue.current = retryQueue.current.filter((j) => j.orderId !== orderId);
+    retryQueue.current.push({ orderId, numero, lidas, override });
+    saveShipRetry(retryQueue.current);
   }, []);
   const retryBusyRef = useRef(false);
   useEffect(() => {
+    const pendentes = retryQueue.current.length;
+    if (pendentes > 0) {
+      showNotice(`${pendentes} expedição(ões) pendente(s) de sessão anterior — reenviando em segundo plano.`);
+    }
     const id = setInterval(() => {
       if (retryQueue.current.length === 0 || modoRef.current !== "oficial") return;
       if (retryBusyRef.current) return; // não empilha requests se a rede está lenta
       retryBusyRef.current = true;
       const job = retryQueue.current[0];
+      const rotulo = job.numero ? `#${job.numero}` : "um pedido pendente";
       void shipOrder(job.orderId, job.lidas, job.override ? { motivo: job.override } : undefined)
         .then(() => {
-          retryQueue.current.shift();
-          showNotice(`Expedição de um pedido pendente foi confirmada.`);
+          retryQueue.current = retryQueue.current.filter((j) => j !== job);
+          saveShipRetry(retryQueue.current);
+          showNotice(`Expedição de ${rotulo} foi confirmada.`);
         })
-        .catch(() => {
-          // Rotaciona: um pedido que falha sempre não pode bloquear os de trás
-          // (head-of-line). Ninguém é descartado — só vai pro fim da fila.
-          const failed = retryQueue.current.shift();
-          if (failed) retryQueue.current.push(failed);
+        .catch((e: unknown) => {
+          const code = expedicaoErrorCode(e);
+          if (code) {
+            // Recusa de NEGÓCIO (etiqueta não impressa, status inválido...):
+            // repetir não resolve — sai da fila e avisa pra resolver no sistema.
+            retryQueue.current = retryQueue.current.filter((j) => j !== job);
+            saveShipRetry(retryQueue.current);
+            showNotice(`Expedição de ${rotulo} recusada: ${shipErrorMessage(code)} Confira no sistema.`);
+            return;
+          }
+          // Rede: rotaciona — um pedido que falha sempre não pode bloquear os
+          // de trás (head-of-line). Ninguém é descartado — só vai pro fim.
+          retryQueue.current = [...retryQueue.current.filter((j) => j !== job), job];
+          saveShipRetry(retryQueue.current);
         })
         .finally(() => {
           retryBusyRef.current = false;

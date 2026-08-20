@@ -219,9 +219,12 @@ export function SeparacaoRunner({ title, kicker, claim, emptyHint, queue, onBack
     } catch (e) {
       // Banner (não setError): a fase segue "separating" e o setError só
       // renderiza na fase de erro — sem isso a falha do complete ficava muda.
-      showNotice(
-        `Falha ao concluir: ${e instanceof Error ? e.message : String(e)} — tenta de novo ou chama o suporte.`,
-      );
+      // Recusa de negócio do nexus (`{ error, message }` — ex.: JT_TRACKING_REQUIRED:
+      // pedido J&T cuja etiqueta ainda não chegou) já vem com mensagem pro
+      // operador; "tenta de novo" só confunde nesses casos.
+      const negocio = e instanceof ApiError && !!e.body && typeof e.body === "object" && "error" in e.body;
+      const msg = e instanceof Error ? e.message : String(e);
+      showNotice(negocio ? `Não dá pra concluir: ${msg}` : `Falha ao concluir: ${msg} — tenta de novo ou chama o suporte.`);
     } finally {
       setCompleting(false);
     }
