@@ -5,6 +5,7 @@
 // pelo RBAC dele (papéis por email); o app só reflete o que a API responder.
 
 import { supabase } from "./supabase";
+import { forceLogout } from "./idleSession";
 
 const DEFAULT_BASE = "http://localhost:3010";
 
@@ -66,9 +67,24 @@ export async function apiRequest<T>(path: string, opts: RequestOpts = {}): Promi
     if (data && typeof data === "object" && "message" in data) {
       msg = String((data as { message: unknown }).message);
     }
+    // Backstop do nexus: sessão encerrada do lado de lá (inatividade/admin).
+    // SÓ com código explícito — um 401 avulso (refresh do token em voo,
+    // introspecção GoTrue falhando) não pode derrubar a operadora.
+    if (res.status === 401 && isSessionExpired(data)) {
+      void forceLogout({ kind: "server", message: msg });
+    }
     throw new ApiError(res.status, msg, data);
   }
   return data as T;
+}
+
+function isSessionExpired(body: unknown): boolean {
+  return (
+    !!body &&
+    typeof body === "object" &&
+    "error" in body &&
+    (body as { error: unknown }).error === "SESSION_EXPIRED"
+  );
 }
 
 function safeJson(text: string): unknown {

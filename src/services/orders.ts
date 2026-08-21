@@ -66,6 +66,10 @@ export type Me = {
   actorId: string;
   email: string | null;
   permissions: string[];
+  /** Sessão curta por inatividade (segundos). null/ausente = sem timeout.
+   *  Configurado pelo admin no nexus (máquina compartilhada da separação);
+   *  quem mede a inatividade é o app — ver `lib/idleSession.ts`. */
+  idleTimeoutSec?: number | null;
 };
 
 export type QueueCounts = {

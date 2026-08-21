@@ -1,6 +1,7 @@
 import { useEffect, useState, type CSSProperties } from "react";
 import { getVersion } from "@tauri-apps/api/app";
 import { signInWithGoogle } from "../lib/auth";
+import { takeLogoutReason } from "../lib/idleSession";
 import { BerzerkLogo } from "./BerzerkLogo";
 import { AmbientBackground } from "./AmbientBackground";
 
@@ -8,6 +9,8 @@ export function Login() {
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [version, setVersion] = useState<string>("");
+  // Motivo do último logout forçado (consumido na leitura — some no próximo login).
+  const [reason] = useState(() => takeLogoutReason());
 
   useEffect(() => {
     getVersion().then(setVersion).catch(() => setVersion(""));
@@ -46,6 +49,13 @@ export function Login() {
             Apenas contas <code style={domainTag}>@berzerk.com.br</code>
           </p>
 
+          {reason && (
+            <div style={infoBox}>
+              {reason.kind === "idle"
+                ? `Sessão encerrada por inatividade (${reason.minutes} min sem uso). Entre com a SUA conta pra continuar.`
+                : `Sessão encerrada pelo servidor: ${reason.message}. Entre de novo pra continuar.`}
+            </div>
+          )}
           {error && <div style={errorBox}>{error}</div>}
 
           {!busy ? (
@@ -254,6 +264,18 @@ const cancelBtn: CSSProperties = {
   border: "1px solid var(--border)",
   borderRadius: 8,
   cursor: "pointer",
+};
+
+const infoBox: CSSProperties = {
+  background: "var(--warning-bg)",
+  color: "var(--warning-text)",
+  border: "1px solid var(--warning-border)",
+  padding: "10px 14px",
+  borderRadius: 10,
+  fontSize: 12,
+  marginBottom: 14,
+  lineHeight: 1.5,
+  textAlign: "left",
 };
 
 const errorBox: CSSProperties = {

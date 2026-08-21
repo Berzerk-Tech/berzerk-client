@@ -24,6 +24,7 @@ import {
   type ReactNode,
 } from "react";
 import { getDeviceConfig } from "../lib/devices";
+import { touchActivity } from "../lib/idleSession";
 import {
   clearBuffer,
   lookupEpcDetails,
@@ -75,8 +76,17 @@ const LINGER_MS = 900;
  *  Menos frequente = menos "janela cega" logo após limpar (menos "surdo");
  *  o TTL do lado da Expedição (maior que isto) segura a peça entre limpezas. */
 const PRESENCE_CLEAR_MS = 1500;
+/** Peça fora da mesa por mais que isto e recolocada = atividade de novo. */
+const PRESENCE_ABSENT_MS = 60_000;
 
 type DeltaListener = { cb: (newEpcs: string[]) => void; seen: Set<string> };
+
+/** Sessão DELTA aberta. `reset` zera o dedupe e limpa o buffer da mesa SEM
+ *  desarmar o leitor — é o que a Separação usa ao trocar de pedido e no
+ *  "Reiniciar (R)". Antes cada troca fechava/abria a sessão e, como o claim
+ *  do próximo pedido demora mais que o linger, virava `parar`+`iniciar` no
+ *  iTAG Monitor (que mostra um aviso a cada comando desses — chato no turno). */
+export type ReadingSession = { stop: () => void; reset: () => Promise<void> };
 type PresenceListener = { cb: (currentEpcs: string[]) => void };
 
 type RfidContextValue = {
@@ -84,8 +94,9 @@ type RfidContextValue = {
   host: string;
   lastError: string | null;
   reconnect: () => Promise<void>;
-  /** Modo DELTA: recebe só EPCs novos (dedupe por sessão). Retorna o stop. */
-  startReadingSession: (onTags: (newEpcs: string[]) => void) => () => void;
+  /** Modo DELTA: recebe só EPCs novos (dedupe por sessão). Abra UMA vez por
+   *  tela e use `reset` pra recomeçar a contagem (não fecha/abre por pedido). */
+  startReadingSession: (onTags: (newEpcs: string[]) => void) => ReadingSession;
   /** Modo PRESENÇA: recebe o conjunto ATUAL na mesa a cada poll. Retorna o stop. */
   startPresenceSession: (onPresent: (currentEpcs: string[]) => void) => () => void;
   resolveEpcs: (epcs: string[]) => Promise<Map<string, EpcLookupItem>>;
@@ -94,8 +105,8 @@ type RfidContextValue = {
 const RfidContext = createContext<RfidContextValue | null>(null);
 
 /** Leitor em modo TECLADO (keyboard wedge). Não tem armar/desarmar. */
-function startWedgeSession(onTags: (newEpcs: string[]) => void): () => void {
-  const seen = new Set<string>();
+function startWedgeSession(onTags: (newEpcs: string[]) => void): ReadingSession {
+  let seen = new Set<string>();
   let buffer = "";
   let lastKeyAt = 0;
   const MAX_GAP_MS = 150;
@@ -109,6 +120,7 @@ function startWedgeSession(onTags: (newEpcs: string[]) => void): () => void {
       buffer = "";
       if (epc.length >= MIN_LEN && /^[0-9A-F]+$/.test(epc) && !seen.has(epc)) {
         seen.add(epc);
+        touchActivity();
         onTags([epc]);
       }
       return;
@@ -117,7 +129,13 @@ function startWedgeSession(onTags: (newEpcs: string[]) => void): () => void {
     else buffer = "";
   };
   window.addEventListener("keydown", onKeyDown, true);
-  return () => window.removeEventListener("keydown", onKeyDown, true);
+  return {
+    stop: () => window.removeEventListener("keydown", onKeyDown, true),
+    reset: async () => {
+      seen = new Set();
+      buffer = "";
+    },
+  };
 }
 
 export function RfidProvider({ children }: { children: ReactNode }) {
@@ -152,6 +170,10 @@ export function RfidProvider({ children }: { children: ReactNode }) {
   const pollActiveRef = useRef(false);
   const tearTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const presenceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  /** EPC → última vez visto na mesa (modo presença). Peça NOVA na mesa conta
+   *  como atividade da operadora; peça parada lá não (senão uma peça esquecida
+   *  segurava a sessão pra sempre). Some do mapa após PRESENCE_ABSENT_MS fora. */
+  const presenceSeenRef = useRef<Map<string, number>>(new Map());
   const cmdChainRef = useRef<Promise<unknown>>(Promise.resolve());
 
   const anyListeners = () => deltaRef.current.size > 0 || presenceRef.current.size > 0;
@@ -210,13 +232,27 @@ export function RfidProvider({ children }: { children: ReactNode }) {
           setLastError(null);
           const all = poll.tags.map((t) => t.trim().toUpperCase()).filter(Boolean);
           // DELTA: só novos, por sessão.
+          let activity = false;
           for (const l of deltaRef.current) {
             const novos = all.filter((t) => !l.seen.has(t));
             for (const t of novos) l.seen.add(t);
-            if (novos.length > 0) l.cb(novos);
+            if (novos.length > 0) {
+              activity = true;
+              l.cb(novos);
+            }
           }
           // PRESENÇA: conjunto atual (acumulado desde o último limpar).
-          for (const p of presenceRef.current) p.cb(all);
+          if (presenceRef.current.size > 0) {
+            const now = Date.now();
+            const seen = presenceSeenRef.current;
+            for (const t of all) {
+              if (!seen.has(t)) activity = true;
+              seen.set(t, now);
+            }
+            for (const [t, at] of seen) if (now - at > PRESENCE_ABSENT_MS) seen.delete(t);
+            for (const p of presenceRef.current) p.cb(all);
+          }
+          if (activity) touchActivity();
         } catch (e) {
           setConnected(false);
           setLastError(e instanceof Error ? e.message : String(e));
@@ -277,12 +313,21 @@ export function RfidProvider({ children }: { children: ReactNode }) {
         setConnected(false);
         setLastError(e instanceof Error ? e.message : String(e));
       });
-      return () => {
-        deltaRef.current.delete(listener);
-        scheduleTeardown(h);
+      return {
+        stop: () => {
+          deltaRef.current.delete(listener);
+          scheduleTeardown(h);
+        },
+        // Serializado com o poll: o `seen` só zera DEPOIS do limpar, senão um
+        // poll em voo (tags de antes do limpar) recontava peça do pedido anterior.
+        reset: () =>
+          runExclusive(async () => {
+            await clearBuffer(h);
+            listener.seen = new Set();
+          }),
       };
     },
-    [prepareSession, startPollLoop, scheduleTeardown],
+    [prepareSession, startPollLoop, scheduleTeardown, runExclusive],
   );
 
   const startPresenceSession = useCallback(
@@ -290,7 +335,7 @@ export function RfidProvider({ children }: { children: ReactNode }) {
       const reader = getDeviceConfig().reader;
       if (reader.mode === "keyboard-wedge") {
         // Wedge não tem presença real — emula tratando cada bipada como atual.
-        return startWedgeSession((epcs) => onPresent(epcs));
+        return startWedgeSession((epcs) => onPresent(epcs)).stop;
       }
       const h = reader.itagHost;
       const listener: PresenceListener = { cb: onPresent };

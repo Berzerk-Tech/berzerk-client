@@ -10,9 +10,10 @@ import {
 import { BackButton } from "./BackButton";
 import { AmbientBackground } from "./AmbientBackground";
 import { OperatorChip } from "./OperatorChip";
-import { useRfid } from "../contexts/RfidContext";
+import { useRfid, type ReadingSession } from "../contexts/RfidContext";
 import { beepError, beepOk } from "../lib/beep";
 import { subscribeQueueChanged } from "../lib/realtime";
+import { onBeforeForcedLogout } from "../lib/idleSession";
 import { SupervisorModal } from "./SupervisorModal";
 import { SeparacaoHistoryModal } from "./SeparacaoHistoryModal";
 import { PickingFiltersModal, emptyFilters, loadFilters, saveFilters } from "./PickingFiltersModal";
@@ -149,8 +150,8 @@ export function SeparacaoRunner({ title, kicker, claim, emptyHint, queue, onBack
   const tick = () => forceRender((n) => n + 1);
   const orderRef = useRef<Order | null>(null);
   orderRef.current = order;
-  // Época da sessão de leitura: bump = para a sessão atual e abre outra (o
-  // buffer da mesa é limpo no arranque) — é o "Reiniciar (R)".
+  // Época da leitura: bump = reset da sessão (zera dedupe + limpa o buffer da
+  // mesa, sem desarmar o leitor) — é o "Reiniciar (R)".
   const [sessionEpoch, setSessionEpoch] = useState(0);
   // Filtros de picking (data + produtos) — por estação, sobrevivem a reload.
   const [filters, setFilters] = useState<QueueFilters>(() => loadFilters());
@@ -233,8 +234,8 @@ export function SeparacaoRunner({ title, kicker, claim, emptyHint, queue, onBack
   /**
    * Reinicia a conferência do pedido atual: a operadora tirou a peça errada da
    * mesa e relê tudo do zero (as peças certas continuam lá e voltam no próximo
-   * inventário). Zera progresso/sobressalentes/console e reabre a sessão de
-   * leitura — o arranque limpa o buffer físico da mesa.
+   * inventário). Zera progresso/sobressalentes/console e reseta a sessão de
+   * leitura — limpa o buffer físico da mesa sem desarmar o leitor.
    */
   const restartLeitura = useCallback(() => {
     if (completing) return;
@@ -451,17 +452,35 @@ export function SeparacaoRunner({ title, kicker, claim, emptyHint, queue, onBack
     })();
   };
 
-  // Sessão de leitura contínua enquanto há pedido em separação. Reinicia ao
-  // trocar de pedido ou quando a operadora pede "Reiniciar (R)" (sessionEpoch).
+  // Sessão de leitura contínua pela vida INTEIRA da fila (montar → desmontar):
+  // o leitor arma ao entrar na fila e só desarma ao sair dela. Trocar de pedido
+  // NÃO fecha a sessão — antes fechava/abria por pedido e, como o claim do
+  // próximo demora mais que o linger do provider, virava `parar`+`iniciar` no
+  // iTAG Monitor, que mostra um aviso a cada comando (o tempo todo no turno).
   // Depende só de startReadingSession (estável) — NUNCA do objeto `rfid` inteiro,
   // que é recriado a cada render do provider e reiniciava a leitura à toa.
   const startReadingSession = rfid.startReadingSession;
+  const sessionRef = useRef<ReadingSession | null>(null);
+  useEffect(() => {
+    const session = startReadingSession((newEpcs) => onTagsRef.current(newEpcs));
+    sessionRef.current = session;
+    return () => {
+      sessionRef.current = null;
+      session.stop();
+    };
+  }, [startReadingSession]);
+
+  // Novo pedido na mesa ou "Reiniciar (R)" (sessionEpoch): só RESET — zera o
+  // dedupe e limpa o buffer físico (`limparLeitura`, sem aviso no Monitor) pra
+  // recontar as peças que estão na mesa. Tags lidas durante o `loading` caem
+  // no dedupe (o handler ignora sem pedido) e o reset as devolve.
   useEffect(() => {
     if (phase !== "separating" || !order) return;
-    const stop = startReadingSession((newEpcs) => onTagsRef.current(newEpcs));
-    return stop;
+    void sessionRef.current?.reset().catch(() => {
+      /* leitor fora: o poll já reporta desconexão */
+    });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [phase, order?.id, startReadingSession, sessionEpoch]);
+  }, [phase, order?.id, sessionEpoch]);
 
   // Atalhos migrados do posvenda (as atendentes já têm decorado):
   //   K = liberar com supervisor (era o "Concluir sem RFID (K)" — aqui a
@@ -510,6 +529,21 @@ export function SeparacaoRunner({ title, kicker, claim, emptyHint, queue, onBack
       }
     };
   }, []);
+
+  // Logout forçado (inatividade/nexus): devolve o claim ANTES de perder o
+  // token — no desmontar acima já seria tarde (release iria sem Authorization).
+  useEffect(
+    () =>
+      onBeforeForcedLogout(async () => {
+        const ord = orderRef.current;
+        if (!ord || ord.status !== "separating") return;
+        orderRef.current = null;
+        await releaseSeparacao(ord.id).catch(() => {
+          /* best-effort: o janitor recupera */
+        });
+      }),
+    [],
+  );
 
   const handleBack = () => {
     const ord = orderRef.current;

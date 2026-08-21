@@ -12,6 +12,7 @@ import { PieceTrace } from "./components/PieceTrace";
 import { Separacao } from "./components/Separacao";
 import { SettingsPlaceholder } from "./components/SettingsPlaceholder";
 import { UpdateBanner } from "./components/UpdateBanner";
+import { IdleSessionGuard } from "./components/IdleSessionGuard";
 import { RfidProvider } from "./contexts/RfidContext";
 
 export default function App() {
@@ -92,7 +93,12 @@ export default function App() {
   }
 
   // RfidProvider acima da sessão: a conexão da mesa sobrevive a logout/troca de operadora.
-  return <RfidProvider>{content}</RfidProvider>;
+  return (
+    <RfidProvider>
+      {session && <IdleSessionGuard />}
+      {content}
+    </RfidProvider>
+  );
 }
 
 const loadingPage: CSSProperties = {
