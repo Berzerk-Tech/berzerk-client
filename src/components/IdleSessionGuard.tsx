@@ -1,5 +1,5 @@
 // Vigia de inatividade — montado só com sessão ativa (ver App). Lê o timeout
-// do nexus (`/separacao/me → idleTimeoutSec`), conta tecla/mouse/leitura RFID
+// do nexus (`/separacao/me → sessaoInatividadeMinutos`), conta tecla/mouse/leitura RFID
 // como atividade e derruba a sessão quando estoura. Sem timeout configurado
 // (ou API fora no boot) não faz nada — fail-open, igual ao gating da home.
 import { useEffect } from "react";
@@ -27,8 +27,8 @@ export function IdleSessionGuard() {
       getMe()
         .then((me) => {
           if (!alive) return;
-          const sec = me.idleTimeoutSec;
-          timeoutMs = typeof sec === "number" && sec > 0 ? sec * 1000 : null;
+          const min = me.sessaoInatividadeMinutos;
+          timeoutMs = typeof min === "number" && min > 0 ? min * 60_000 : null;
         })
         .catch(() => {
           /* API indisponível: mantém o último valor conhecido */

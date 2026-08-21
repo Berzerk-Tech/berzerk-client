@@ -3,13 +3,13 @@
 //
 // Divisão com o nexus:
 // - NEXUS decide QUEM tem timeout e de QUANTO (admin configura por papel/usuário)
-//   e expõe em `GET /separacao/me → idleTimeoutSec` (null/ausente = sem timeout).
+//   e expõe em `GET /separacao/me → sessaoInatividadeMinutos` (null/ausente = sem limite).
 // - APP mede a inatividade. Só ele enxerga o que é atividade de verdade: leitura
 //   RFID, tecla, clique. O nexus só vê requisições — o poll de fila (60s) e o
 //   realtime pareceriam "ativo", e um pedido grande separado com EPCs em cache
 //   pode passar minutos sem bater na API e pareceria "parado".
-// - Backstop opcional do nexus: 401 com `{ error: "SESSION_EXPIRED" }` também
-//   derruba a sessão aqui (ver `apiRequest`).
+// - Backstop opcional do nexus (ainda NÃO implementado lá): 401 com
+//   `{ error: "SESSION_EXPIRED" }` também derruba a sessão aqui (ver `apiRequest`).
 //
 // A sessão em si é Supabase/GoTrue (o nexus só valida o token), então "derrubar"
 // = `supabase.auth.signOut()` → App volta pro Login (prompt=select_account).

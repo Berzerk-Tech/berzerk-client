@@ -66,10 +66,11 @@ export type Me = {
   actorId: string;
   email: string | null;
   permissions: string[];
-  /** Sessão curta por inatividade (segundos). null/ausente = sem timeout.
-   *  Configurado pelo admin no nexus (máquina compartilhada da separação);
-   *  quem mede a inatividade é o app — ver `lib/idleSession.ts`. */
-  idleTimeoutSec?: number | null;
+  /** Minutos de inatividade até derrubar a sessão — o MENOR limite entre os
+   *  papéis do ator (Admin → Configurações → "Sessão por papel" no nexus,
+   *  PR #79). null/ausente = sem limite. Quem mede a inatividade é o app —
+   *  ver `lib/idleSession.ts`. */
+  sessaoInatividadeMinutos?: number | null;
 };
 
 export type QueueCounts = {
