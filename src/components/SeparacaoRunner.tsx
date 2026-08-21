@@ -91,6 +91,23 @@ function gtinCandidates(...vals: Array<string | null | undefined>): string[] {
 
 type Phase = "loading" | "separating" | "empty" | "error";
 
+/** 422 `{ error: "liberacao_necessaria", faltantes }` do complete → lista de
+ *  faltantes do servidor (vazia se o body não trouxe); null se é outro erro. */
+function liberacaoNecessaria(e: unknown): LiberacaoFaltante[] | null {
+  if (!(e instanceof ApiError) || !e.body || typeof e.body !== "object") return null;
+  const body = e.body as { error?: unknown; faltantes?: unknown };
+  if (body.error !== "liberacao_necessaria") return null;
+  if (!Array.isArray(body.faltantes)) return [];
+  return body.faltantes
+    .filter((f): f is Record<string, unknown> => !!f && typeof f === "object")
+    .map((f) => ({
+      itemId: String(f.itemId ?? ""),
+      nome: typeof f.nome === "string" ? f.nome : null,
+      tamanho: typeof f.tamanho === "string" ? f.tamanho : null,
+      faltam: typeof f.faltam === "number" ? f.faltam : 1,
+    }));
+}
+
 /** Progresso de conferência de um item. */
 type ItemProgress = { count: number; epcs: string[] };
 
@@ -172,6 +189,7 @@ export function SeparacaoRunner({ title, kicker, claim, emptyHint, queue, onBack
     progressRef.current = new Map();
     extrasRef.current = new Map();
     logRef.current = [];
+    setServerFaltantes(null);
   }, []);
 
   const fetchNext = useCallback(async () => {
@@ -218,6 +236,26 @@ export function SeparacaoRunner({ title, kicker, claim, emptyHint, queue, onBack
       await completeSeparacao(ord.id, collectedTags());
       await fetchNext();
     } catch (e) {
+      // 422 `liberacao_necessaria`: a contagem local fechou mas o servidor NÃO
+      // reconheceu todas as peças (EPC fora do inventário do nexus, surpresa
+      // sem mapping…). Contrato da liberação: abre o modal do supervisor com
+      // os faltantes DO SERVIDOR e diz QUAL peça — antes virava "HTTP 422" mudo
+      // e o pedido não saía de jeito nenhum (go-live XG, 21/08).
+      const srv = liberacaoNecessaria(e);
+      if (srv) {
+        setServerFaltantes(srv.length > 0 ? srv : null);
+        setSupervisorOpen(true);
+        const quais = srv
+          .map((f) => `${f.nome ?? "item"}${f.tamanho ? ` ${f.tamanho}` : ""} (faltam ${f.faltam})`)
+          .slice(0, 4)
+          .join(", ");
+        showNotice(
+          srv.length > 0
+            ? `O servidor não reconheceu a leitura de: ${quais}. Confira a peça na mesa (releia com R) ou libere com supervisor.`
+            : "O servidor exige liberação de supervisor pra concluir este pedido.",
+        );
+        return;
+      }
       // Banner (não setError): a fase segue "separating" e o setError só
       // renderiza na fase de erro — sem isso a falha do complete ficava muda.
       // Recusa de negócio do nexus (`{ error, message }` — ex.: JT_TRACKING_REQUIRED:
@@ -296,6 +334,11 @@ export function SeparacaoRunner({ title, kicker, claim, emptyHint, queue, onBack
 
   // === Liberação por supervisor (concluir SEM todas as peças no RFID) ===
   const [supervisorOpen, setSupervisorOpen] = useState(false);
+  /** Faltantes segundo o SERVIDOR (422 `liberacao_necessaria`). Prevalecem
+   *  sobre a contagem local no modal: o nexus resolve EPC→peça pelo inventário
+   *  dele (rfid_epc_inventory), o app pela nuvem iTAG — quando divergem, o que
+   *  vale pro complete é o que o servidor enxerga. */
+  const [serverFaltantes, setServerFaltantes] = useState<LiberacaoFaltante[] | null>(null);
 
   /** Itens com saldo não lido — contexto do modal + auditoria no nexus. */
   const faltantes = useCallback((): LiberacaoFaltante[] => {
@@ -318,6 +361,7 @@ export function SeparacaoRunner({ title, kicker, claim, emptyHint, queue, onBack
       // Erros sobem pro modal (PIN errado etc.) — só fecha quando concluir.
       await completeSeparacao(ord.id, collectedTags(), liberacao);
       setSupervisorOpen(false);
+      setServerFaltantes(null);
       await fetchNext();
     },
     [collectedTags, fetchNext],
@@ -673,8 +717,11 @@ export function SeparacaoRunner({ title, kicker, claim, emptyHint, queue, onBack
 
       {supervisorOpen && (
         <SupervisorModal
-          faltantes={faltantes()}
-          onCancel={() => setSupervisorOpen(false)}
+          faltantes={serverFaltantes ?? faltantes()}
+          onCancel={() => {
+            setSupervisorOpen(false);
+            setServerFaltantes(null);
+          }}
           onConfirm={supervisorConfirm}
         />
       )}
@@ -938,18 +985,21 @@ function cardBodyHeight(cardW: number): number {
 }
 
 /**
- * Tamanho de card que faz o pedido INTEIRO caber no espaço disponível, sem
- * scroll — o scrollbar no meio da tela parecia um divisor e era o incômodo
- * número 1 das operadoras. Mede o container de verdade (ResizeObserver) e
- * testa contagens de coluna: pra cada uma, o card é limitado pela largura da
- * coluna E pela altura da linha (imagem quadrada + corpo); vence a maior.
- * Só quando nem o card mínimo cabe (pedido gigante, ~0,5%) o container rola.
+ * Tamanho dos cards — regra do Leonardo (21/08/2026, go-live XG):
+ * - cards GRANDES, sempre LADO A LADO, no máximo 5 por linha;
+ * - até 2 linhas o pedido inteiro cabe SEM scroll (o card encolhe pra caber
+ *   na altura, nunca abaixo de MINW);
+ * - da 3ª linha em diante a área ROLA, com o card do MESMO tamanho de um
+ *   pedido de 2 linhas (não espreme pra caber).
+ * O fit antigo testava todas as contagens de coluna e ficava com a que dava o
+ * card maior — num pedido de 2 itens, com a área estreitada pela sidebar da
+ * fila, vencia 1 COLUNA + scroll: cards empilhados e barra no meio da tela.
  */
 function useFitCards(nMain: number, nOff: number) {
   const ref = useRef<HTMLDivElement | null>(null);
   const [fit, setFit] = useState<{ cardW: number; cols: number; fits: boolean }>({
     cardW: 250,
-    cols: 4,
+    cols: 5,
     fits: true,
   });
 
@@ -959,10 +1009,10 @@ function useFitCards(nMain: number, nOff: number) {
     const GAP = 14;
     const MAXW = 260;
     const MINW = 140;
-    // Folga de segurança: se a estimativa do corpo errar por poucos px pro
-    // lado otimista, o layout "acha" que coube e o overflow decepa uma fileira
-    // (bug visto em campo no misto de 14 itens). Melhor card 8px menor que
-    // fileira cortada — e o viewport rola de qualquer jeito se estourar.
+    const MAX_COLS = 5;
+    const ROWS_SEM_SCROLL = 2;
+    // Folga: se a estimativa do corpo errar por poucos px pro lado otimista,
+    // o overflow decepa uma fileira (visto em campo no misto de 14 itens).
     const SLACK = 8;
     const BANNER = nOff > 0 ? 46 + GAP : 0;
     const total = nMain + nOff;
@@ -970,27 +1020,22 @@ function useFitCards(nMain: number, nOff: number) {
       const W = el.clientWidth;
       const H = el.clientHeight;
       if (!W || !H || total === 0) return;
-      let best: { w: number; cols: number } | null = null;
-      // Máx. 5 colunas (pedido do Leonardo): mais que isso vira mosaico difícil
-      // de bater o olho — pedido grande prefere rolar a espremer 6+ por linha.
-      // O nº de colunas vencedor também CAPA A LARGURA do grid lá no estilo:
-      // só limitar o tamanho do card não basta, o auto-fit enfiava a 6ª coluna
-      // sempre que a ALTURA encolhia o card e sobrava largura.
-      for (let cols = 1; cols <= Math.min(total, 5); cols++) {
-        const rows = Math.ceil(nMain / cols) + (nOff > 0 ? Math.ceil(nOff / cols) : 0);
-        const wByWidth = Math.min((W - (cols - 1) * GAP) / cols, MAXW);
-        const rowH = (H - SLACK - BANNER - (rows - 1) * GAP) / rows;
-        const w = Math.floor(Math.min(wByWidth, rowH - cardBodyHeight(wByWidth)));
-        if (w >= MINW && (!best || w > best.w)) best = { w, cols };
-      }
-      setFit((prev) => {
-        const next = best
-          ? { cardW: best.w, cols: best.cols, fits: true }
-          : { cardW: 150, cols: 5, fits: false };
-        return prev.cardW === next.cardW && prev.cols === next.cols && prev.fits === next.fits
-          ? prev
-          : next;
-      });
+      const cols = Math.min(total, MAX_COLS);
+      const rows = Math.ceil(nMain / cols) + (nOff > 0 ? Math.ceil(nOff / cols) : 0);
+      // Altura dimensiona pra no máximo 2 linhas; com mais linhas o card fica
+      // do tamanho de "2 linhas" e o viewport rola.
+      const rowsFit = Math.min(rows, ROWS_SEM_SCROLL);
+      const wByWidth = Math.min((W - (cols - 1) * GAP) / cols, MAXW);
+      const rowH = (H - SLACK - BANNER - (rowsFit - 1) * GAP) / rowsFit;
+      const w = Math.floor(Math.min(wByWidth, rowH - cardBodyHeight(wByWidth)));
+      const next = {
+        cardW: Math.max(MINW, w),
+        cols,
+        fits: rows <= ROWS_SEM_SCROLL && w >= MINW,
+      };
+      setFit((prev) =>
+        prev.cardW === next.cardW && prev.cols === next.cols && prev.fits === next.fits ? prev : next,
+      );
     };
     compute();
     const ro = new ResizeObserver(compute);
