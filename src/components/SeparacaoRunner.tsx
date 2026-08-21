@@ -26,6 +26,7 @@ import {
   type ClaimResponse,
   type EpcLookupItem,
   type LiberacaoFaltante,
+  type LeituraResolvida,
   type LiberacaoSupervisor,
   type Order,
   type OrderItem,
@@ -77,6 +78,27 @@ function normSku(v: string | null | undefined): string | null {
  * SKU com `ean` null, e o card até MOSTRA esse número (ean ?? sku), mas o
  * casamento só por `ean` rejeitava a peça (bug real de campo, pedido #793823).
  */
+/**
+ * Slot "Surpresa": a tag é de uma peça REAL curada pra este slot
+ * (`surpresaPermitidos` vem do nexus, já normalizado). Compara por SKU
+ * textual e por GTIN (o allowed pode ser EAN). Só se usa por ÚLTIMO no
+ * casamento — produto real do pedido primeiro.
+ */
+function surpresaAceita(it: OrderItem, look: EpcLookupItem): boolean {
+  const allowed = it.surpresaPermitidos;
+  if (!allowed || allowed.length === 0) return false;
+  const keys = new Set<string>(gtinCandidates(look.ean13, look.sku));
+  const lookSku = normSku(look.sku);
+  if (lookSku) keys.add(lookSku);
+  const lookEan = normSku(look.ean13);
+  if (lookEan) keys.add(lookEan);
+  return allowed.some((a) => {
+    const n = normSku(a);
+    if (!n) return false;
+    return keys.has(n) || gtinCandidates(a).some((g) => keys.has(g));
+  });
+}
+
 function gtinCandidates(...vals: Array<string | null | undefined>): string[] {
   const out = new Set<string>();
   for (const v of vals) {
@@ -227,13 +249,33 @@ export function SeparacaoRunner({ title, kicker, claim, emptyHint, queue, onBack
     return tags;
   }, []);
 
+  /** Resolução que o app fez de cada EPC lido (cache — sem ida à rede na
+   *  prática), pro nexus usar de fallback quando o EPC não está na réplica. */
+  const resolveEpcs = rfid.resolveEpcs;
+  const leiturasPayload = useCallback(
+    async (tags: string[]): Promise<LeituraResolvida[]> => {
+      try {
+        const map = await resolveEpcs(tags);
+        return tags.flatMap((t) => {
+          const epc = t.toUpperCase();
+          const l = map.get(epc);
+          return l ? [{ epc, ean13: l.ean13, sku: l.sku, size: l.size, name: l.name ?? null }] : [];
+        });
+      } catch {
+        return [];
+      }
+    },
+    [resolveEpcs],
+  );
+
   const finish = useCallback(async () => {
     const ord = orderRef.current;
     // Sobressalente na mesa TRAVA o complete — senão iria peça a mais.
     if (!ord || completing || extrasRef.current.size > 0) return;
     setCompleting(true);
     try {
-      await completeSeparacao(ord.id, collectedTags());
+      const tags = collectedTags();
+      await completeSeparacao(ord.id, tags, undefined, await leiturasPayload(tags));
       await fetchNext();
     } catch (e) {
       // 422 `liberacao_necessaria`: a contagem local fechou mas o servidor NÃO
@@ -267,7 +309,7 @@ export function SeparacaoRunner({ title, kicker, claim, emptyHint, queue, onBack
     } finally {
       setCompleting(false);
     }
-  }, [completing, collectedTags, fetchNext, showNotice]);
+  }, [completing, collectedTags, fetchNext, showNotice, leiturasPayload]);
 
   /**
    * Reinicia a conferência do pedido atual: a operadora tirou a peça errada da
@@ -359,12 +401,13 @@ export function SeparacaoRunner({ title, kicker, claim, emptyHint, queue, onBack
       const ord = orderRef.current;
       if (!ord) return;
       // Erros sobem pro modal (PIN errado etc.) — só fecha quando concluir.
-      await completeSeparacao(ord.id, collectedTags(), liberacao);
+      const tags = collectedTags();
+      await completeSeparacao(ord.id, tags, liberacao, await leiturasPayload(tags));
       setSupervisorOpen(false);
       setServerFaltantes(null);
       await fetchNext();
     },
-    [collectedTags, fetchNext],
+    [collectedTags, fetchNext, leiturasPayload],
   );
 
   // Acha o item esperado que casa com a tag lida. Casa por QUALQUER
@@ -387,6 +430,9 @@ export function SeparacaoRunner({ title, kicker, claim, emptyHint, queue, onBack
       (it) => lookSku && normSku(it.sku) === lookSku && remaining(it) > 0,
     );
     if (bySku) return bySku;
+    // 3) Slot "Surpresa": peça real curada pro slot (mesma etapa do nexus).
+    const bySurpresa = ord.items.find((it) => remaining(it) > 0 && surpresaAceita(it, look));
+    if (bySurpresa) return bySurpresa;
     return null;
   }, []);
 
@@ -403,7 +449,9 @@ export function SeparacaoRunner({ title, kicker, claim, emptyHint, queue, onBack
     });
     if (byGtin) return byGtin;
     const lookSku = normSku(look.sku);
-    return ord.items.find((it) => lookSku && normSku(it.sku) === lookSku) ?? null;
+    const bySku = ord.items.find((it) => lookSku && normSku(it.sku) === lookSku);
+    if (bySku) return bySku;
+    return ord.items.find((it) => surpresaAceita(it, look)) ?? null;
   }, []);
 
   // Última tag lida que NÃO pertence ao pedido — mostrada num banner pra

@@ -25,6 +25,9 @@ export type OrderItem = {
   quantidade: number;
   /** URL da imagem do produto (catálogo do nexus, via Shopify). null = sem match. */
   imagemUrl: string | null;
+  /** Slot "Surpresa": SKUs (já normalizados) das peças reais curadas que
+   *  preenchem este item (`surpresa_mappings` do nexus). Ausente = item comum. */
+  surpresaPermitidos?: string[];
 };
 
 export type Order = {
@@ -285,14 +288,34 @@ export type LiberacaoSupervisor = {
 
 export type SupervisorInfo = { id: string; nome: string; temPin: boolean };
 
+/** Resolução EPC→peça que o APP fez (nuvem iTAG → nexus → SGTIN), enviada no
+ *  complete. O nexus resolve só pelo `rfid_epc_inventory` dele; quando o EPC
+ *  não está na réplica (peça surpresa recém-etiquetada, sync atrasado) ele não
+ *  enxerga a leitura e recusa com `liberacao_necessaria` mesmo com a peça certa
+ *  na mesa (go-live XG, 21/08/2026). Com isto o servidor tem como usar a
+ *  resolução do app de fallback (e alimentar o inventário). Campo extra é
+ *  ignorado por nexus antigo (zod não-strict). */
+export type LeituraResolvida = {
+  epc: string;
+  ean13: string;
+  sku: string | null;
+  size: string | null;
+  name: string | null;
+};
+
 export function completeSeparacao(
   orderId: string,
   rfidTags: string[],
   liberacao?: LiberacaoSupervisor,
+  leituras?: LeituraResolvida[],
 ): Promise<Order> {
   return apiRequest<Order>(`/separacao/${orderId}/complete`, {
     method: "POST",
-    body: liberacao ? { rfidTags, liberacao } : { rfidTags },
+    body: {
+      rfidTags,
+      ...(liberacao ? { liberacao } : {}),
+      ...(leituras && leituras.length > 0 ? { leituras } : {}),
+    },
   });
 }
 
