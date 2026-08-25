@@ -11,10 +11,13 @@
 // - Backstop opcional do nexus (ainda NÃO implementado lá): 401 com
 //   `{ error: "SESSION_EXPIRED" }` também derruba a sessão aqui (ver `apiRequest`).
 //
-// A sessão em si é Supabase/GoTrue (o nexus só valida o token), então "derrubar"
-// = `supabase.auth.signOut()` → App volta pro Login (prompt=select_account).
+// A sessão em si é do NEXUS (Cognito), então "derrubar" = `sair()` do Cognito
+// — que também encerra a sessão do Hosted UI no navegador, senão a próxima
+// operadora entraria com a conta da anterior sem passar pelo Google. A sessão
+// Supabase derivada (Etiquetagem) cai junto.
 
 import { supabase } from "./supabase";
+import { sair } from "./cognito";
 
 let lastActivity = Date.now();
 
@@ -83,8 +86,14 @@ export function forceLogout(reason: LogoutReason): Promise<void> {
       new Promise((r) => setTimeout(r, BEFORE_LOGOUT_CAP_MS)),
     ]);
     try {
-      await supabase.auth.signOut();
+      await sair();
     } finally {
+      // A sessão Supabase é derivada: sem a do Nexus ela não pode sobreviver.
+      try {
+        await supabase.auth.signOut();
+      } catch {
+        /* sem sessão Supabase ou GoTrue fora: nada a fazer */
+      }
       inFlight = null;
     }
   })();

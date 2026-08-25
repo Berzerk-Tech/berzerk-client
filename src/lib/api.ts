@@ -1,10 +1,12 @@
 // Cliente HTTP da separacao-api (nexus). Base URL configurável + bearer token.
 //
-// AUTENTICAÇÃO: a mesma sessão Google (Supabase) do app — quem logou é quem
-// separa. O nexus valida esse token (bridge HS256) e resolve as permissões
-// pelo RBAC dele (papéis por email); o app só reflete o que a API responder.
+// AUTENTICAÇÃO: a sessão do NEXUS (Cognito, pool staff) — quem logou é quem
+// separa. O Bearer é o `id_token` (o access token do Cognito não carrega
+// `email`, e a API usa o e-mail pra casar `usuarios`/papéis). O nexus valida o
+// token nativamente e resolve as permissões pelo RBAC dele; o app só reflete o
+// que a API responder.
 
-import { supabase } from "./supabase";
+import { getIdToken } from "./cognito";
 import { forceLogout } from "./idleSession";
 
 const DEFAULT_BASE = "http://localhost:3010";
@@ -15,8 +17,7 @@ export function apiBaseUrl(): string {
 
 async function getAuthToken(): Promise<string | null> {
   try {
-    const { data } = await supabase.auth.getSession();
-    return data.session?.access_token ?? null;
+    return await getIdToken();
   } catch {
     return null;
   }

@@ -1,12 +1,12 @@
 // WebSocket do nexus (API Gateway WS): o backend EMPURRA `queue.changed`
 // quando a fila de separação muda (tiny-sync, claim, complete, release) —
 // substitui o polling agressivo. O handshake valida o mesmo token da API
-// (sessão Supabase via query param `?token=`, ver ws-handlers do nexus).
+// (id token do Cognito via query param `?token=`, ver ws-handlers do nexus).
 //
 // WS é gatilho, não fonte de verdade: quem assina refaz o fetch ao receber o
 // evento e mantém um polling lento de fallback — se o WS cair, nada quebra.
 
-import { supabase } from "./supabase";
+import { getIdToken } from "./cognito";
 
 const WS_URL = (import.meta.env.VITE_SEPARACAO_WS_URL ?? "").replace(/\/$/, "");
 
@@ -35,8 +35,7 @@ export function subscribeQueueChanged(onChange: () => void): () => void {
     if (stopped) return;
     let token: string | undefined;
     try {
-      const { data } = await supabase.auth.getSession();
-      token = data.session?.access_token;
+      token = (await getIdToken()) ?? undefined;
     } catch {
       /* sem sessão: tenta mesmo assim; o connect leva 401 e cai no retry */
     }

@@ -5,7 +5,8 @@ import {
   type ReactNode,
   type SVGProps,
 } from "react";
-import { supabase } from "../lib/supabase";
+import { sair } from "../lib/cognito";
+import { encerrarSessaoSupabase } from "../lib/supabase-derivada";
 import { getStoredTheme, setTheme, type Theme } from "../lib/theme";
 import { getDeviceConfig } from "../lib/devices";
 import { getMe, canOperateSeparacao } from "../services/orders";
@@ -141,12 +142,18 @@ export function HomeMenu({ email, onEnter }: Props) {
       </main>
 
       <footer style={footer}>
-        <button onClick={() => supabase.auth.signOut()} style={signOutBtn} className="berzerk-text-btn">
+        <button onClick={() => void encerrarSessao()} style={signOutBtn} className="berzerk-text-btn">
           encerrar sessão
         </button>
       </footer>
     </div>
   );
+}
+
+/** Logout explícito: derruba a sessão local, a derivada e a do Hosted UI. */
+async function encerrarSessao(): Promise<void> {
+  await encerrarSessaoSupabase();
+  await sair();
 }
 
 function firstName(email: string): string {

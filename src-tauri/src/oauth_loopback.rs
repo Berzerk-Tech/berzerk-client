@@ -1,12 +1,13 @@
-// Loopback HTTP server pra capturar o callback OAuth do Supabase.
+// Loopback HTTP server pra capturar o callback OAuth do Cognito (Nexus).
 //
 // Por que existe: Chrome 120+ bloqueia silenciosamente redirects automáticos
 // pra custom schemes (berzerk-print://...) sem user gesture imediato. O fluxo
-// Google → Supabase → app é redirect, sem gesture, então o Chrome cancela.
+// Google → Cognito → app é redirect, sem gesture, então o Chrome cancela.
 //
 // Loopback HTTP em 127.0.0.1:54321 é tratado como URL HTTP normal por Chrome,
 // que entrega no servidor local sem bloquear. O servidor lê os query params
 // (code, state) e emite o evento `oauth-callback-url` pra o front processar.
+// A mesma rota é o pouso do `/logout` do Hosted UI (aí vem sem query).
 
 use std::sync::{Arc, Mutex};
 use std::thread;
