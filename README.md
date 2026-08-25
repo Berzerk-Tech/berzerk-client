@@ -54,9 +54,9 @@ Comportamento esperado na **primeira instalação**. Veja passo 2 acima.
 
 O build saiu sem `VITE_COGNITO_DOMAIN`/`VITE_COGNITO_CLIENT_ID`. É falha de release, não da máquina — falar com o time de tecnologia.
 
-### "Etiquetagem indisponível: sessão do Supabase não pôde ser criada"
+### Etiquetagem dá 403 / "sem permissão"
 
-Só a Etiquetagem e o Rastreio dependem do Supabase (ver "Login" abaixo); Separação e Expedição continuam funcionando. Causas usuais: a conta não tem permissão de desktop no Nexus (`separacao:operate`, `separacao:read` ou `expedicao:operate`) ou o handoff está fora do ar. Tem um "Tentar de novo" na própria tela.
+A Etiquetagem passou a exigir a permissão **`etiquetagem:operate`** no Nexus (0.8.0). Antes ela não pedia nada: o portão era a RLS do Supabase, que liberava para qualquer sessão. Quem etiqueta precisa do papel **`etiquetador`** — atribuído na tela de Usuários & Papéis do Nexus.
 
 ### "Continue o login no navegador" trava indefinidamente
 
@@ -78,15 +78,15 @@ No canto inferior da tela principal: **"Encerrar sessão"**.
 
 ### Stack
 
-Tauri 2 + React 19 + TypeScript + Vite + Bun. Login e API no **Nexus** (Cognito + `api-nexus.cloud.berzerk.com.br`); o Supabase (projeto `hvnysnfmsndjehjndipc`, via Lovable Cloud) sobrou só na Etiquetagem/Rastreio, com sessão derivada.
+Tauri 2 + React 19 + TypeScript + Vite + Bun. Login e API **100% no Nexus** (Cognito + `api-nexus.cloud.berzerk.com.br`). Desde a 0.8.0 **não há mais nenhuma dependência do Supabase** — a Etiquetagem e o Rastreio, os últimos consumidores, migraram na fase 3 do `docs/plano-corte-supabase.md`.
 
 Estrutura:
 
 ```
 src/                     # React app
   components/            # UI (HomeMenu, Login, BatchBrowser, etc)
-  lib/                   # Helpers — cognito (login), auth (loopback), supabase-derivada, deep-link, updater
-  services/              # Camada de acesso a dados (Supabase queries)
+  lib/                   # Helpers — cognito (login), auth (loopback), api, realtime (WS), deep-link, updater
+  services/              # Camada de acesso a dados (chamadas à API do Nexus)
 src-tauri/               # Rust app shell + plugins Tauri
   src/lib.rs             # Entry point — registra plugins
   src/oauth_loopback.rs  # HTTP server local para callback OAuth
@@ -131,7 +131,7 @@ O fluxo é não-trivial porque Chrome 120+ bloqueia custom schemes (`berzerk-pri
 
 O **Bearer da API e do WS é o `id_token`** — o access token do Cognito não carrega `email`, e o Nexus usa o e-mail pra provisionar `usuarios`, casar papéis no 1º login e emitir o handoff do desktop.
 
-**Logout** (explícito ou por inatividade) limpa a sessão local, a sessão Supabase derivada e também a do Hosted UI (`/logout` com `logout_uri` no mesmo loopback). Sem esse último passo, o próximo `authorize` na mesma máquina poderia devolver um code da operadora anterior sem passar pelo Google.
+**Logout** (explícito ou por inatividade) limpa a sessão local e também a do Hosted UI (`/logout` com `logout_uri` no mesmo loopback). Sem esse último passo, o próximo `authorize` na mesma máquina poderia devolver um code da operadora anterior sem passar pelo Google.
 
 **Config** (não são segredos: domínio público e app client nativo sem secret):
 
@@ -143,17 +143,27 @@ O **Bearer da API e do WS é o `id_token`** — o access token do Cognito não c
 
 Os client ids saem de `terraform output cognito_desktop_client_id` na stack `nexus/<env>` do `berzerk-infra` (`stacks/nexus/*/auth.tf`, resource `aws_cognito_user_pool_client.desktop`). O callback `http://127.0.0.1:54321/oauth-callback` está cadastrado lá, em callback E logout URLs. No CI as três vêm de `vars` (não `secrets`).
 
-### Sessão Supabase derivada (Etiquetagem)
+### Etiquetagem e Rastreio no Nexus (0.8.0)
 
-O Supabase deixou de ser login, mas a **Etiquetagem** e o **Rastreio** ainda falam direto com o projeto legado (`silk_records`, `rfid_print_jobs`, `rfid_epc_inventory`, …) até a fase 3 do corte (`docs/plano-corte-supabase.md` no Nexus). Essas tabelas têm RLS, então precisam de uma sessão GoTrue de verdade — e o app a obtém **do Nexus**, sem segundo login:
+A 0.8.0 tirou o Supabase do app. A Etiquetagem e o Rastreio, que falavam direto com `silk_records`, `production_batches`, `rfid_print_jobs` e `rfid_epc_inventory`, passaram a usar a API do Nexus com o mesmo Bearer do resto do app:
 
-```
-POST {API}/desktop/handoff   (Bearer id_token do Cognito)
-  ← { url: "berzerk://auth?token_hash=<hash>&type=magiclink", expiraEm }
-supabase.auth.verifyOtp({ type: 'magiclink', token_hash })   → sessão
-```
+| Antes (Supabase) | Agora (Nexus) |
+|---|---|
+| `silk_records` + `production_batches` | `GET /etiquetagem/lotes` |
+| `production_batches.rfid_impresso_at` | `POST`/`DELETE /etiquetagem/lotes/:id/impresso` |
+| `design_templates` + `unified_products` + edge `shopify-analytics` | `GET /etiquetagem/lotes/:id/eans` |
+| `rfid_print_jobs` (+ Realtime) | `/etiquetagem/print-jobs/*` + WS `print-jobs.changed` |
+| `rfid_epc_inventory` | `/etiquetagem/epcs/*` |
+| `rfid_action_logs` | `POST /etiquetagem/log` (vira `auditoria`) |
 
-Roda em silêncio (`src/lib/supabase-derivada.ts`) no boot e logo após o login. Se falhar (503 sem config no Nexus, 403 sem permissão de desktop, rede), **o app segue logado**: Separação e Expedição funcionam e só a Etiquetagem/Rastreio mostram "Etiquetagem indisponível: sessão do Supabase não pôde ser criada", com um "Tentar de novo".
+Com isso saíram do app: `@supabase/supabase-js`, `src/lib/supabase.ts`, `src/lib/supabase-derivada.ts`, `src/services/ean13Lookup.ts`, as envs `VITE_SUPABASE_*`, o handoff `POST /desktop/handoff` e a tela "Etiquetagem indisponível".
+
+Duas responsabilidades mudaram de lado, e é bom saber por quê:
+
+- **Quem casa EPC ↔ tamanho é o servidor.** O app manda só a lista de EPCs na ordem em que a iTAG a devolveu; o Nexus expande os itens do job. O job é a cópia confiável do payload — refazer a expansão aqui duplicaria a regra, e um erro nela grava o EAN do tamanho errado na etiqueta.
+- **"Descartar teste" virou uma chamada transacional.** Eram três passos daqui (buscar jobs → apagar EPCs → cancelar jobs) que podiam parar no meio e deixar EPC de teste vivo com o job já cancelado — etiqueta de teste lida na separação como peça de verdade.
+
+**Permissão:** tudo sob `etiquetagem:operate` (papel `etiquetador` no Nexus). É a primeira vez que a mesa tem controle de acesso: antes o portão era a RLS do Supabase, que liberava para qualquer sessão autenticada.
 
 ### Deep link (abrir pelo Nexus)
 
@@ -161,17 +171,13 @@ O Nexus (web) tem um botão "Abrir Berzerk Client" que navega pra uma URL `berze
 
 **Esquema:** `berzerk`, registrado em `plugins.deep-link.desktop.schemes` no `tauri.conf.json`. Três URLs:
 
-- `berzerk://auth?token_hash=<hash>&type=magiclink` — handoff do Nexus (contrato da 0.6.0, mantido).
-- `berzerk://login` — só dispara o login no navegador (novo na 0.7.0).
+- `berzerk://auth?token_hash=<hash>&type=magiclink` — contrato da 0.6.0, mantido. **O `token_hash` é ignorado desde a 0.8.0** (ele existia só para derivar a sessão Supabase); o host continua aceito porque o Nexus em produção ainda emite esses links, e um link legítimo tem de abrir o app logado em vez de dar erro na cara de quem clicou.
+- `berzerk://login` — dispara o login no navegador (0.7.0).
 - `berzerk://open` — só foca a janela.
 
-**Fluxo de auth (0.7.0):** quem manda na identidade é o Cognito, então o `token_hash` deixou de ser login e virou só o atalho pra sessão Supabase derivada:
+**Fluxo de auth (0.8.0):** os três hosts fazem a mesma coisa útil — focar a janela e, se não houver sessão do Nexus, disparar o login PKCE no navegador (que já está logado no Google, então costuma voltar sozinho, sem digitar nada).
 
-- **sem sessão do Nexus** — o app dispara primeiro o login PKCE no navegador (que já está logado no Nexus/Google, então costuma voltar sozinho, sem digitar nada) e guarda o `token_hash`, aplicando-o assim que a sessão chega;
-- **com sessão do Nexus** — aplica o `token_hash` direto (`verifyOtp`), economizando um handoff;
-- se o link estiver expirado/usado, cai no handoff normal (`POST /desktop/handoff`) antes de desistir.
-
-Sucesso → toast "Conectado como `<e-mail>`" e tela inicial. Falha sem sessão do Nexus → tela de login com "Link expirado ou inválido — entre com o Google."; falha já logado → toast de Etiquetagem indisponível (nada é derrubado).
+Sucesso → toast "Conectado como `<e-mail>`" e tela inicial. Falha → tela de login com o motivo.
 
 **Segunda instância (Windows/Linux):** o SO abre uma nova instância do processo passando a URL como argumento de linha de comando. `tauri-plugin-single-instance` (feature `deep-link`) detecta isso, repassa a URL pra instância já rodando — que reemite como o evento `deep-link://new-url` do `tauri-plugin-deep-link`, o mesmo que `onOpenUrl` no front escuta — e a segunda instância se encerra. macOS recebe o evento diretamente do SO, sem precisar do single-instance.
 
@@ -223,7 +229,6 @@ PCs instalados pegam a atualização sozinhos na próxima abertura.
 | App client do login (desktop) | `berzerk-infra` → `stacks/nexus/<env>/auth.tf` → `aws_cognito_user_pool_client.desktop` (output `cognito_desktop_client_id`) |
 | Pool + Hosted UI + IdP Google | `berzerk-infra` → `stacks/auth/<env>` (`auth.cloud.berzerk.com.br`) |
 | Envs do login no CI | GitHub → repo → Settings → Variables: `VITE_COGNITO_DOMAIN`, `VITE_COGNITO_CLIENT_ID`, `VITE_COGNITO_REGION` |
-| Projeto Supabase (só Etiquetagem/Rastreio) | Lovable Cloud do projeto `separadordelistas` (`hvnysnfmsndjehjndipc`) |
 
 ### Desenvolver em Linux
 

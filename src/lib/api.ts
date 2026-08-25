@@ -35,7 +35,7 @@ export class ApiError extends Error {
 }
 
 type RequestOpts = {
-  method?: "GET" | "POST";
+  method?: "GET" | "POST" | "PATCH" | "DELETE";
   body?: unknown;
   query?: Record<string, string | undefined>;
   signal?: AbortSignal;
@@ -63,6 +63,8 @@ export async function apiRequest<T>(path: string, opts: RequestOpts = {}): Promi
 
   const text = await res.text();
   const data = text ? safeJson(text) : null;
+  // 204 (o log de ações da etiquetagem) volta sem corpo — `data` fica null e o
+  // caller que tipou `void` não vê diferença.
   if (!res.ok) {
     let msg = `HTTP ${res.status}`;
     if (data && typeof data === "object" && "message" in data) {

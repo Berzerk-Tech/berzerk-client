@@ -4,7 +4,8 @@
 // (`itag_iprint_*`) que bate direto na iTAG REST API com Basic auth.
 // O resto do fluxo (criação do job em `rfid_print_jobs`, mark done/failed)
 // continua em BatchBrowser/printJobs.ts — esse arquivo só cobre a etapa
-// de gerar EPCs e persistir o mapping em `rfid_epc_inventory`.
+// de gerar EPCs e persistir o mapping no inventário (hoje no nexus, via
+// `POST /etiquetagem/epcs`).
 
 import { invoke } from "@tauri-apps/api/core";
 import {
@@ -152,11 +153,11 @@ export async function printJob(input: PrintJobInput): Promise<PrintJobResult> {
   // Persiste o mapping EPC → batch/job. Não falha o print inteiro se isso
   // der erro — a impressão física já aconteceu; logamos pra tratar depois.
   try {
+    // Manda SÓ a lista, na ordem em que a iTAG a devolveu — quem casa EPC ↔
+    // tamanho é o servidor, expandindo os itens do job. Ver a nota grande em
+    // `services/printJobs.ts`.
     await saveEpcInventory({
       jobId: input.jobId,
-      batchId: input.batchId,
-      batchCode: input.batchCode,
-      items: input.items,
       epcs: resp.epcs,
       codigoInventarioItag: resp.codigoInventario,
     });

@@ -1,15 +1,6 @@
-import { useCallback, useEffect, useState, type CSSProperties, type ReactNode } from "react";
-import type { Session } from "@supabase/supabase-js";
-import { supabase } from "./lib/supabase";
+import { useEffect, useState, type CSSProperties, type ReactNode } from "react";
 import { getSessao, getSessaoSync, onSessaoChange, type SessaoCognito } from "./lib/cognito";
 import { handleOAuthCallback, listenForOAuthCallback } from "./lib/auth";
-import {
-  ETIQUETAGEM_INDISPONIVEL_MSG,
-  estadoSupabase,
-  garantirSessaoSupabase,
-  onEstadoSupabase,
-  type EstadoSupabase,
-} from "./lib/supabase-derivada";
 import { initDeepLinks, type DeepLinkAuthResult } from "./lib/deep-link";
 import { checkForUpdate, type AvailableUpdate } from "./lib/updater";
 import { getStationShortId } from "./lib/station";
@@ -23,15 +14,20 @@ import { SettingsPlaceholder } from "./components/SettingsPlaceholder";
 import { UpdateBanner } from "./components/UpdateBanner";
 import { Toast } from "./components/Toast";
 import { IdleSessionGuard } from "./components/IdleSessionGuard";
-import { BackButton } from "./components/BackButton";
 import { RfidProvider } from "./contexts/RfidContext";
 
+/**
+ * Desde a 0.8.0 há UMA sessão só: a do Nexus (Cognito).
+ *
+ * A 0.7.0 mantinha uma segunda sessão, derivada do Supabase, porque a
+ * Etiquetagem e o Rastreio ainda falavam com as tabelas legadas e precisavam
+ * satisfazer a RLS delas. Com a fase 3 do corte, tudo passou a ser API do
+ * Nexus com o mesmo Bearer — e com a sessão foram embora o handoff, a tela de
+ * "Etiquetagem indisponível" e o retry que ela oferecia.
+ */
 export default function App() {
   // Sessão do NEXUS (Cognito): é ela que diz se o app está logado.
   const [sessao, setSessao] = useState<SessaoCognito | null>(() => getSessaoSync());
-  // Sessão SUPABASE derivada: só a Etiquetagem e o Rastreio dependem dela.
-  const [sessaoSupabase, setSessaoSupabase] = useState<Session | null>(null);
-  const [estadoSb, setEstadoSb] = useState<EstadoSupabase>(() => estadoSupabase());
   const [loading, setLoading] = useState(true);
   const [screen, setScreen] = useState<Screen>("home");
   const [update, setUpdate] = useState<AvailableUpdate | null>(null);
@@ -54,13 +50,6 @@ export default function App() {
       if (!s) setScreen("home");
     });
 
-    const pararEstadoSb = onEstadoSupabase(setEstadoSb);
-
-    supabase.auth.getSession().then(({ data }) => setSessaoSupabase(data.session));
-    const { data: sub } = supabase.auth.onAuthStateChange((_evt, sess) => {
-      setSessaoSupabase(sess);
-    });
-
     const stopDeepLink = listenForOAuthCallback(async (url) => {
       const { error } = await handleOAuthCallback(url);
       setLoginEmVoo(false);
@@ -80,9 +69,6 @@ export default function App() {
           setDeepLinkError(null);
           setScreen("home");
           setToast(`Conectado como ${result.email}`);
-        } else if (getSessaoSync()) {
-          // Já logado no Nexus: o link só falhou pra Etiquetagem — avisa e segue.
-          setToast(ETIQUETAGEM_INDISPONIVEL_MSG);
         } else {
           setDeepLinkError(result.message);
         }
@@ -101,23 +87,10 @@ export default function App() {
 
     return () => {
       pararSessao();
-      pararEstadoSb();
-      sub.subscription.unsubscribe();
       stopDeepLink();
       stopNexusHandoff();
       clearTimeout(updateTimer);
     };
-  }, []);
-
-  // Com sessão do Nexus e sem sessão Supabase, deriva uma em silêncio
-  // (`POST /desktop/handoff`). Vale pro boot e pro login recém-concluído.
-  useEffect(() => {
-    if (!sessao || sessaoSupabase) return;
-    void garantirSessaoSupabase();
-  }, [sessao, sessaoSupabase]);
-
-  const tentarDeNovoSupabase = useCallback(() => {
-    void garantirSessaoSupabase({ forcar: true });
   }, []);
 
   const banner =
@@ -146,16 +119,12 @@ export default function App() {
   } else {
     const email = sessao.email ?? "(sem email)";
     const stationShortId = getStationShortId();
-    const semSupabase = (
-      <SupabaseIndisponivel estado={estadoSb} onBack={back} onRetry={tentarDeNovoSupabase} />
-    );
     if (screen === "rfid")
       content = withBanner(
-        sessaoSupabase ? <BatchBrowser session={sessaoSupabase} onBack={back} /> : semSupabase,
+        <BatchBrowser operatorId={sessao.sub} operatorEmail={email} onBack={back} />,
       );
     else if (screen === "nf") content = withBanner(<Expedicao onBack={back} />);
-    else if (screen === "rastreio")
-      content = withBanner(sessaoSupabase ? <PieceTrace onBack={back} /> : semSupabase);
+    else if (screen === "rastreio") content = withBanner(<PieceTrace onBack={back} />);
     else if (screen === "separacao") content = withBanner(<Separacao onBack={back} />);
     else if (screen === "settings") content = withBanner(<SettingsPlaceholder onBack={back} />);
     else
@@ -171,38 +140,6 @@ export default function App() {
       {toast && <Toast message={toast} onDismiss={() => setToast(null)} />}
       {content}
     </RfidProvider>
-  );
-}
-
-/**
- * Etiquetagem/Rastreio sem a sessão Supabase derivada. Não é logout: Separação
- * e Expedição (100% Nexus) continuam funcionando — some quando a fase 3 do
- * corte levar a Etiquetagem pro Nexus.
- */
-function SupabaseIndisponivel({
-  estado,
-  onBack,
-  onRetry,
-}: {
-  estado: EstadoSupabase;
-  onBack: () => void;
-  onRetry: () => void;
-}) {
-  const derivando = estado.estado === "derivando";
-  return (
-    <div style={avisoPage}>
-      <div style={avisoTopo}>
-        <BackButton onClick={onBack} />
-      </div>
-      <div style={avisoCard}>
-        <h2 style={avisoTitulo}>{ETIQUETAGEM_INDISPONIVEL_MSG}</h2>
-        {estado.estado === "falhou" && <p style={avisoMotivo}>{estado.motivo}</p>}
-        <p style={avisoNota}>Separação e Expedição seguem funcionando.</p>
-        <button type="button" onClick={onRetry} disabled={derivando} style={avisoBtn}>
-          {derivando ? "Tentando…" : "Tentar de novo"}
-        </button>
-      </div>
-    </div>
   );
 }
 
@@ -227,58 +164,9 @@ const shellMain: CSSProperties = {
   minHeight: 0,
 };
 
-const avisoPage: CSSProperties = {
-  flex: 1,
-  display: "flex",
-  flexDirection: "column",
-  background: "var(--bg)",
-};
 
-const avisoTopo: CSSProperties = {
-  padding: "20px 24px 0",
-};
 
-const avisoCard: CSSProperties = {
-  margin: "auto",
-  maxWidth: 460,
-  padding: 28,
-  display: "flex",
-  flexDirection: "column",
-  gap: 10,
-  textAlign: "center",
-  background: "var(--bg-card)",
-  border: "1px solid var(--border)",
-  borderRadius: 12,
-};
 
-const avisoTitulo: CSSProperties = {
-  margin: 0,
-  fontSize: 15,
-  fontWeight: 600,
-  color: "var(--text)",
-};
 
-const avisoMotivo: CSSProperties = {
-  margin: 0,
-  fontSize: 12,
-  color: "var(--danger-text)",
-};
 
-const avisoNota: CSSProperties = {
-  margin: 0,
-  fontSize: 12,
-  color: "var(--text-muted)",
-};
 
-const avisoBtn: CSSProperties = {
-  marginTop: 6,
-  padding: "10px 16px",
-  fontSize: 13,
-  fontWeight: 600,
-  alignSelf: "center",
-  background: "var(--bg-input)",
-  color: "var(--text)",
-  border: "1px solid var(--border-strong)",
-  borderRadius: 8,
-  cursor: "pointer",
-};
