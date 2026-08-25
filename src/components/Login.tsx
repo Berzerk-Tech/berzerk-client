@@ -1,6 +1,7 @@
 import { useEffect, useState, type CSSProperties } from "react";
 import { getVersion } from "@tauri-apps/api/app";
 import { signInWithGoogle } from "../lib/auth";
+import { CONFIG_AUSENTE_MSG, cognitoConfigurado } from "../lib/cognito";
 import { takeLogoutReason } from "../lib/idleSession";
 import { BerzerkLogo } from "./BerzerkLogo";
 import { AmbientBackground } from "./AmbientBackground";
@@ -8,13 +9,15 @@ import { AmbientBackground } from "./AmbientBackground";
 type Props = {
   /** Mensagem de um deep link de auth que falhou (link expirado/usado) — App.tsx repassa. */
   deepLinkError?: string | null;
+  /** Um deep link já abriu o navegador — a tela nasce no estado "aguardando". */
+  aguardandoNavegador?: boolean;
 };
 
-export function Login({ deepLinkError }: Props = {}) {
+export function Login({ deepLinkError, aguardandoNavegador }: Props = {}) {
   // Semeia com o erro do deep link (se houver) — depois disso é só o estado normal
   // de erro de clique no botão de login.
   const [error, setError] = useState<string | null>(deepLinkError ?? null);
-  const [busy, setBusy] = useState(false);
+  const [busy, setBusy] = useState(aguardandoNavegador === true);
   const [version, setVersion] = useState<string>("");
   // Motivo do último logout forçado (consumido na leitura — some no próximo login).
   const [reason] = useState(() => takeLogoutReason());
@@ -28,6 +31,11 @@ export function Login({ deepLinkError }: Props = {}) {
   useEffect(() => {
     if (deepLinkError) setError(deepLinkError);
   }, [deepLinkError]);
+
+  // O deep link berzerk://login abre o navegador sozinho — a tela acompanha.
+  useEffect(() => {
+    if (aguardandoNavegador) setBusy(true);
+  }, [aguardandoNavegador]);
 
   async function handleClick() {
     setError(null);
@@ -59,7 +67,7 @@ export function Login({ deepLinkError }: Props = {}) {
         <section style={authSection}>
           <p style={kicker}>Acesso restrito</p>
           <p style={cardSub}>
-            Apenas contas <code style={domainTag}>@berzerk.com.br</code>
+            Entrar no Nexus com <code style={domainTag}>@berzerk.com.br</code>
           </p>
 
           {reason && (
@@ -69,6 +77,7 @@ export function Login({ deepLinkError }: Props = {}) {
                 : `Sessão encerrada pelo servidor: ${reason.message}. Entre de novo pra continuar.`}
             </div>
           )}
+          {!cognitoConfigurado() && <div style={errorBox}>{CONFIG_AUSENTE_MSG}</div>}
           {error && <div style={errorBox}>{error}</div>}
 
           {!busy ? (

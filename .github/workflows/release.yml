@@ -73,11 +73,20 @@ jobs:
           # tauri-action loga "Signature not found for the updater JSON".
           # Vale pros dois OS — mesma chave, mesma flag.
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ""
+          # Login: Cognito do Nexus (pool staff, Google). Não são segredos —
+          # domínio público do Hosted UI e app client nativo SEM secret, por
+          # isso vêm de `vars` e não de `secrets`. Sem eles o app builda mas a
+          # tela de login avisa que não está configurado.
+          VITE_COGNITO_DOMAIN: ${{ vars.VITE_COGNITO_DOMAIN }}
+          VITE_COGNITO_CLIENT_ID: ${{ vars.VITE_COGNITO_CLIENT_ID }}
+          VITE_COGNITO_REGION: ${{ vars.VITE_COGNITO_REGION }}
+          # Supabase: NÃO é mais login — só a Etiquetagem/Rastreio, com sessão
+          # derivada do Nexus (POST /desktop/handoff).
           VITE_SUPABASE_URL: ${{ secrets.VITE_SUPABASE_URL }}
           VITE_SUPABASE_PUBLISHABLE_KEY: ${{ secrets.VITE_SUPABASE_PUBLISHABLE_KEY }}
           # Separação (nexus): base da API + WS de push (queue.changed). Sem o
           # da API o módulo cai no default localhost e não conecta; sem o WS o
-          # app fica só no polling de fallback. Auth = sessão Google (Supabase).
+          # app fica só no polling de fallback. Auth = id token do Cognito.
           VITE_SEPARACAO_API_URL: ${{ secrets.VITE_SEPARACAO_API_URL }}
           VITE_SEPARACAO_WS_URL: ${{ secrets.VITE_SEPARACAO_WS_URL }}
         with:

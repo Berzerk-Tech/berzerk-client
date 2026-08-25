@@ -1,23 +1,15 @@
 import { useEffect, useState, type CSSProperties } from "react";
-import { supabase } from "../lib/supabase";
+import { getSessaoSync, onSessaoChange } from "../lib/cognito";
 
 /**
  * Identificação discreta de quem está operando (pedido do Victor): primeiro
- * nome da conta Google logada, no header das telas de operação. Hover mostra
- * o e-mail completo.
+ * nome da conta Google logada no Nexus, no header das telas de operação. Hover
+ * mostra o e-mail completo.
  */
 export function OperatorChip() {
-  const [email, setEmail] = useState<string | null>(null);
+  const [email, setEmail] = useState<string | null>(() => getSessaoSync()?.email ?? null);
 
-  useEffect(() => {
-    let alive = true;
-    void supabase.auth.getSession().then(({ data }) => {
-      if (alive) setEmail(data.session?.user?.email ?? null);
-    });
-    return () => {
-      alive = false;
-    };
-  }, []);
+  useEffect(() => onSessaoChange((s) => setEmail(s?.email ?? null)), []);
 
   if (!email) return null;
   const local = email.split("@")[0] ?? email;

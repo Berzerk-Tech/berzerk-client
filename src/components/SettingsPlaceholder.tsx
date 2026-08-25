@@ -22,8 +22,9 @@ import {
 import { type EpcLookupItem } from "../services/orders";
 import { useRfid } from "../contexts/RfidContext";
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import { supabase } from "../lib/supabase";
 import { signInWithGoogle } from "../lib/auth";
+import { getSessaoSync, onSessaoChange, sair } from "../lib/cognito";
+import { encerrarSessaoSupabase } from "../lib/supabase-derivada";
 import { listSerialPorts, describePort, type SerialPortInfo } from "../lib/usb";
 import {
   getIprintConfig,
@@ -130,14 +131,13 @@ export function SettingsPlaceholder({ onBack }: Props) {
  * e-mail logado, troca de conta Google (máquina compartilhada) e tela cheia.
  */
 function SessionCard() {
-  const [email, setEmail] = useState<string | null>(null);
+  const [email, setEmail] = useState<string | null>(() => getSessaoSync()?.email ?? null);
   const [isFullscreen, setIsFullscreen] = useState(false);
+
+  useEffect(() => onSessaoChange((s) => setEmail(s?.email ?? null)), []);
 
   useEffect(() => {
     let alive = true;
-    void supabase.auth.getSession().then(({ data }) => {
-      if (alive) setEmail(data.session?.user?.email ?? null);
-    });
     void (async () => {
       try {
         const fs = await getCurrentWindow().isFullscreen();
@@ -151,9 +151,11 @@ function SessionCard() {
     };
   }, []);
 
-  // signOut + prompt=select_account: um clique pra trocar de conta.
+  // Encerra a sessão (local + Hosted UI) e reabre o login com
+  // prompt=select_account: um clique pra trocar de conta na mesa compartilhada.
   const switchUser = async () => {
-    await supabase.auth.signOut();
+    await encerrarSessaoSupabase();
+    await sair({ encerrarNoNavegador: false });
     await signInWithGoogle();
   };
 
