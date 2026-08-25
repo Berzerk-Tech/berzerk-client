@@ -10,7 +10,7 @@ Aplicação desktop instalada nos PCs do chão de fábrica da Berzerk. Cobre doi
 - **Etiquetagem** — aplica identidade RFID em lotes confirmados de produção. Lookup de EAN13 (local + Shopify) e impressão com margem de segurança.
 - **Expedição** (em breve) — bipa etiqueta RFID, identifica pedido pronto, imprime DANFE.
 
-Login restrito a contas Google Workspace `@berzerk.com.br`.
+Login no **Nexus** (Cognito, Google Workspace `@berzerk.com.br`) — a partir da v0.7.0.
 
 ---
 
@@ -50,9 +50,13 @@ Não é necessário reinstalar manualmente — uma vez instalado, esquece.
 
 Comportamento esperado na **primeira instalação**. Veja passo 2 acima.
 
-### Não consigo logar — `missing OAuth secret`
+### "Login não configurado nesta instalação"
 
-Indica config quebrada no Supabase (provider Google sem Client Secret). Falar com o time de tecnologia — não é falha local.
+O build saiu sem `VITE_COGNITO_DOMAIN`/`VITE_COGNITO_CLIENT_ID`. É falha de release, não da máquina — falar com o time de tecnologia.
+
+### "Etiquetagem indisponível: sessão do Supabase não pôde ser criada"
+
+Só a Etiquetagem e o Rastreio dependem do Supabase (ver "Login" abaixo); Separação e Expedição continuam funcionando. Causas usuais: a conta não tem permissão de desktop no Nexus (`separacao:operate`, `separacao:read` ou `expedicao:operate`) ou o handoff está fora do ar. Tem um "Tentar de novo" na própria tela.
 
 ### "Continue o login no navegador" trava indefinidamente
 
@@ -74,14 +78,14 @@ No canto inferior da tela principal: **"Encerrar sessão"**.
 
 ### Stack
 
-Tauri 2 + React 19 + TypeScript + Vite + Bun. Backend Supabase (projeto `hvnysnfmsndjehjndipc`, gerenciado via Lovable Cloud).
+Tauri 2 + React 19 + TypeScript + Vite + Bun. Login e API no **Nexus** (Cognito + `api-nexus.cloud.berzerk.com.br`); o Supabase (projeto `hvnysnfmsndjehjndipc`, via Lovable Cloud) sobrou só na Etiquetagem/Rastreio, com sessão derivada.
 
 Estrutura:
 
 ```
 src/                     # React app
   components/            # UI (HomeMenu, Login, BatchBrowser, etc)
-  lib/                   # Helpers — auth, deep-link, supabase client, updater, station id
+  lib/                   # Helpers — cognito (login), auth (loopback), supabase-derivada, deep-link, updater
   services/              # Camada de acesso a dados (Supabase queries)
 src-tauri/               # Rust app shell + plugins Tauri
   src/lib.rs             # Entry point — registra plugins
@@ -102,7 +106,8 @@ Requisitos:
 git clone git@github.com:Berzerk-Tech/berzerk-client.git
 cd berzerk-client
 cp .env.example .env
-# Editar .env com VITE_SUPABASE_PUBLISHABLE_KEY (chave anon pública)
+# O .env.example já vem com o Cognito de PROD (e o de DEV comentado).
+# Falta só VITE_SUPABASE_PUBLISHABLE_KEY (chave anon pública) pra Etiquetagem.
 
 bun install
 bun run tauri dev
@@ -112,33 +117,61 @@ Primeiro `tauri dev` demora ~5-10min (compila ~430 crates Rust). Próximas execu
 
 Linux (Arch / Ubuntu / Fedora) também roda — ver [seção Linux](#desenvolver-em-linux) abaixo.
 
-### OAuth em desktop apps
+### Login (Cognito)
 
-O fluxo de login é não-trivial porque Chrome 120+ bloqueia custom schemes (`berzerk-print://`) em redirects sem gesto do usuário. Solução adotada:
+Desde a v0.7.0 quem autentica é o **Nexus**: Authorization Code + PKCE contra o Hosted UI do Cognito (pool staff), indo direto pro Google (`identity_provider=Google`, `prompt=select_account` — mesa compartilhada, o chooser sempre aparece).
+
+O fluxo é não-trivial porque Chrome 120+ bloqueia custom schemes (`berzerk-print://`) em redirects sem gesto do usuário. Solução (a mesma de antes, com outro emissor):
 
 1. App sobe servidor HTTP local em `127.0.0.1:54321` antes de abrir o navegador
-2. `redirectTo` aponta pra esse loopback
-3. Supabase usa `flowType: 'pkce'` (retorna `?code=` em query — `#hash` não chega ao server)
-4. Servidor captura o code, emite evento Tauri, fecha
-5. Frontend chama `supabase.auth.exchangeCodeForSession(code)`
+2. `redirect_uri` aponta pra esse loopback (`/oauth-callback`)
+3. `response_type=code` + PKCE S256 (o `#hash` do implicit não chegaria no server)
+4. Servidor captura o `code`, emite o evento Tauri `oauth-callback-url`, encerra
+5. `src/lib/cognito.ts` troca o code em `/oauth2/token` (sem secret), guarda a sessão em localStorage e renova sozinho pelo `refresh_token`
 
-URLs registradas no Google Cloud OAuth Client + Lovable Cloud URI allow list:
+O **Bearer da API e do WS é o `id_token`** — o access token do Cognito não carrega `email`, e o Nexus usa o e-mail pra provisionar `usuarios`, casar papéis no 1º login e emitir o handoff do desktop.
+
+**Logout** (explícito ou por inatividade) limpa a sessão local, a sessão Supabase derivada e também a do Hosted UI (`/logout` com `logout_uri` no mesmo loopback). Sem esse último passo, o próximo `authorize` na mesma máquina poderia devolver um code da operadora anterior sem passar pelo Google.
+
+**Config** (não são segredos: domínio público e app client nativo sem secret):
+
+| Env | PROD | DEV |
+|---|---|---|
+| `VITE_COGNITO_DOMAIN` | `https://auth.cloud.berzerk.com.br` | `https://auth.dev.cloud.berzerk.com.br` |
+| `VITE_COGNITO_CLIENT_ID` | `3fblnt9gohl76eflpphff13okc` | `ugc706cc2h2ju752najt904g8` |
+| `VITE_COGNITO_REGION` | `us-east-1` | `us-east-1` |
+
+Os client ids saem de `terraform output cognito_desktop_client_id` na stack `nexus/<env>` do `berzerk-infra` (`stacks/nexus/*/auth.tf`, resource `aws_cognito_user_pool_client.desktop`). O callback `http://127.0.0.1:54321/oauth-callback` está cadastrado lá, em callback E logout URLs. No CI as três vêm de `vars` (não `secrets`).
+
+### Sessão Supabase derivada (Etiquetagem)
+
+O Supabase deixou de ser login, mas a **Etiquetagem** e o **Rastreio** ainda falam direto com o projeto legado (`silk_records`, `rfid_print_jobs`, `rfid_epc_inventory`, …) até a fase 3 do corte (`docs/plano-corte-supabase.md` no Nexus). Essas tabelas têm RLS, então precisam de uma sessão GoTrue de verdade — e o app a obtém **do Nexus**, sem segundo login:
 
 ```
-https://hvnysnfmsndjehjndipc.supabase.co/auth/v1/callback    (Google → Supabase)
-http://127.0.0.1:54321/oauth-callback                         (Supabase → app)
+POST {API}/desktop/handoff   (Bearer id_token do Cognito)
+  ← { url: "berzerk://auth?token_hash=<hash>&type=magiclink", expiraEm }
+supabase.auth.verifyOtp({ type: 'magiclink', token_hash })   → sessão
 ```
+
+Roda em silêncio (`src/lib/supabase-derivada.ts`) no boot e logo após o login. Se falhar (503 sem config no Nexus, 403 sem permissão de desktop, rede), **o app segue logado**: Separação e Expedição funcionam e só a Etiquetagem/Rastreio mostram "Etiquetagem indisponível: sessão do Supabase não pôde ser criada", com um "Tentar de novo".
 
 ### Deep link (abrir pelo Nexus)
 
 O Nexus (web) tem um botão "Abrir Berzerk Client" que navega pra uma URL `berzerk://...`. O app abre (ou vem pra frente se já estiver aberto) e fica logado sem o operador digitar nada — pensado pra estação de fábrica onde o navegador roda num monitor e o app noutro.
 
-**Esquema:** `berzerk`, registrado em `plugins.deep-link.desktop.schemes` no `tauri.conf.json`. Duas URLs:
+**Esquema:** `berzerk`, registrado em `plugins.deep-link.desktop.schemes` no `tauri.conf.json`. Três URLs:
 
-- `berzerk://auth?token_hash=<hash>&type=magiclink` — handoff de login.
+- `berzerk://auth?token_hash=<hash>&type=magiclink` — handoff do Nexus (contrato da 0.6.0, mantido).
+- `berzerk://login` — só dispara o login no navegador (novo na 0.7.0).
 - `berzerk://open` — só foca a janela.
 
-**Fluxo de auth:** o Nexus gera o link com `supabase.auth.admin.generateLink({ type: 'magiclink', email })` no MESMO projeto Supabase deste app (`hvnysnfmsndjehjndipc`). O app consome com `supabase.auth.verifyOtp({ type: 'magiclink', token_hash })` (`src/lib/deep-link.ts`) — a sessão resultante é persistida do jeito de sempre (`persistSession: true` no client). Se já havia uma sessão de outro operador, ela é derrubada (`signOut`) antes de verificar o link — como o `token_hash` é opaco, não dá pra saber de antemão se é o mesmo e-mail, e derrubar sempre também garante que um link ruim não deixa uma sessão "logada errado" pra trás. Sucesso → toast "Conectado como `<e-mail>`" e tela inicial; link expirado/já usado → tela de login com "Link expirado ou inválido — entre com o Google.".
+**Fluxo de auth (0.7.0):** quem manda na identidade é o Cognito, então o `token_hash` deixou de ser login e virou só o atalho pra sessão Supabase derivada:
+
+- **sem sessão do Nexus** — o app dispara primeiro o login PKCE no navegador (que já está logado no Nexus/Google, então costuma voltar sozinho, sem digitar nada) e guarda o `token_hash`, aplicando-o assim que a sessão chega;
+- **com sessão do Nexus** — aplica o `token_hash` direto (`verifyOtp`), economizando um handoff;
+- se o link estiver expirado/usado, cai no handoff normal (`POST /desktop/handoff`) antes de desistir.
+
+Sucesso → toast "Conectado como `<e-mail>`" e tela inicial. Falha sem sessão do Nexus → tela de login com "Link expirado ou inválido — entre com o Google."; falha já logado → toast de Etiquetagem indisponível (nada é derrubado).
 
 **Segunda instância (Windows/Linux):** o SO abre uma nova instância do processo passando a URL como argumento de linha de comando. `tauri-plugin-single-instance` (feature `deep-link`) detecta isso, repassa a URL pra instância já rodando — que reemite como o evento `deep-link://new-url` do `tauri-plugin-deep-link`, o mesmo que `onOpenUrl` no front escuta — e a segunda instância se encerra. macOS recebe o evento diretamente do SO, sem precisar do single-instance.
 
@@ -146,7 +179,7 @@ O Nexus (web) tem um botão "Abrir Berzerk Client" que navega pra uma URL `berze
 
 - **Windows:** o instalador NSIS registra `berzerk://` no instalador. Além disso, `app.deep_link().register_all()` roda no `setup()` do app (`src-tauri/src/lib.rs`) toda vez que abre — redundante em produção, mas cobre o `tauri dev`.
 - **Linux (AppImage):** não tem instalador que registre nada — o `register_all()` no `setup()` é quem grava a associação MIME (`xdg-mime`/`~/.local/share/applications`) na primeira vez que o AppImage roda. Se o AppImage não tiver sido integrado ao sistema (ex.: via AppImageLauncher), o registro ainda funciona porque aponta pro caminho onde o binário está sendo executado no momento — mas se o usuário mover o AppImage depois, o registro fica apontando pro lugar errado até o app rodar de novo do novo caminho.
-- Testado localmente em Hyprland com `gio open 'berzerk://open'` / `gio open 'berzerk://auth?token_hash=...&type=magiclink'` — registra e dispara corretamente.
+- Testado localmente em Hyprland com `gio open 'berzerk://open'` / `gio open 'berzerk://login'` / `gio open 'berzerk://auth?token_hash=...&type=magiclink'` — registra e dispara corretamente.
 
 **Exigência de versão:** o Nexus só mostra o botão pra quem já está em ≥ **0.6.0** (primeira versão com deep link). Quem estiver numa versão anterior não tem o esquema registrado — o link cai no browser sem handler.
 
@@ -187,9 +220,10 @@ PCs instalados pegam a atualização sozinhos na próxima abertura.
 |---|---|
 | Chave privada de assinatura | `~/.berzerk-rfid-keys/tauri-updater.key` (Leonardo) + GitHub Actions secret `TAURI_SIGNING_PRIVATE_KEY` |
 | Chave pública (embutida no app) | `src-tauri/tauri.conf.json` em `plugins.updater.pubkey` |
-| OAuth Client | Google Cloud project `berzerk-shared` → APIs & Services → Credentials → "Berzerk Print Station" |
-| Provider Google no Supabase | Lovable Cloud do projeto `separadordelistas` → Auth settings → Google → "Your own credentials" |
-| Redirect URLs allow list | Lovable Cloud → Users → URI allow list |
+| App client do login (desktop) | `berzerk-infra` → `stacks/nexus/<env>/auth.tf` → `aws_cognito_user_pool_client.desktop` (output `cognito_desktop_client_id`) |
+| Pool + Hosted UI + IdP Google | `berzerk-infra` → `stacks/auth/<env>` (`auth.cloud.berzerk.com.br`) |
+| Envs do login no CI | GitHub → repo → Settings → Variables: `VITE_COGNITO_DOMAIN`, `VITE_COGNITO_CLIENT_ID`, `VITE_COGNITO_REGION` |
+| Projeto Supabase (só Etiquetagem/Rastreio) | Lovable Cloud do projeto `separadordelistas` (`hvnysnfmsndjehjndipc`) |
 
 ### Desenvolver em Linux
 
