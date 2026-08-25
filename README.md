@@ -81,7 +81,7 @@ Estrutura:
 ```
 src/                     # React app
   components/            # UI (HomeMenu, Login, BatchBrowser, etc)
-  lib/                   # Helpers — auth, supabase client, updater, station id
+  lib/                   # Helpers — auth, deep-link, supabase client, updater, station id
   services/              # Camada de acesso a dados (Supabase queries)
 src-tauri/               # Rust app shell + plugins Tauri
   src/lib.rs             # Entry point — registra plugins
@@ -128,6 +128,33 @@ URLs registradas no Google Cloud OAuth Client + Lovable Cloud URI allow list:
 https://hvnysnfmsndjehjndipc.supabase.co/auth/v1/callback    (Google → Supabase)
 http://127.0.0.1:54321/oauth-callback                         (Supabase → app)
 ```
+
+### Deep link (abrir pelo Nexus)
+
+O Nexus (web) tem um botão "Abrir Berzerk Client" que navega pra uma URL `berzerk://...`. O app abre (ou vem pra frente se já estiver aberto) e fica logado sem o operador digitar nada — pensado pra estação de fábrica onde o navegador roda num monitor e o app noutro.
+
+**Esquema:** `berzerk`, registrado em `plugins.deep-link.desktop.schemes` no `tauri.conf.json`. Duas URLs:
+
+- `berzerk://auth?token_hash=<hash>&type=magiclink` — handoff de login.
+- `berzerk://open` — só foca a janela.
+
+**Fluxo de auth:** o Nexus gera o link com `supabase.auth.admin.generateLink({ type: 'magiclink', email })` no MESMO projeto Supabase deste app (`hvnysnfmsndjehjndipc`). O app consome com `supabase.auth.verifyOtp({ type: 'magiclink', token_hash })` (`src/lib/deep-link.ts`) — a sessão resultante é persistida do jeito de sempre (`persistSession: true` no client). Se já havia uma sessão de outro operador, ela é derrubada (`signOut`) antes de verificar o link — como o `token_hash` é opaco, não dá pra saber de antemão se é o mesmo e-mail, e derrubar sempre também garante que um link ruim não deixa uma sessão "logada errado" pra trás. Sucesso → toast "Conectado como `<e-mail>`" e tela inicial; link expirado/já usado → tela de login com "Link expirado ou inválido — entre com o Google.".
+
+**Segunda instância (Windows/Linux):** o SO abre uma nova instância do processo passando a URL como argumento de linha de comando. `tauri-plugin-single-instance` (feature `deep-link`) detecta isso, repassa a URL pra instância já rodando — que reemite como o evento `deep-link://new-url` do `tauri-plugin-deep-link`, o mesmo que `onOpenUrl` no front escuta — e a segunda instância se encerra. macOS recebe o evento diretamente do SO, sem precisar do single-instance.
+
+**Registro do protocolo:**
+
+- **Windows:** o instalador NSIS registra `berzerk://` no instalador. Além disso, `app.deep_link().register_all()` roda no `setup()` do app (`src-tauri/src/lib.rs`) toda vez que abre — redundante em produção, mas cobre o `tauri dev`.
+- **Linux (AppImage):** não tem instalador que registre nada — o `register_all()` no `setup()` é quem grava a associação MIME (`xdg-mime`/`~/.local/share/applications`) na primeira vez que o AppImage roda. Se o AppImage não tiver sido integrado ao sistema (ex.: via AppImageLauncher), o registro ainda funciona porque aponta pro caminho onde o binário está sendo executado no momento — mas se o usuário mover o AppImage depois, o registro fica apontando pro lugar errado até o app rodar de novo do novo caminho.
+- Testado localmente em Hyprland com `gio open 'berzerk://open'` / `gio open 'berzerk://auth?token_hash=...&type=magiclink'` — registra e dispara corretamente.
+
+**Exigência de versão:** o Nexus só mostra o botão pra quem já está em ≥ **0.6.0** (primeira versão com deep link). Quem estiver numa versão anterior não tem o esquema registrado — o link cai no browser sem handler.
+
+**Limitações conhecidas:**
+
+- **Foco de janela no Linux/Wayland:** `berzerk://open` chama `unminimize()` + `show()` + `setFocus()`, mas compositores wlroots (testado no Hyprland) podem recusar o "roubo" de foco de teclado de um app já em primeiro plano — a janela é levantada/desminimizada mas o teclado pode continuar na janela anterior até o operador clicar. No Windows isso não costuma acontecer.
+- **AppImage movido/renomeado** depois do primeiro registro: ver nota acima — precisa rodar o app uma vez do novo caminho pra reregistrar.
+- Este projeto não builda AppImage no CI ainda (workflow builda só Windows — ver seção abaixo), então hoje o deep link em produção só está coberto no Windows; a cobertura Linux é só pra quem builda/roda localmente.
 
 ### Lançar uma nova versão
 

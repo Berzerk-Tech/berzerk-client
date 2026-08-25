@@ -2,6 +2,7 @@ import { useEffect, useState, type CSSProperties, type ReactNode } from "react";
 import type { Session } from "@supabase/supabase-js";
 import { supabase } from "./lib/supabase";
 import { handleOAuthCallback, listenForOAuthCallback } from "./lib/auth";
+import { initDeepLinks, type DeepLinkAuthResult } from "./lib/deep-link";
 import { checkForUpdate, type AvailableUpdate } from "./lib/updater";
 import { getStationShortId } from "./lib/station";
 import { Login } from "./components/Login";
@@ -12,6 +13,7 @@ import { PieceTrace } from "./components/PieceTrace";
 import { Separacao } from "./components/Separacao";
 import { SettingsPlaceholder } from "./components/SettingsPlaceholder";
 import { UpdateBanner } from "./components/UpdateBanner";
+import { Toast } from "./components/Toast";
 import { IdleSessionGuard } from "./components/IdleSessionGuard";
 import { RfidProvider } from "./contexts/RfidContext";
 
@@ -21,6 +23,9 @@ export default function App() {
   const [screen, setScreen] = useState<Screen>("home");
   const [update, setUpdate] = useState<AvailableUpdate | null>(null);
   const [updateDismissed, setUpdateDismissed] = useState(false);
+  const [toast, setToast] = useState<string | null>(null);
+  // Mensagem de um deep link berzerk://auth que falhou — repassada pro Login.
+  const [deepLinkError, setDeepLinkError] = useState<string | null>(null);
 
   useEffect(() => {
     supabase.auth.getSession().then(({ data }) => {
@@ -38,6 +43,19 @@ export default function App() {
       if (error) console.error("OAuth callback falhou:", error);
     });
 
+    // Handoff de login vindo do Nexus: berzerk://auth (magic link) e berzerk://open.
+    const stopNexusHandoff = initDeepLinks({
+      onAuthResult: (result: DeepLinkAuthResult) => {
+        if (result.kind === "success") {
+          setDeepLinkError(null);
+          setScreen("home");
+          setToast(`Conectado como ${result.email}`);
+        } else {
+          setDeepLinkError(result.message);
+        }
+      },
+    });
+
     // Check de atualização 5s após o boot pra não competir com auth/sessão
     const updateTimer = setTimeout(async () => {
       try {
@@ -51,6 +69,7 @@ export default function App() {
     return () => {
       sub.subscription.unsubscribe();
       stopDeepLink();
+      stopNexusHandoff();
       clearTimeout(updateTimer);
     };
   }, []);
@@ -77,7 +96,7 @@ export default function App() {
       </div>
     );
   } else if (!session) {
-    content = withBanner(<Login />);
+    content = withBanner(<Login deepLinkError={deepLinkError} />);
   } else {
     const email = session.user.email ?? "(sem email)";
     const stationShortId = getStationShortId();
@@ -96,6 +115,7 @@ export default function App() {
   return (
     <RfidProvider>
       {session && <IdleSessionGuard />}
+      {toast && <Toast message={toast} onDismiss={() => setToast(null)} />}
       {content}
     </RfidProvider>
   );
