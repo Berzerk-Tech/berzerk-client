@@ -13,10 +13,10 @@
 //
 // A sessão em si é do NEXUS (Cognito), então "derrubar" = `sair()` do Cognito
 // — que também encerra a sessão do Hosted UI no navegador, senão a próxima
-// operadora entraria com a conta da anterior sem passar pelo Google. A sessão
-// Supabase derivada (Etiquetagem) cai junto.
+// operadora entraria com a conta da anterior sem passar pelo Google. Desde a
+// 0.8.0 não há mais sessão Supabase derivada para cair junto: a Etiquetagem
+// fala com a API do Nexus.
 
-import { supabase } from "./supabase";
 import { sair } from "./cognito";
 
 let lastActivity = Date.now();
@@ -88,12 +88,6 @@ export function forceLogout(reason: LogoutReason): Promise<void> {
     try {
       await sair();
     } finally {
-      // A sessão Supabase é derivada: sem a do Nexus ela não pode sobreviver.
-      try {
-        await supabase.auth.signOut();
-      } catch {
-        /* sem sessão Supabase ou GoTrue fora: nada a fazer */
-      }
       inFlight = null;
     }
   })();

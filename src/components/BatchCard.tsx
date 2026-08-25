@@ -1,7 +1,10 @@
 import { useState, type CSSProperties } from "react";
 import type { RfidPrintJobStatus } from "../services/printJobs";
-import type { ResolvedBatch } from "../services/batches";
-import type { EanSource } from "../services/ean13Lookup";
+import {
+  MOTIVO_BLOQUEIO_LABEL,
+  type EanSource,
+  type ResolvedBatch,
+} from "../services/batches";
 
 export type CardState =
   | { kind: "idle" }
@@ -18,30 +21,22 @@ type Props = {
   onDiscardTest?: () => void;
   /** True quando o lote tem impressão de teste pendente pra limpar. */
   hasTest?: boolean;
-  /**
-   * Dispara um re-resolve do lote forçando o fallback do Shopify. Disponível
-   * quando o load inicial pulou a edge function por performance e ainda tem
-   * tamanhos sem EAN local (`resolved.shopifyFallbackAvailable === true`).
-   */
-  onSearchShopify?: (resolved: ResolvedBatch) => void;
-  /** True enquanto o re-resolve via Shopify tá em voo pra esse lote. */
-  searchingShopify?: boolean;
 };
 
 const STATUS_LABEL: Record<RfidPrintJobStatus, string> = {
-  queued: "Pronto",
-  printing: "Imprimindo…",
-  done: "Concluído",
-  failed: "Falhou",
-  cancelled: "Cancelado",
+  na_fila: "Pronto",
+  imprimindo: "Imprimindo…",
+  concluido: "Concluído",
+  falhou: "Falhou",
+  cancelado: "Cancelado",
 };
 
 const STATUS_STYLE: Record<RfidPrintJobStatus, CSSProperties> = {
-  queued: { background: "var(--success-bg)", color: "var(--success-text)", borderColor: "var(--success-border)" },
-  printing: { background: "var(--info-bg)", color: "var(--info-text)", borderColor: "var(--info-border)" },
-  done: { background: "var(--bg-input)", color: "var(--text-secondary)", borderColor: "var(--border)" },
-  failed: { background: "var(--danger-bg)", color: "var(--danger-text)", borderColor: "var(--danger-border)" },
-  cancelled: { background: "var(--bg-input)", color: "var(--text-muted)", borderColor: "var(--border)" },
+  na_fila: { background: "var(--success-bg)", color: "var(--success-text)", borderColor: "var(--success-border)" },
+  imprimindo: { background: "var(--info-bg)", color: "var(--info-text)", borderColor: "var(--info-border)" },
+  concluido: { background: "var(--bg-input)", color: "var(--text-secondary)", borderColor: "var(--border)" },
+  falhou: { background: "var(--danger-bg)", color: "var(--danger-text)", borderColor: "var(--danger-border)" },
+  cancelado: { background: "var(--bg-input)", color: "var(--text-muted)", borderColor: "var(--border)" },
 };
 
 function aggregateGrade(items: Array<{ size: string; quantity: number }>) {
@@ -58,31 +53,22 @@ export function BatchCard({
   onPrint,
   onDiscardTest,
   hasTest,
-  onSearchShopify,
-  searchingShopify,
 }: Props) {
-  const {
-    batch,
-    sources,
-    missingSizes,
-    isPrintable,
-    shopifyTitle,
-    shopifyColor,
-    shopifyFallbackAvailable,
-  } = resolved;
-  const title = shopifyTitle ?? batch.design_name ?? batch.batch_code;
-  const color = shopifyColor ?? batch.shirt_color;
+  const { batch, sources, missingSizes, isPrintable, catalogTitle, catalogColor, motivo } =
+    resolved;
+  const title = catalogTitle ?? batch.design_name ?? batch.batch_code;
+  const color = catalogColor ?? batch.shirt_color;
 
   const isPrinting = state.kind === "printing";
   const isFailed = state.kind === "failed";
 
   let badge: { label: string; style: CSSProperties };
   if (isPrinting) {
-    badge = { label: "IMPRIMINDO", style: STATUS_STYLE.printing };
+    badge = { label: "IMPRIMINDO", style: STATUS_STYLE.imprimindo };
   } else if (isFailed) {
-    badge = { label: "FALHOU", style: STATUS_STYLE.failed };
+    badge = { label: "FALHOU", style: STATUS_STYLE.falhou };
   } else if (isPrintable) {
-    badge = { label: STATUS_LABEL.queued.toUpperCase(), style: STATUS_STYLE.queued };
+    badge = { label: STATUS_LABEL.na_fila.toUpperCase(), style: STATUS_STYLE.na_fila };
   } else {
     badge = {
       label: `FALTAM ${missingSizes.length}`,
@@ -150,23 +136,21 @@ export function BatchCard({
 
         {!isPrintable && !isFailed && missingSizes.length > 0 && (
           <div style={hintBox}>
-            <span>
-              Faltando EAN13 nos tamanhos:{" "}
-              <strong style={{ color: "var(--warning-text)" }}>
-                {missingSizes.join(", ")}
-              </strong>
-            </span>
-            {shopifyFallbackAvailable && onSearchShopify && (
-              <button
-                onClick={() =>
-                  !searchingShopify && onSearchShopify(resolved)
-                }
-                disabled={searchingShopify}
-                style={searchingShopify ? shopifyBtnBusy : shopifyBtn}
-                title="Consultar variants do Shopify pra preencher EANs faltantes"
-              >
-                {searchingShopify ? "Buscando…" : "Buscar no Shopify"}
-              </button>
+            {/*
+              Duas causas, dois consertos, duas pessoas: sem vínculo é a
+              coordenação que amarra o lote ao produto; sem EAN é cadastro no
+              catálogo. Dizer só "faltando info" mandava a operadora chamar
+              alguém sem saber o quê.
+            */}
+            {motivo === "sem_vinculo" ? (
+              <span>{MOTIVO_BLOQUEIO_LABEL.sem_vinculo}</span>
+            ) : (
+              <span>
+                Faltando EAN13 nos tamanhos:{" "}
+                <strong style={{ color: "var(--warning-text)" }}>
+                  {missingSizes.join(", ")}
+                </strong>
+              </span>
             )}
           </div>
         )}
@@ -232,19 +216,20 @@ function Thumbnail({ src, alt }: { src: string | null; alt: string }) {
   );
 }
 
+/**
+ * Cor da pílula do tamanho: tem EAN ou não tem.
+ *
+ * Antes havia DUAS cores de "tem EAN" — `local` (o `unified_products` do
+ * industrial) e `shopify` (o fallback na edge `shopify-analytics`) —, e a
+ * distinção existia porque a segunda era lenta e falhava. Com o catálogo do
+ * nexus há uma fonte só, e uma cor a menos para a operadora interpretar.
+ */
 function pillStyleFor(src: EanSource | undefined): CSSProperties {
-  if (src === "local") {
+  if (src === "catalogo") {
     return {
       ...pillBase,
       background: "var(--pill-local-bg)",
       color: "var(--pill-local-text)",
-    };
-  }
-  if (src === "shopify") {
-    return {
-      ...pillBase,
-      background: "var(--pill-shopify-bg)",
-      color: "var(--pill-shopify-text)",
     };
   }
   return {
@@ -395,26 +380,6 @@ const hintBox: CSSProperties = {
   justifyContent: "space-between",
   gap: 10,
   flexWrap: "wrap",
-};
-
-const shopifyBtn: CSSProperties = {
-  background: "var(--bg-card)",
-  color: "var(--text)",
-  border: "1px solid var(--border-strong)",
-  borderRadius: 6,
-  padding: "4px 10px",
-  fontSize: 11,
-  fontWeight: 600,
-  letterSpacing: 0.2,
-  cursor: "pointer",
-  whiteSpace: "nowrap",
-  flexShrink: 0,
-};
-
-const shopifyBtnBusy: CSSProperties = {
-  ...shopifyBtn,
-  opacity: 0.6,
-  cursor: "wait",
 };
 
 const footer: CSSProperties = {

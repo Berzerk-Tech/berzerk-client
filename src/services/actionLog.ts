@@ -1,46 +1,50 @@
-import { supabase } from "../lib/supabase";
+import { apiRequest } from "../lib/api";
 import { getStationId } from "../lib/station";
 
 /**
- * Log de auditoria das ações do desktop em `rfid_action_logs` (Supabase
- * industrial — ver migrations/20260723_rfid_action_logs.sql). Na virada pro
- * nexus, só este arquivo muda de destino.
+ * Log de auditoria das ações do desktop.
  *
- * Fire-and-forget: log NUNCA derruba a ação que ele registra. Falha (tabela
- * ainda não criada, RLS, rede) vira console.warn e a vida segue.
+ * Era `rfid_action_logs` no Supabase industrial; virou `POST /etiquetagem/log`
+ * no nexus, que grava na tabela `auditoria` com `acao = 'etiquetagem.<x>'`
+ * (fase 3 do `docs/plano-corte-supabase.md`).
+ *
+ * A maior parte dos desfechos JÁ é auditada pelo próprio endpoint que os
+ * executa (criar job, concluir, carimbar o lote). O que só existe aqui são os
+ * eventos que acontecem inteiramente NESTA MÁQUINA — a chamada à iTAG e à
+ * impressora — e que, sem isto, não deixariam rastro nenhum:
+ * `movimentar_falhou` é o caso principal.
+ *
+ * Fire-and-forget: log NUNCA derruba a ação que ele registra. Falha (rede,
+ * permissão) vira console.warn e a vida segue.
  */
 export type ActionLogInput = {
   action:
-    | "print_done"
-    | "print_partial"
-    | "print_failed"
-    | "print_test"
-    | "reprint_queue"
+    | "impressao_concluida"
+    | "impressao_parcial"
+    | "impressao_falhou"
+    | "impressao_teste"
+    | "reimpressao_enfileirada"
     | "movimentar"
-    | "movimentar_failed"
-    | "discard_test";
+    | "movimentar_falhou"
+    | "descartar_teste";
   batchId?: string | null;
-  batchCode?: string | null;
   jobId?: string | null;
-  operatorId: string;
-  operatorEmail?: string | null;
   details?: Record<string, unknown>;
 };
 
 export function logAction(input: ActionLogInput): void {
   void (async () => {
     try {
-      const { error } = await supabase.from("rfid_action_logs").insert({
-        action: input.action,
-        batch_id: input.batchId ?? null,
-        batch_code: input.batchCode ?? null,
-        job_id: input.jobId ?? null,
-        operator_id: input.operatorId,
-        operator_email: input.operatorEmail ?? null,
-        station_id: getStationId(),
-        details: input.details ?? null,
+      await apiRequest<void>("/etiquetagem/log", {
+        method: "POST",
+        body: {
+          acao: input.action,
+          loteId: input.batchId ?? null,
+          jobId: input.jobId ?? null,
+          estacaoId: getStationId(),
+          detalhes: input.details ?? null,
+        },
       });
-      if (error) throw error;
     } catch (e) {
       console.warn(`[actionLog] falha ao logar ${input.action}:`, e);
     }

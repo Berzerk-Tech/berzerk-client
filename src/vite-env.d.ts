@@ -1,13 +1,11 @@
 /// <reference types="vite/client" />
 
 interface ImportMetaEnv {
-  readonly VITE_SUPABASE_URL: string;
-  readonly VITE_SUPABASE_PUBLISHABLE_KEY: string;
   /** Base URL da separacao-api (nexus). Ex.: https://api-industrial.cloud.berzerk.com.br */
   readonly VITE_SEPARACAO_API_URL?: string;
   /** Liga o modo shadow da Separação (roda em paralelo ao pós-venda, sem virar sistema-de-registro). */
   readonly VITE_SEPARACAO_SHADOW?: string;
-  /** WebSocket do nexus (push de queue.changed). */
+  /** WebSocket do nexus (push de `queue.changed` e `print-jobs.changed`). */
   readonly VITE_SEPARACAO_WS_URL?: string;
   /** Hosted UI do Cognito do Nexus. Ex.: https://auth.cloud.berzerk.com.br */
   readonly VITE_COGNITO_DOMAIN?: string;

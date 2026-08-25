@@ -6,7 +6,6 @@ import {
   type SVGProps,
 } from "react";
 import { sair } from "../lib/cognito";
-import { encerrarSessaoSupabase } from "../lib/supabase-derivada";
 import { getStoredTheme, setTheme, type Theme } from "../lib/theme";
 import { getDeviceConfig } from "../lib/devices";
 import { getMe, canOperateSeparacao } from "../services/orders";
@@ -150,9 +149,8 @@ export function HomeMenu({ email, onEnter }: Props) {
   );
 }
 
-/** Logout explícito: derruba a sessão local, a derivada e a do Hosted UI. */
+/** Logout explícito: derruba a sessão local e a do Hosted UI. */
 async function encerrarSessao(): Promise<void> {
-  await encerrarSessaoSupabase();
   await sair();
 }
 

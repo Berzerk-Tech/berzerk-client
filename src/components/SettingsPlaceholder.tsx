@@ -24,7 +24,6 @@ import { useRfid } from "../contexts/RfidContext";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { signInWithGoogle } from "../lib/auth";
 import { getSessaoSync, onSessaoChange, sair } from "../lib/cognito";
-import { encerrarSessaoSupabase } from "../lib/supabase-derivada";
 import { listSerialPorts, describePort, type SerialPortInfo } from "../lib/usb";
 import {
   getIprintConfig,
@@ -154,7 +153,6 @@ function SessionCard() {
   // Encerra a sessão (local + Hosted UI) e reabre o login com
   // prompt=select_account: um clique pra trocar de conta na mesa compartilhada.
   const switchUser = async () => {
-    await encerrarSessaoSupabase();
     await sair({ encerrarNoNavegador: false });
     await signInWithGoogle();
   };

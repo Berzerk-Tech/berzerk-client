@@ -28,6 +28,16 @@ type LookupResult = {
 // Janela de leitura do leitor: limpa buffer, lê por READ_MS, para.
 const READ_MS = 900;
 
+/**
+ * Formato do EPC — o MESMO que a API cobra (hex, 16 a 64 caracteres).
+ *
+ * Validar aqui não é redundância: o campo aceita digitação, e sem isto um
+ * caractere trocado voltava do servidor como um `validation_error` cru do zod,
+ * ilegível na tela. A checagem local troca isso por uma frase e economiza a
+ * ida à rede.
+ */
+const EPC_RE = /^[0-9A-F]{16,64}$/;
+
 const SITUACAO_LABEL: Record<number, string> = {
   2: "Impresso",
 };
@@ -45,6 +55,14 @@ export function PieceTrace({ onBack }: Props) {
     );
     if (queried.length === 0) {
       setError("Nenhum EPC pra consultar.");
+      return;
+    }
+    const invalidos = queried.filter((e) => !EPC_RE.test(e));
+    if (invalidos.length > 0) {
+      setError(
+        `EPC inválido: ${invalidos.join(", ")}. O EPC é hexadecimal (0-9, A-F), com 16 a 64 caracteres.`,
+      );
+      setResult(null);
       return;
     }
     setError(null);
@@ -172,8 +190,8 @@ function Results({ result }: { result: LookupResult }) {
       {result.rows.map((r) => (
         <article key={r.epc} style={pieceCard}>
           <div style={pieceTopRow}>
-            <span style={loteCode}>{r.batch_code}</span>
-            <span style={sizeBadge}>{r.size}</span>
+            <span style={loteCode}>{r.batch_code ?? "—"}</span>
+            <span style={sizeBadge}>{r.size ?? "—"}</span>
             {r.moved_at && <span style={movedBadge}>Movimentado</span>}
           </div>
           <div style={pieceGrid}>
@@ -183,7 +201,12 @@ function Results({ result }: { result: LookupResult }) {
               label="Situação"
               value={SITUACAO_LABEL[r.situacao_atual] ?? `cód ${r.situacao_atual}`}
             />
-            <Field label="Impresso em" value={formatDateTime(r.printed_at)} />
+            {/* `printed_at` pode ser null nas linhas antigas replicadas do
+                Supabase, que não traziam a data. */}
+            <Field
+              label="Impresso em"
+              value={r.printed_at ? formatDateTime(r.printed_at) : "—"}
+            />
             {r.codigo_inventario_itag != null && (
               <Field label="Inventário iTAG" value={String(r.codigo_inventario_itag)} mono />
             )}
