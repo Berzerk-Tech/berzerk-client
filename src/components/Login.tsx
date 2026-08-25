@@ -5,8 +5,15 @@ import { takeLogoutReason } from "../lib/idleSession";
 import { BerzerkLogo } from "./BerzerkLogo";
 import { AmbientBackground } from "./AmbientBackground";
 
-export function Login() {
-  const [error, setError] = useState<string | null>(null);
+type Props = {
+  /** Mensagem de um deep link de auth que falhou (link expirado/usado) — App.tsx repassa. */
+  deepLinkError?: string | null;
+};
+
+export function Login({ deepLinkError }: Props = {}) {
+  // Semeia com o erro do deep link (se houver) — depois disso é só o estado normal
+  // de erro de clique no botão de login.
+  const [error, setError] = useState<string | null>(deepLinkError ?? null);
   const [busy, setBusy] = useState(false);
   const [version, setVersion] = useState<string>("");
   // Motivo do último logout forçado (consumido na leitura — some no próximo login).
@@ -15,6 +22,12 @@ export function Login() {
   useEffect(() => {
     getVersion().then(setVersion).catch(() => setVersion(""));
   }, []);
+
+  // Login pode já estar montado (operadora na tela de login) quando um deep
+  // link de auth falha — o seed no useState só pega o valor inicial.
+  useEffect(() => {
+    if (deepLinkError) setError(deepLinkError);
+  }, [deepLinkError]);
 
   async function handleClick() {
     setError(null);

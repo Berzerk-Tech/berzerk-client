@@ -1,6 +1,6 @@
 [package]
 name = "berzerk-client"
-version = "0.5.13"
+version = "0.6.0"
 description = "Berzerk Client — estação industrial de etiquetagem e expedição"
 authors = ["Berzerk Tech"]
 edition = "2021"
@@ -19,6 +19,10 @@ tauri = { version = "2", features = [] }
 tauri-plugin-opener = "2"
 tauri-plugin-updater = "2"
 tauri-plugin-process = "2"
+# Handoff de login vindo do Nexus (berzerk://auth, berzerk://open) — feature
+# `deep-link` faz a segunda instância repassar a URL pra primeira via evento.
+tauri-plugin-deep-link = "2"
+tauri-plugin-single-instance = { version = "2", features = ["deep-link"] }
 tiny_http = "0.12"
 # native-tls (não rustls): no Windows usa SChannel — mesmo trust store do
 # Chrome — então certs aceitos no browser passam aqui também. Rustls é

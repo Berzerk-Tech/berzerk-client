@@ -10,6 +10,8 @@
     "process:allow-restart",
     "core:window:allow-set-fullscreen",
     "core:window:allow-is-fullscreen",
-    "core:window:allow-set-theme"
+    "core:window:allow-set-theme",
+    "deep-link:default",
+    "deep-link:allow-get-current"
   ]
 }
