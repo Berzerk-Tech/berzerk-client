@@ -50,6 +50,10 @@ export type Order = {
   clienteNome?: string | null;
   dataEmissao?: string | null;
   prioritario?: boolean;
+  /** Quando ELA abriu o card pra conferir (`POST /separacao/:id/iniciar`).
+   *  null/ausente = o servidor ainda pode realocar este pedido pra outra
+   *  estação quando a fila acabar — ver `iniciarSeparacao`. */
+  iniciadoEm?: string | null;
 };
 
 export type ClaimResponse = { order: Order | null };
@@ -261,19 +265,24 @@ export type LoteResponse = {
   fila?: { restantes: number };
 };
 
-/** Quantos pedidos a operadora leva por vez (pedido das separadoras). */
-export const LOTE_PADRAO = 10;
-
 /**
  * Puxa/repõe o LOTE da operadora: IDEMPOTENTE — devolve TODOS os pedidos em
- * aberto dela nessa fila e completa com o que faltar até `quantidade`. É o que
- * divide a fila entre as estações: cada uma enxerga só o próprio lote. Chamar
- * ao entrar na fila e depois de cada complete/release.
+ * aberto dela nessa fila e completa o que faltar até o alvo. Chamar ao entrar
+ * na fila, depois de cada complete/release e no `queue.changed`.
+ *
+ * **Quem decide o tamanho é o SERVIDOR** desde a 0.9.3: a configuração
+ * `separacao_lote_tamanho` (Configurações do Nexus → Separação). O app não
+ * manda mais `quantidade` — mandar seria um teto a mais, e a coordenação
+ * perderia o controle do número sem publicar uma versão do desktop.
+ *
+ * A resposta é o RETRATO ATUAL do lote dela nessa fila, e pode vir MENOR do
+ * que o que ela tinha: quando a fila esgota, o servidor redistribui os pedidos
+ * NÃO INICIADOS entre quem está separando (ver `iniciarSeparacao`). Por isso a
+ * tela substitui a sidebar inteira pela resposta, nunca faz merge.
  */
 export function claimLote(params: {
   mode: SeparationMode;
   sizes: string[];
-  quantidade?: number;
   filters?: QueueFilters;
 }): Promise<LoteResponse> {
   return comModo(params.mode, (mode) =>
@@ -282,7 +291,6 @@ export function claimLote(params: {
       body: {
         mode,
         sizes: params.sizes,
-        quantidade: params.quantidade ?? LOTE_PADRAO,
         ...filtersBody(params.filters),
       },
     }),
@@ -308,6 +316,27 @@ async function loteDegradado(params: {
       ? await claimNextMixed(params.sizes, params.filters)
       : await claimNext(params.sizes, params.filters);
   return { orders: order ? [order] : [] };
+}
+
+/**
+ * Marca no servidor que ELA ABRIU o pedido pra conferir
+ * (`orders.iniciado_em`). É o que trava a redistribuição: quando a fila acaba
+ * e outra estação entra, o servidor só pode tirar dela os pedidos que ainda
+ * NÃO foram iniciados — as peças de um pedido iniciado já estão na bancada.
+ *
+ * Idempotente no servidor (o primeiro carimbo vale) e best-effort aqui: falha
+ * de rede não pode travar a conferência, e a tela repete a chamada quando o
+ * pedido volta pra mesa. 404 = nexus anterior a 26/08 (sem a rota) — o app
+ * segue funcionando, só sem a proteção.
+ */
+export function iniciarSeparacao(orderId: string): Promise<{ id: string; iniciadoEm: string } | null> {
+  return apiRequest<{ id: string; iniciadoEm: string }>(`/separacao/${orderId}/iniciar`, {
+    method: "POST",
+    body: {},
+  }).catch((e: unknown) => {
+    if (e instanceof ApiError && e.status === 404) return null;
+    throw e;
+  });
 }
 
 /**

@@ -27,6 +27,7 @@ import {
   completeSeparacao,
   devolverLote,
   getQueueDates,
+  iniciarSeparacao,
   releaseSeparacao,
   type EpcLookupItem,
   type LiberacaoFaltante,
@@ -183,11 +184,16 @@ export function SeparacaoRunner({ title, kicker, emptyHint, queue, onBack }: Pro
   const rfid = useRfid();
   const [phase, setPhase] = useState<Phase>("loading");
   const [order, setOrder] = useState<Order | null>(null);
-  // LOTE da operadora (0.9.0): ela entra na fila e leva até 10 pedidos que
-  // aparecem SÓ pra ela — a sidebar é o lote, não a fila inteira. Puxar 1 por
-  // vez era o que as separadoras reclamavam no cutover. A divisão da fila
-  // entre as estações É este mecanismo: cada reposição pega o que ainda não
-  // tem dono, então duas mesas nunca disputam o mesmo pedido.
+  // LOTE da operadora (0.9.0): ela entra na fila e leva um punhado de pedidos
+  // que aparecem SÓ pra ela — a sidebar é o lote, não a fila inteira. Puxar 1
+  // por vez era o que as separadoras reclamavam no cutover.
+  //
+  // Desde a 0.9.3 quem decide o TAMANHO é o servidor (configuração
+  // `separacao_lote_tamanho`), e quando a fila esgota ele REDISTRIBUI: uma
+  // estação que entra numa fila vazia recebe metade do lote de quem já estava.
+  // Por isso a resposta do `claimLote` SUBSTITUI a sidebar inteira — ela pode
+  // vir menor. O que ela já abriu pra conferir está protegido pelo
+  // `iniciarSeparacao` (ver o efeito mais abaixo).
   const [lote, setLote] = useState<Order[]>([]);
   /** Pedidos ainda SEM DONO na fila (o "faltam X"). null = servidor não disse. */
   const [restantes, setRestantes] = useState<number | null>(null);
@@ -262,7 +268,16 @@ export function SeparacaoRunner({ title, kicker, emptyHint, queue, onBack }: Pro
         setLote(orders);
         loteRef.current = orders;
         setRestantes(fila?.restantes ?? null);
-        const proximo = (atual && orders.find((o) => o.id === atual.id)) ?? orders[0] ?? null;
+        const aindaMeu = atual ? orders.find((o) => o.id === atual.id) : undefined;
+        // O pedido da mesa SUMIU da resposta: o servidor o redistribuiu pra
+        // outra estação (só acontece com pedido não iniciado — o
+        // `iniciarSeparacao` trava isso — ou se um supervisor destravou).
+        // Nunca deixar ela concluir o que já não é dela: volta pro lote com o
+        // aviso, em vez de mandar um complete que o servidor recusa com 409.
+        if (atual && !aindaMeu) {
+          showNotice("Este pedido foi redistribuído para outra estação. Continue pelo lote.");
+        }
+        const proximo = aindaMeu ?? orders[0] ?? null;
         if (proximo?.id !== atual?.id) resetLeitura();
         setOrder(proximo);
         setPhase(proximo ? "separating" : "empty");
@@ -303,6 +318,41 @@ export function SeparacaoRunner({ title, kicker, emptyHint, queue, onBack }: Pro
       unsubscribe();
     };
   }, [puxarLote]);
+
+  /**
+   * Avisa o servidor que ela ABRIU o pedido pra conferir. É o que impede a
+   * redistribuição de tirar da mesa dela um pedido cujas peças já estão na
+   * bancada: o `POST /separacao/lote` de outra estação só pode levar pedido
+   * SEM `iniciado_em`.
+   *
+   * Uma vez por pedido (o `Set` evita repetir a cada render), best-effort —
+   * falha de rede não trava a conferência, e o id sai do `Set` pra tentativa
+   * acontecer de novo quando a janela voltar ao foco.
+   */
+  const iniciadosRef = useRef<Set<string>>(new Set());
+  const marcarIniciado = useCallback((orderId: string) => {
+    if (iniciadosRef.current.has(orderId)) return;
+    iniciadosRef.current.add(orderId);
+    void iniciarSeparacao(orderId).catch(() => {
+      iniciadosRef.current.delete(orderId);
+    });
+  }, []);
+
+  useEffect(() => {
+    if (!order) return;
+    marcarIniciado(order.id);
+  }, [order, marcarIniciado]);
+
+  // Retentativa no foco: se a marca não subiu (rede caiu), o pedido da mesa
+  // fica exposto à redistribuição até a próxima chance.
+  useEffect(() => {
+    const aoFocar = () => {
+      const ord = orderRef.current;
+      if (ord) marcarIniciado(ord.id);
+    };
+    window.addEventListener("focus", aoFocar);
+    return () => window.removeEventListener("focus", aoFocar);
+  }, [marcarIniciado]);
 
   const allDone = useCallback((ord: Order): boolean => {
     const prog = progressRef.current;
