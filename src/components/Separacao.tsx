@@ -25,13 +25,27 @@ type Props = { onBack: () => void };
  * feito no nexus).
  */
 const QUEUES = ["P", "M", "G", "GG", "XG"] as const;
-type Queue = (typeof QUEUES)[number];
 
-function queueFor(sizeKey: string): Queue | null {
+/**
+ * Sentinela da fila "sem tamanho" — o MESMO valor que o nexus define em
+ * `@berzerk/contracts` (`SEM_TAMANHO`) e aceita em `sizes`. São os pedidos
+ * cujo tamanho a ingestão não reconheceu: no banco, `predominant_size IS NULL`.
+ */
+const SEM_TAMANHO = "SEM TAMANHO";
+
+/**
+ * Filas selecionáveis: as 5 fixas + "Sem tamanho". A sexta fica FORA das 5
+ * bancadas (não tem bancada própria) e o tile só aparece quando tem pedido —
+ * mas ela precisa existir: sem ela, pedido com tamanho não reconhecido ficava
+ * invisível E inclaimável pra sempre, e a fila nunca esvaziava.
+ */
+type Queue = (typeof QUEUES)[number] | typeof SEM_TAMANHO;
+
+function queueFor(sizeKey: string): Queue {
   const s = sizeKey.trim().toUpperCase();
   if ((QUEUES as readonly string[]).includes(s)) return s as Queue;
   if (s === "PP") return "P";
-  if (s === "SEM TAMANHO") return null;
+  if (s === SEM_TAMANHO) return SEM_TAMANHO;
   return "XG";
 }
 
@@ -50,6 +64,8 @@ export function Separacao({ onBack }: Props) {
     mode: QueueMode;
     /** Tamanhos REAIS do bucket no momento do confirm (o claim usa esta lista). */
     sizes: string[];
+    /** Entrou por "Retomar" com uma lista de picking já impressa na mão. */
+    retomandoLista?: boolean;
   } | null>(null);
   const [counts, setCounts] = useState<QueueCounts | null>(null);
   const [authError, setAuthError] = useState<string | null>(null);
@@ -125,6 +141,7 @@ export function Separacao({ onBack }: Props) {
           size: confirmed.size,
           sizes: confirmed.sizes,
         }}
+        retomandoLista={confirmed.retomandoLista}
         onBack={() => setConfirmed(null)}
       />
     );
@@ -133,13 +150,10 @@ export function Separacao({ onBack }: Props) {
   const recordFor = (m: QueueMode): Record<string, number> =>
     (m === "mistos" ? counts?.mixedBySize : counts?.sizes) ?? {};
 
-  // Contadores agrupados nas 5 filas fixas (SEM TAMANHO fica de fora do total).
+  // Contadores agrupados nas filas (as 5 fixas + "Sem tamanho").
   const bucketed = (m: QueueMode): Record<Queue, number> => {
-    const out: Record<Queue, number> = { P: 0, M: 0, G: 0, GG: 0, XG: 0 };
-    for (const [k, v] of Object.entries(recordFor(m))) {
-      const q = queueFor(k);
-      if (q) out[q] += v;
-    }
+    const out: Record<Queue, number> = { P: 0, M: 0, G: 0, GG: 0, XG: 0, [SEM_TAMANHO]: 0 };
+    for (const [k, v] of Object.entries(recordFor(m))) out[queueFor(k)] += v;
     return out;
   };
   const countFor = (q: Queue, m: QueueMode): number => bucketed(m)[q];
@@ -155,6 +169,9 @@ export function Separacao({ onBack }: Props) {
   };
 
   const effectiveSelected = selected as Queue | null;
+  // O tile "Sem tamanho" só aparece quando existe pedido órfão — do contrário
+  // é uma sexta caixa vazia disputando espaço com as 5 bancadas reais.
+  const semTamanho = countFor(SEM_TAMANHO, mode);
 
   /** Fila de onde veio o lote em aberto (pelo 1º pedido) + tamanhos reais. */
   const filaEmAberto = (() => {
@@ -175,6 +192,14 @@ export function Separacao({ onBack }: Props) {
     );
     return { size: q, mode: m, sizes };
   })();
+
+  /**
+   * Pedidos com LISTA de picking impressa. Eles são imunes ao janitor, então
+   * uma lista que ficou de ontem só sai daqui se alguém agir — este banner é
+   * essa saída (e o motivo de `meus-pedidos` marcar `listaDeOutroDia`).
+   */
+  const comLista = emAberto.filter((o) => !!o.listaEm);
+  const listaDeOutroDia = comLista.find((o) => o.listaDeOutroDia);
 
   const devolverEmAberto = async () => {
     setDevolvendo(true);
@@ -223,14 +248,36 @@ export function Separacao({ onBack }: Props) {
       {authError && <div style={mesaDownBanner}>{authError}</div>}
 
       {filaEmAberto && (
-        <div style={retomarBanner}>
-          Você tem <strong>{emAberto.length}</strong>{" "}
-          {emAberto.length === 1 ? "pedido em aberto" : "pedidos em aberto"} na fila{" "}
-          <strong>
-            {filaEmAberto.size} {filaEmAberto.mode === "mistos" ? "Mistos" : "Puro"}
-          </strong>
-          .{" "}
-          <button style={retomarBtn} onClick={() => setConfirmed(filaEmAberto)}>
+        <div style={listaDeOutroDia ? retomarBannerAlerta : retomarBanner}>
+          {comLista.length > 0 ? (
+            <>
+              🖨 Você tem uma <strong>lista de {filaEmAberto.mode === "mistos" ? "mistos" : "pedidos"}</strong>{" "}
+              {listaDeOutroDia ? (
+                <>
+                  de <strong>{fmtDia(listaDeOutroDia.listaEm!)}</strong>
+                </>
+              ) : (
+                "de hoje"
+              )}{" "}
+              com <strong>{comLista.length}</strong>{" "}
+              {comLista.length === 1 ? "pedido" : "pedidos"} reservados.{" "}
+            </>
+          ) : (
+            <>
+              Você tem <strong>{emAberto.length}</strong>{" "}
+              {emAberto.length === 1 ? "pedido em aberto" : "pedidos em aberto"} na fila{" "}
+              <strong>
+                {filaEmAberto.size} {filaEmAberto.mode === "mistos" ? "Mistos" : "Puro"}
+              </strong>
+              .{" "}
+            </>
+          )}
+          <button
+            style={retomarBtn}
+            onClick={() =>
+              setConfirmed({ ...filaEmAberto, retomandoLista: comLista.length > 0 })
+            }
+          >
             Retomar
           </button>
           <button style={devolverBtn} onClick={() => void devolverEmAberto()} disabled={devolvendo}>
@@ -278,6 +325,20 @@ export function Separacao({ onBack }: Props) {
           ))}
         </div>
 
+        {semTamanho > 0 && (
+          <div style={semTamanhoWrap}>
+            <QueueTile
+              label="Sem tamanho"
+              count={semTamanho}
+              selected={effectiveSelected === SEM_TAMANHO}
+              onClick={() => setSelected((p) => (p === SEM_TAMANHO ? null : SEM_TAMANHO))}
+            />
+            <span style={semTamanhoHint}>
+              Pedidos cujo tamanho o sistema não reconheceu. Sem esta fila eles nunca sairiam.
+            </span>
+          </div>
+        )}
+
         <button
           onClick={() =>
             effectiveSelected &&
@@ -298,6 +359,14 @@ export function Separacao({ onBack }: Props) {
       </main>
     </div>
   );
+}
+
+/** ISO → `DD/MM` no fuso local (a data que a operadora enxerga no galpão). */
+function fmtDia(iso: string): string {
+  const d = new Date(iso);
+  return Number.isNaN(d.getTime())
+    ? iso
+    : d.toLocaleDateString("pt-BR", { day: "2-digit", month: "2-digit" });
 }
 
 function QueueTile({
@@ -389,6 +458,13 @@ const retomarBanner: CSSProperties = {
   fontSize: 13,
 };
 
+/** Lista que atravessou a virada do dia: pede decisão, não só informa. */
+const retomarBannerAlerta: CSSProperties = {
+  ...retomarBanner,
+  background: "var(--warning-bg)",
+  color: "var(--warning-text)",
+};
+
 const retomarBtn: CSSProperties = {
   padding: "5px 14px",
   background: "var(--info-text)",
@@ -462,6 +538,22 @@ const lead: CSSProperties = {
 
 /** 5 filas, SEMPRE numa linha só (pedido do Victor) — as colunas encolhem
     juntas em tela menor em vez de quebrar. */
+/** A sexta fila fica fora da fileira das 5 bancadas, e menor. */
+const semTamanhoWrap: CSSProperties = {
+  display: "flex",
+  flexDirection: "column",
+  alignItems: "center",
+  gap: 8,
+  width: 260,
+};
+
+const semTamanhoHint: CSSProperties = {
+  fontSize: 11,
+  color: "var(--text-faint)",
+  textAlign: "center",
+  lineHeight: 1.4,
+};
+
 const grid: CSSProperties = {
   display: "grid",
   gridTemplateColumns: "repeat(5, minmax(0, 210px))",

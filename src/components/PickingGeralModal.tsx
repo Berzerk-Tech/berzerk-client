@@ -13,6 +13,8 @@ import { gerarPickingPdf, type PickingSecao } from "../lib/pickingPdf";
 import { printPdfBase64 } from "../lib/printer";
 import {
   getQueueProducts,
+  marcarListaImpressa,
+  type Order,
   type QueueFilters,
   type QueueProduct,
   type SeparationMode,
@@ -36,18 +38,88 @@ type Secao = {
   pedidos: number;
 };
 
+/** De onde sai o agregado: o LOTE dela (padrão) ou a fila inteira. */
+type Escopo = "lote" | "fila";
+
 type Props = {
-  queue: { mode: SeparationMode; size: string };
+  queue: { mode: SeparationMode; size: string; sizes: string[] };
   /** Data de emissão escolhida (YYYY-MM-DD) ou null = todas as datas. */
   data: string | null;
   /** Filtros de produto ativos — o picking mostra o que a fila mostra. */
   filters: QueueFilters;
+  /** O LOTE da operadora — a folha que ela leva pra prateleira sai DAQUI. */
+  lote: Order[];
   /** Primeiro nome de quem está operando (título da folha). */
   operadora: string;
+  /** Avisa o runner que a lista do lote foi impressa (prende os pedidos). */
+  onListaImpressa?: (orderIds: string[]) => void;
   onClose: () => void;
 };
 
-export function PickingGeralModal({ queue, data, filters, operadora, onClose }: Props) {
+/**
+ * Agrega os itens do LOTE (já em memória — nenhuma ida à rede) na mesma forma
+ * que `GET /separacao/queue-products` devolve: uma linha por (nome, tamanho,
+ * ean) nos mistos, por nome nos puros.
+ *
+ * É este o agregado que a operadora precisa: o Picking Geral vinha somando a
+ * FILA INTEIRA (637 pedidos) quando a folha que ela leva pra prateleira é a
+ * dos 10 (ou 50) que estão na mesa dela.
+ */
+function agregarLote(lote: Order[], mode: SeparationMode): QueueProduct[] {
+  const acc = new Map<
+    string,
+    { nome: string; tamanho: string | null; ean: string | null; imagemUrl: string | null; quantidade: number; orderIds: Set<string> }
+  >();
+  for (const pedido of lote) {
+    for (const it of pedido.items) {
+      const nome = it.nome?.trim();
+      if (!nome) continue;
+      const tamanho = it.tamanho?.trim().toUpperCase() || null;
+      const chave =
+        mode === "total" ? `${nome.toUpperCase()}|${tamanho ?? ""}|${it.ean ?? ""}` : nome.toUpperCase();
+      const linha = acc.get(chave);
+      if (linha) {
+        linha.quantidade += it.quantidade;
+        linha.orderIds.add(pedido.id);
+        if (!linha.ean && it.ean) linha.ean = it.ean;
+        if (!linha.imagemUrl && it.imagemUrl) linha.imagemUrl = it.imagemUrl;
+      } else {
+        acc.set(chave, {
+          nome,
+          tamanho,
+          ean: it.ean,
+          imagemUrl: it.imagemUrl,
+          quantidade: it.quantidade,
+          orderIds: new Set([pedido.id]),
+        });
+      }
+    }
+  }
+  return [...acc.values()]
+    .map((a) => ({
+      nome: a.nome,
+      tamanho: a.tamanho,
+      ean: a.ean,
+      imagemUrl: a.imagemUrl,
+      quantidade: a.quantidade,
+      pedidos: a.orderIds.size,
+      orderIds: [...a.orderIds],
+    }))
+    .sort((a, b) => a.nome.localeCompare(b.nome, "pt-BR") || (a.tamanho ?? "").localeCompare(b.tamanho ?? ""));
+}
+
+export function PickingGeralModal({
+  queue,
+  data,
+  filters,
+  lote,
+  operadora,
+  onListaImpressa,
+  onClose,
+}: Props) {
+  // O LOTE é o padrão: é a folha que a operadora leva pra prateleira. "Fila
+  // inteira" continua a um clique, pra quem quer ver o que ainda vem.
+  const [escopo, setEscopo] = useState<Escopo>("lote");
   const [products, setProducts] = useState<QueueProduct[] | null>(null);
   const [resumoApi, setResumoApi] = useState<{ pedidos: number; itens: number; produtos: number } | null>(null);
   const [erro, setErro] = useState<string | null>(null);
@@ -62,15 +134,32 @@ export function PickingGeralModal({ queue, data, filters, operadora, onClose }: 
     return () => window.removeEventListener("keydown", onKey);
   }, [onClose]);
 
+  const produtosDoLote = useMemo(() => agregarLote(lote, queue.mode), [lote, queue.mode]);
+
   useEffect(() => {
+    // Lote: agregado local, sem rede — os pedidos já estão em memória.
+    if (escopo === "lote") {
+      setErro(null);
+      setProducts(produtosDoLote);
+      setResumoApi({
+        pedidos: lote.length,
+        itens: produtosDoLote.reduce((a, p) => a + p.quantidade, 0),
+        produtos: produtosDoLote.length,
+      });
+      return;
+    }
     let alive = true;
     setProducts(null);
     setErro(null);
     getQueueProducts({
       mode: queue.mode,
       size: queue.size,
+      // BUCKET da fila: `XG` cobre XXG/G1/G2/G3 — sem o plural a folha da fila
+      // mostrava só o tamanho-rótulo, uma fila diferente da que ela separa.
+      sizes: queue.sizes,
       dateFrom: data ?? undefined,
       dateTo: data ?? undefined,
+      filters,
     })
       .then((d) => {
         if (!alive) return;
@@ -91,11 +180,13 @@ export function PickingGeralModal({ queue, data, filters, operadora, onClose }: 
     return () => {
       alive = false;
     };
-  }, [queue.mode, queue.size, data]);
+    // `filters` entra por referência estável do runner (state) — o efeito só
+    // roda de novo quando a operadora troca o filtro, que é o que se quer.
+  }, [escopo, produtosDoLote, lote.length, queue.mode, queue.size, queue.sizes, data, filters]);
 
-  // Filtro de produto ativo (Adição/Exclusão) vale só na fila; a lista já vem
-  // da mesma consulta, então aplicamos aqui o mesmo recorte por NOME pra folha
-  // não mandar buscar peça que a operadora tirou da fila.
+  // Recorte por NOME, defensivo: desde 26/08 o nexus aplica os filtros de
+  // produto no próprio `queue-products`, e o LOTE já nasceu filtrado. Isto
+  // sobra pra nexus antigo, que ignora os campos e devolveria a fila inteira.
   const visiveis = useMemo(() => {
     if (!products) return [];
     const inc = (filters.includeProducts ?? []).map((t) => t.toLowerCase());
@@ -148,7 +239,8 @@ export function PickingGeralModal({ queue, data, filters, operadora, onClose }: 
   }, [resumoApi, filtrando, visiveis]);
 
   const dataLabel = data ? fmtData(data) : "todas as datas";
-  const subtitulo = `Todos os pedidos · ${dataLabel} · ${total.produtos} produtos • ${total.itens} itens • ${total.pedidos} pedidos`;
+  const escopoLabel = escopo === "lote" ? "Meu lote" : "Fila inteira";
+  const subtitulo = `${escopoLabel} · ${dataLabel} · ${total.produtos} produtos • ${total.itens} itens • ${total.pedidos} pedidos`;
 
   const imprimir = async (apenas?: Secao) => {
     if (imprimindo) return;
@@ -180,9 +272,19 @@ export function PickingGeralModal({ queue, data, filters, operadora, onClose }: 
       const out = await printPdfBase64(base64, {
         jobName: apenas ? `Picking ${apenas.tamanho}` : `Picking Geral ${queue.size}`,
       });
+      // Lista do LOTE impressa ⇒ os pedidos ficam PRESOS na mesa dela: a coleta
+      // dos mistos leva o dia e o janitor de 15 min devolveria tudo pra fila no
+      // meio do caminho. Best-effort: falhar aqui não desfaz a impressão.
+      let presos = 0;
+      if (out.ok && escopo === "lote") {
+        const ids = lote.map((o) => o.id);
+        presos = (await marcarListaImpressa(ids).catch(() => ({ presos: 0 }))).presos;
+        if (presos > 0) onListaImpressa?.(ids);
+      }
       setStatus(
         out.ok
-          ? `Enviado${out.printer ? ` pra ${out.printer}` : " pra impressora padrão"}.`
+          ? `Enviado${out.printer ? ` pra ${out.printer}` : " pra impressora padrão"}.` +
+            (presos > 0 ? ` ${presos} pedidos ficam reservados até você concluir ou devolver.` : "")
           : `Falha ao imprimir: ${out.message ?? "motivo desconhecido"}`,
       );
     } catch (e) {
@@ -199,6 +301,18 @@ export function PickingGeralModal({ queue, data, filters, operadora, onClose }: 
           <div style={headerText}>
             <h2 style={titulo}>Picking Geral — {operadora}</h2>
             <span style={sub}>{products === null ? "Carregando a fila…" : subtitulo}</span>
+          </div>
+          <div style={escopoTabs}>
+            {(["lote", "fila"] as const).map((e) => (
+              <button
+                key={e}
+                style={escopo === e ? escopoTabOn : escopoTab}
+                onClick={() => setEscopo(e)}
+                disabled={imprimindo}
+              >
+                {e === "lote" ? `Meu lote (${lote.length})` : "Fila inteira"}
+              </button>
+            ))}
           </div>
           <button
             style={imprimindo ? imprimirBtnOff : imprimirBtn}
@@ -294,6 +408,34 @@ const headerText: CSSProperties = { display: "flex", flexDirection: "column", ga
 const titulo: CSSProperties = { margin: 0, fontSize: 19, fontWeight: 800, color: "var(--text)" };
 
 const sub: CSSProperties = { fontSize: 12, color: "var(--text-secondary)" };
+
+const escopoTabs: CSSProperties = {
+  display: "inline-flex",
+  gap: 3,
+  padding: 3,
+  background: "var(--bg-card)",
+  border: "1px solid var(--border)",
+  borderRadius: 10,
+  flexShrink: 0,
+};
+
+const escopoTab: CSSProperties = {
+  padding: "7px 14px",
+  background: "transparent",
+  border: 0,
+  borderRadius: 8,
+  color: "var(--text-secondary)",
+  fontSize: 12,
+  fontWeight: 700,
+  cursor: "pointer",
+  fontFamily: "inherit",
+};
+
+const escopoTabOn: CSSProperties = {
+  ...escopoTab,
+  background: "var(--info-bg)",
+  color: "var(--info-text)",
+};
 
 const imprimirBtn: CSSProperties = {
   padding: "9px 16px",
