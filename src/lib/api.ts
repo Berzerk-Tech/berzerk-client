@@ -6,10 +6,15 @@
 // token nativamente e resolve as permissões pelo RBAC dele; o app só reflete o
 // que a API responder.
 
+import { getVersion } from "@tauri-apps/api/app";
 import { getIdToken } from "./cognito";
 import { forceLogout } from "./idleSession";
+import { bloquear } from "./updateGate";
 
 const DEFAULT_BASE = "http://localhost:3010";
+
+/** Header combinado com o nexus (`DESKTOP_VERSAO_HEADER` em contracts). */
+const VERSION_HEADER = "X-Berzerk-Client-Version";
 
 export function apiBaseUrl(): string {
   return (import.meta.env.VITE_SEPARACAO_API_URL ?? DEFAULT_BASE).replace(/\/$/, "");
@@ -21,6 +26,21 @@ async function getAuthToken(): Promise<string | null> {
   } catch {
     return null;
   }
+}
+
+/**
+ * Versão do binário, resolvida UMA vez e reaproveitada — `getVersion()` é IPC
+ * pro Rust e roda em toda chamada da mesa se deixarmos.
+ *
+ * Fora do Tauri (vite dev no navegador) ela falha, e aí o header não vai. É o
+ * comportamento certo: sem header o nexus entende "não é o desktop" e deixa
+ * passar, então desenvolver no browser não fica atrás de uma trava que existe
+ * pra máquina da mesa.
+ */
+let versaoPromise: Promise<string | null> | null = null;
+function clientVersion(): Promise<string | null> {
+  versaoPromise ??= getVersion().catch(() => null);
+  return versaoPromise;
 }
 
 export class ApiError extends Error {
@@ -53,6 +73,10 @@ export async function apiRequest<T>(path: string, opts: RequestOpts = {}): Promi
   const token = await getAuthToken();
   if (token) headers.Authorization = `Bearer ${token}`;
   if (opts.body !== undefined) headers["Content-Type"] = "application/json";
+  // Em TODA chamada, não só nas operacionais: é o que permite ao nexus mover a
+  // fronteira da trava sem depender de uma versão nova do app.
+  const versao = await clientVersion();
+  if (versao) headers[VERSION_HEADER] = versao;
 
   const res = await fetch(url.toString(), {
     method: opts.method ?? "GET",
@@ -76,9 +100,30 @@ export async function apiRequest<T>(path: string, opts: RequestOpts = {}): Promi
     if (res.status === 401 && isSessionExpired(data)) {
       void forceLogout({ kind: "server", message: msg });
     }
+    // 426 Upgrade Required: este app está abaixo da versão mínima que o nexus
+    // exige. Vale de QUALQUER chamada — a operadora pode estar no meio de uma
+    // bipada quando o admin sobe a mínima —, e o bloqueio é a única saída.
+    if (res.status === 426 && isAppDesatualizado(data)) {
+      const corpo = data as { versaoMinima?: unknown; versaoAtual?: unknown; mensagem?: unknown };
+      void bloquear({
+        kind: "servidor",
+        versaoMinima: typeof corpo.versaoMinima === "string" ? corpo.versaoMinima : "?",
+        versaoAtual: typeof corpo.versaoAtual === "string" ? corpo.versaoAtual : null,
+        mensagem: typeof corpo.mensagem === "string" ? corpo.mensagem : msg,
+      });
+    }
     throw new ApiError(res.status, msg, data);
   }
   return data as T;
+}
+
+function isAppDesatualizado(body: unknown): boolean {
+  return (
+    !!body &&
+    typeof body === "object" &&
+    "error" in body &&
+    (body as { error: unknown }).error === "app_desatualizado"
+  );
 }
 
 function isSessionExpired(body: unknown): boolean {

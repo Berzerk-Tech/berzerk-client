@@ -8,7 +8,7 @@
 Aplicação desktop instalada nos PCs do chão de fábrica da Berzerk. Cobre os módulos do fluxo industrial:
 
 - **Etiquetagem** — aplica identidade RFID em lotes confirmados de produção. Lookup de EAN13 (local + Shopify) e impressão com margem de segurança.
-- **Separação** — a operadora entra numa fila (tamanho + puro/misto), recebe um **lote** de até 10 pedidos e confere peça a peça na mesa RFID.
+- **Separação** — a operadora entra numa fila (tamanho + puro/misto), recebe um **lote** de pedidos (o tamanho é configurado no Nexus) e confere peça a peça na mesa RFID.
 - **Expedição** — bipa etiqueta RFID, identifica pedido pronto, imprime etiqueta J&T e DANFE.
 
 Login no **Nexus** (Cognito, Google Workspace `@berzerk.com.br`) — a partir da v0.7.0.
@@ -33,13 +33,15 @@ Tempo total: ~3 minutos por PC.
 
 5. Pronto. A janela do navegador fecha sozinha, o app já abre na tela principal.
 
-### Atualizações
+### Atualizações (obrigatórias desde a 0.9.2)
 
-O app verifica atualizações **automaticamente toda vez que abre**. Quando uma nova versão estiver disponível, aparece um banner no topo:
+O app verifica atualizações **ao abrir e ao entrar em cada módulo** (Etiquetagem, Separação, Expedição). Quando há versão nova, ele **para**: uma tela cheia com
 
-> **Atualização disponível: v0.X.Y** [Atualizar agora] [Mais tarde]
+> **Atualize o Berzerk Client** — instalada v0.X.Y → necessária v0.X.Z — [Atualizar agora]
 
-Clicando em "Atualizar agora", baixa, valida assinatura, substitui o executável e reinicia. Leva ~30 segundos. Também pode ser disparado manualmente em **Configurações → Atualizações → Verificar**.
+Não há "mais tarde". Clicando em "Atualizar agora" ele baixa, valida a assinatura, substitui o executável e reinicia — ~30 segundos. Se a mesa estava com um lote de separação reservado, o lote **volta para a fila sozinho** antes do bloqueio, para não travar as outras estações.
+
+A mesma tela aparece se o Nexus recusar uma chamada com **426** (`app_desatualizado`): o servidor tem uma **versão mínima** configurada (Configurações → Versão mínima do Berzerk Client, no Nexus) e abaixo dela não há fila, etiquetagem nem expedição. É essa a trava de verdade — o check do GitHub é só o aviso antecipado, e falha de rede nele **não** bloqueia ninguém.
 
 Não é necessário reinstalar manualmente — uma vez instalado, esquece.
 
@@ -67,7 +69,11 @@ A Etiquetagem passou a exigir a permissão **`etiquetagem:operate`** no Nexus (0
 
 ### "Falha ao verificar atualização"
 
-Geralmente é falta de internet no PC. O app continua funcionando offline com a versão atual.
+Geralmente é falta de internet no PC. O app continua funcionando com a versão atual — o check do GitHub **não** bloqueia quando falha.
+
+### Travou na tela "Atualize o Berzerk Client" e não baixa
+
+Ela mostra "Não foi possível baixar a atualização automaticamente" quando o GitHub não responde. Use **Abrir página de versões**, baixe o instalador e rode por cima da instalação atual. Se o número exigido ainda não existe na página de releases, a versão mínima no Nexus foi subida cedo demais — falar com o time de tecnologia (dá pra desligar a exigência na hora, em Configurações → Versão mínima do Berzerk Client).
 
 ### Quero forçar logout
 
@@ -170,7 +176,7 @@ Duas responsabilidades mudaram de lado, e é bom saber por quê:
 
 Pedido das separadoras no cutover: puxar **um pedido por vez** deixava a mesa parada entre um claim e outro, e a fila não tinha como ser atacada por dia de emissão. A 0.9.0 refaz o módulo em cima de três coisas:
 
-**Lote de 10.** Ao entrar numa fila o app chama `POST /separacao/lote` e recebe até 10 pedidos que passam a ser **dela** — a sidebar deixa de ser a fila inteira e passa a ser o lote. Clicar num card só decide qual pedido vem agora (sem claim, sem disputa com outra estação). Depois de cada conclusão ou devolução o app chama o mesmo endpoint de novo, que é **idempotente**: devolve tudo o que ela já tem e completa até 10. É esse mecanismo que divide a fila entre as operadoras logadas — cada reposição pega o que ainda não tem dono. O rodapé mostra quantos ainda estão na fila sem dono (`fila.restantes`).
+**Lote de 10.** Ao entrar numa fila o app chama `POST /separacao/lote` e recebe até 10 pedidos que passam a ser **dela** — a sidebar deixa de ser a fila inteira e passa a ser o lote. Clicar num card só decide qual pedido vem agora (sem claim, sem disputa com outra estação). Depois de cada conclusão ou devolução o app chama o mesmo endpoint de novo, que é **idempotente**: devolve tudo o que ela já tem e completa até 10. O rodapé mostra quantos ainda estão na fila sem dono (`fila.restantes`). (Na 0.9.0 o número 10 vinha do app e a divisão entre as estações era emergente — cada reposição pegava só o que ainda não tinha dono; ver a 0.9.3 abaixo.)
 
 Sair da fila (voltar ao menu, trocar de fila, logout por inatividade) **devolve o lote em aberto**, mandando os ids — senão os pedidos ficariam reservados e invisíveis pras outras mesas até o janitor expirar o claim. Se o app tiver sido fechado no meio do turno, `GET /separacao/meus-pedidos` faz a tela de filas oferecer **Retomar** (ou devolver).
 
@@ -180,19 +186,73 @@ Sair da fila (voltar ao menu, trocar de fila, logout por inatividade) **devolve 
 
 Endpoints novos que esta versão consome: `POST /separacao/lote`, `POST /separacao/lote/devolver`, `GET /separacao/meus-pedidos`, `GET /separacao/queue-dates`. Enquanto o Nexus não tiver o do lote, o app **degrada** pro claim de um pedido por vez (lote de um, sem "faltam X") em vez de mostrar erro — o app se atualiza sozinho em todas as estações, então as duas ordens de deploy precisam funcionar.
 
+### Lote configurável e divisão da fila (0.9.3)
+
+Duas mudanças de servidor que o app passa a acompanhar (ver
+`docs/separacao-fila-lote.md` no Nexus):
+
+**O tamanho do lote saiu do app.** Era `quantidade: 10` no corpo do
+`POST /separacao/lote`; agora quem manda é a configuração
+`separacao_lote_tamanho` (Configurações do Nexus → *Separação*), e o app não
+manda mais o campo. Mudar de 10 para 6 deixou de exigir uma versão nova do
+desktop.
+
+**A fila esgotada é dividida.** Quando uma estação entra numa fila onde não
+sobrou nada livre, o servidor tira das colegas que estão acima da divisão igual
+os pedidos que elas **ainda não começaram a conferir** — fila com 10 e uma
+operadora segurando os 10: a segunda a entrar sai com 5. Quem perdeu pedidos
+recebe o `queue.changed` e o app re-busca o lote; como a resposta do
+`POST /separacao/lote` é o retrato inteiro, a sidebar encolhe sozinha.
+
+**`POST /separacao/:id/iniciar`** é o que protege a bancada: ao ABRIR um card
+pra conferir, o app carimba o pedido no servidor e ele deixa de ser realocável.
+A chamada é uma por pedido, best-effort (falha de rede não trava nada, e o app
+tenta de novo quando a janela volta ao foco) e degrada em silêncio num Nexus
+sem a rota. Se ainda assim o pedido da mesa sumir da resposta do lote, a tela
+avisa *"Este pedido foi redistribuído para outra estação"* e volta pro lote —
+ela nunca fica conferindo um pedido que o `complete` recusaria com 409.
+
+### Atualização forçada (0.9.2)
+
+Pedido do dono: "não quero gente usando versão antiga". Antes, a atualização era um banner com **Mais tarde** — e na mesa do CD "mais tarde" é nunca; máquinas ficavam meses atrás e cada correção publicada só valia pra quem por acaso clicou.
+
+**A trava é do servidor, não do app.** O app velho é justamente o que não tem a regra nova: qualquer verificação que dependa do binário instalado só passa a valer a partir da versão que a contém. Então quem barra é o Nexus, pela porta que o app velho já usa hoje.
+
+Três peças:
+
+| Peça | Onde | O quê |
+|---|---|---|
+| Header `X-Berzerk-Client-Version` | `src/lib/api.ts` | vai em **toda** chamada ao Nexus, com `getVersion()` do Tauri (resolvido uma vez e cacheado) |
+| Bloqueio | `src/lib/updateGate.ts` + `src/components/UpdateRequired.tsx` | estado global com subscribe; tela cheia sem saída |
+| Verificação antecipada | `App.tsx` | `verificarAtualizacao()` no boot (5 s) e ao entrar em Etiquetagem / Separação / Expedição |
+
+Duas portas levam ao mesmo bloqueio, e a divisão é de propósito:
+
+1. **426 do Nexus** (`{ error: "app_desatualizado", versaoMinima, versaoAtual }`) em qualquer chamada — a trava dura. Não tem como um app velho ignorá-la: quem responde é o outro lado.
+2. **Updater do GitHub** — o aviso antecipado. Se o GitHub estiver fora, essa porta não abre (só um `console.warn`): falha de rede não pode parar a operação.
+
+Antes de a tela entrar, os hooks de `onAntesDeBloquear` rodam — hoje só a Separação, devolvendo o lote (`SeparacaoRunner`, ao lado do `onBeforeForcedLogout`). Sem isso a mesa bloqueada levaria os pedidos reservados junto, invisíveis pras outras estações até o janitor expirar o claim. Teto de 2,5 s, e a falha é engolida (o janitor recupera).
+
+Fora do Tauri (`bun dev` no navegador) `getVersion()` falha e o header não vai. É o certo: sem header o Nexus entende "não é o desktop" e deixa passar — desenvolver no browser não fica atrás de uma trava que existe pra máquina da mesa.
+
+Quem define a mínima: **Nexus → Configurações → Versão mínima do Berzerk Client** (`PUT /settings/versao-desktop`, exige `identity:manage`). A ordem do rollout é sempre deploy da API → release do client → subir a mínima; ver `docs/aplicativo-desktop.md` no nexus.
+
 ### Deep link (abrir pelo Nexus)
 
 O Nexus (web) tem um botão "Abrir Berzerk Client" que navega pra uma URL `berzerk://...`. O app abre (ou vem pra frente se já estiver aberto) e fica logado sem o operador digitar nada — pensado pra estação de fábrica onde o navegador roda num monitor e o app noutro.
 
-**Esquema:** `berzerk`, registrado em `plugins.deep-link.desktop.schemes` no `tauri.conf.json`. Três URLs:
+**Esquema:** `berzerk`, registrado em `plugins.deep-link.desktop.schemes` no `tauri.conf.json`. URLs:
 
-- `berzerk://auth?token_hash=<hash>&type=magiclink` — contrato da 0.6.0, mantido. **O `token_hash` é ignorado desde a 0.8.0** (ele existia só para derivar a sessão Supabase); o host continua aceito porque o Nexus em produção ainda emite esses links, e um link legítimo tem de abrir o app logado em vez de dar erro na cara de quem clicou.
-- `berzerk://login` — dispara o login no navegador (0.7.0).
+- `berzerk://auth?email=<e-mail>` — contrato ATUAL (Nexus ≥ 26/08). O link não carrega credencial nenhuma: só o e-mail de quem clicou, que vira `login_hint`.
+- `berzerk://auth?token_hash=<hash>&type=magiclink` — contrato da 0.6.0, mantido. **O `token_hash` é ignorado desde a 0.8.0** (ele existia só para derivar a sessão Supabase); o host continua aceito porque links emitidos por versões antigas do Nexus ainda chegam.
+- `berzerk://login` — mesmo tratamento do `auth` (0.7.0).
 - `berzerk://open` — só foca a janela.
 
-**Fluxo de auth (0.8.0):** os três hosts fazem a mesma coisa útil — focar a janela e, se não houver sessão do Nexus, disparar o login PKCE no navegador (que já está logado no Google, então costuma voltar sozinho, sem digitar nada).
+**Fluxo de auth (0.9.1):** focar a janela, RESOLVER a sessão do Nexus (renovando pelo refresh token se estiver vencida) e só então decidir. Com sessão viva não há nada a fazer além do toast. Sem sessão, o app dispara o PKCE no navegador **sem `prompt=select_account`** e com `login_hint=<e-mail>`: o navegador que mandou o link acabou de logar no Nexus, então o Hosted UI do Cognito devolve o código sozinho, a aba do loopback se fecha em ~1,5 s e o app entra logado — sem ninguém digitar nada.
 
-Sucesso → toast "Conectado como `<e-mail>`" e tela inicial. Falha → tela de login com o motivo.
+Até a 0.9.0 esse login pedia `prompt=select_account`, então clicar em "Abrir Berzerk Client" abria o app e jogava a pessoa **de volta no navegador**, na tela de escolher a conta do Google. Era esse o bug de 26/08. O `prompt=select_account` continua no botão "Entrar com Google" da tela de login, onde ele existe por um motivo real: mesa compartilhada (a operadora que chega precisa escolher a conta dela) e o beco sem saída do `org_internal` quando o Google pega sozinho um gmail pessoal.
+
+Sucesso → toast "Conectado como `<e-mail>`" e tela inicial. Falha → tela de login com o motivo (e o botão "Entrar com Google" ali do lado, que pede o seletor de contas).
 
 **Segunda instância (Windows/Linux):** o SO abre uma nova instância do processo passando a URL como argumento de linha de comando. `tauri-plugin-single-instance` (feature `deep-link`) detecta isso, repassa a URL pra instância já rodando — que reemite como o evento `deep-link://new-url` do `tauri-plugin-deep-link`, o mesmo que `onOpenUrl` no front escuta — e a segunda instância se encerra. macOS recebe o evento diretamente do SO, sem precisar do single-instance.
 
@@ -202,7 +262,7 @@ Sucesso → toast "Conectado como `<e-mail>`" e tela inicial. Falha → tela de 
 - **Linux (AppImage):** não tem instalador que registre nada — o `register_all()` no `setup()` é quem grava a associação MIME (`xdg-mime`/`~/.local/share/applications`) na primeira vez que o AppImage roda. Se o AppImage não tiver sido integrado ao sistema (ex.: via AppImageLauncher), o registro ainda funciona porque aponta pro caminho onde o binário está sendo executado no momento — mas se o usuário mover o AppImage depois, o registro fica apontando pro lugar errado até o app rodar de novo do novo caminho.
 - Testado localmente em Hyprland com `gio open 'berzerk://open'` / `gio open 'berzerk://login'` / `gio open 'berzerk://auth?token_hash=...&type=magiclink'` — registra e dispara corretamente.
 
-**Exigência de versão:** o Nexus só mostra o botão pra quem já está em ≥ **0.6.0** (primeira versão com deep link). Quem estiver numa versão anterior não tem o esquema registrado — o link cai no browser sem handler.
+**Exigência de versão:** o Nexus só mostra o botão pra quem já está em ≥ **0.9.1** (`DESKTOP_VERSAO_MINIMA_DEEP_LINK`; 0.6.0 foi a primeira com deep link, mas só a 0.9.1 abre logado de verdade). Quem estiver numa versão anterior não tem o esquema registrado — o link cai no browser sem handler.
 
 **Limitações conhecidas:**
 
@@ -233,7 +293,9 @@ GitHub Actions builda em ~7min, assina com a chave privada Ed25519, publica rele
 - `berzerk-client_0.X.Y_x64-setup.nsis.zip.sig` — assinatura Ed25519
 - `latest.json` — manifest que o updater consulta
 
-PCs instalados pegam a atualização sozinhos na próxima abertura.
+PCs instalados pegam a atualização sozinhos na próxima abertura — e, desde a 0.9.2, **param** até atualizar.
+
+**Passo 3 (opcional, quando a versão for obrigatória):** depois que as mesas já pegaram o release, subir a mínima no Nexus (**Configurações → Versão mínima do Berzerk Client**). Nunca antes: exigir um número que ainda não está publicado bloqueia todo mundo de uma vez, sem ter o que instalar.
 
 ### Onde mora o quê
 
@@ -244,6 +306,7 @@ PCs instalados pegam a atualização sozinhos na próxima abertura.
 | App client do login (desktop) | `berzerk-infra` → `stacks/nexus/<env>/auth.tf` → `aws_cognito_user_pool_client.desktop` (output `cognito_desktop_client_id`) |
 | Pool + Hosted UI + IdP Google | `berzerk-infra` → `stacks/auth/<env>` (`auth.cloud.berzerk.com.br`) |
 | Envs do login no CI | GitHub → repo → Settings → Variables: `VITE_COGNITO_DOMAIN`, `VITE_COGNITO_CLIENT_ID`, `VITE_COGNITO_REGION` |
+| Versão mínima exigida | Nexus → Configurações → **Versão mínima do Berzerk Client** (chave `desktop_versao_minima` em `system_settings`) |
 
 ### Desenvolver em Linux
 
