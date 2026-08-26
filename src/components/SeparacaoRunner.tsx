@@ -16,6 +16,7 @@ import { subscribeQueueChanged } from "../lib/realtime";
 import { onBeforeForcedLogout } from "../lib/idleSession";
 import { SupervisorModal } from "./SupervisorModal";
 import { PickingGeralModal } from "./PickingGeralModal";
+import { ItensFaltantesModal } from "./ItensFaltantesModal";
 import { nomeDaOperadora } from "./OperatorChip";
 import { getSessaoSync } from "../lib/cognito";
 import { SeparacaoHistoryModal } from "./SeparacaoHistoryModal";
@@ -25,6 +26,7 @@ import {
   claimLote,
   completeSeparacao,
   devolverLote,
+  getMeusPedidos,
   getQueueDates,
   releaseSeparacao,
   type EpcLookupItem,
@@ -175,10 +177,23 @@ type Props = {
    * XXG/G1/G2/G3 e nenhum pedido ficar órfão.
    */
   queue: { mode: SeparationMode; size: string; sizes: string[] };
+  /**
+   * Entrou RETOMANDO uma lista de picking já impressa. Nesse caso o app NÃO
+   * puxa pedido novo: a folha na mão da coleta tem exatamente estes números, e
+   * completar o lote até o alvo colocaria na mesa pedido que não está nela.
+   */
+  retomandoLista?: boolean;
   onBack: () => void;
 };
 
-export function SeparacaoRunner({ title, kicker, emptyHint, queue, onBack }: Props) {
+export function SeparacaoRunner({
+  title,
+  kicker,
+  emptyHint,
+  queue,
+  retomandoLista,
+  onBack,
+}: Props) {
   const rfid = useRfid();
   const [phase, setPhase] = useState<Phase>("loading");
   const [order, setOrder] = useState<Order | null>(null);
@@ -253,11 +268,20 @@ export function SeparacaoRunner({ title, kicker, emptyHint, queue, onBack }: Pro
       setError(null);
       puxandoRef.current = true;
       try {
-        const { orders, fila } = await claimLote({
-          mode: queue.mode,
-          sizes: queue.sizes,
-          filters: filtersRef.current,
-        });
+        // LISTA IMPRESSA na mesa: não puxa pedido novo, só recarrega o que já é
+        // dela. A folha que a coleta está usando lista exatamente estes
+        // números; completar o lote até o alvo colocaria peça na mesa sem
+        // ninguém ter ido buscar. Volta ao normal sozinho quando o último
+        // pedido da lista sair (concluído ou devolvido).
+        const presaEmLista =
+          retomandoLista === true || loteRef.current.some((o) => !!o.listaEm);
+        const { orders, fila } = presaEmLista
+          ? { ...(await getMeusPedidos()), fila: undefined }
+          : await claimLote({
+              mode: queue.mode,
+              sizes: queue.sizes,
+              filters: filtersRef.current,
+            });
         setLote(orders);
         loteRef.current = orders;
         setRestantes(fila?.restantes ?? null);
@@ -278,7 +302,7 @@ export function SeparacaoRunner({ title, kicker, emptyHint, queue, onBack }: Pro
         puxandoRef.current = false;
       }
     },
-    [queue.mode, queue.sizes, resetLeitura, showNotice],
+    [queue.mode, queue.sizes, resetLeitura, showNotice, retomandoLista],
   );
 
   // Entrar na fila = puxar o lote.
@@ -698,6 +722,7 @@ export function SeparacaoRunner({ title, kicker, emptyHint, queue, onBack }: Pro
   const [historyOpen, setHistoryOpen] = useState(false);
   const [filtersOpen, setFiltersOpen] = useState(false);
   const [pickingOpen, setPickingOpen] = useState(false);
+  const [faltantesOpen, setFaltantesOpen] = useState(false);
   const extras = Array.from(extrasRef.current.values());
   // A data tem controle próprio na sidebar — não conta como "filtro".
   const filtrosAtivos =
@@ -714,6 +739,23 @@ export function SeparacaoRunner({ title, kicker, emptyHint, queue, onBack }: Pro
   const dataSel = filters.dateFrom && filters.dateFrom === filters.dateTo ? filters.dateFrom : null;
   const escolherData = (d: string | null) =>
     aplicarFiltros({ ...filters, dateFrom: d ?? undefined, dateTo: d ?? undefined });
+
+  /**
+   * Carimba `listaEm` no lote EM MEMÓRIA depois que a folha foi impressa. O
+   * servidor já gravou; isto é só pra sidebar mostrar "lista impressa" na hora,
+   * sem esperar o próximo `puxarLote`.
+   */
+  const marcarLotePresoLocalmente = useCallback((ids: string[]) => {
+    const alvo = new Set(ids);
+    const agora = new Date().toISOString();
+    setLote((atual) =>
+      atual.map((o) => (alvo.has(o.id) && !o.listaEm ? { ...o, listaEm: agora } : o)),
+    );
+  }, []);
+
+  /** Pedidos do lote com lista impressa — o banner e o chip da sidebar. */
+  const comLista = lote.filter((o) => !!o.listaEm);
+  const listaDeOutroDia = comLista.find((o) => o.listaDeOutroDia);
 
   const operadora = nomeDaOperadora(getSessaoSync()?.email ?? null);
 
@@ -765,6 +807,17 @@ export function SeparacaoRunner({ title, kicker, emptyHint, queue, onBack }: Pro
       )}
       {reject && extras.length === 0 && <div style={rejectBanner}>⚠ {reject}</div>}
       {notice && <div style={noticeBanner}>ℹ {notice}</div>}
+      {comLista.length > 0 && (
+        <div style={listaDeOutroDia ? listaBannerAlerta : listaBanner}>
+          🖨 Lista impressa {listaDeOutroDia ? `de ${fmtDataISO(diaDe(listaDeOutroDia.listaEm!))}` : "de hoje"} —{" "}
+          <strong>{comLista.length}</strong>{" "}
+          {comLista.length === 1 ? "pedido reservado" : "pedidos reservados"} pra você até concluir
+          ou devolver.{" "}
+          <button style={inlineReconnect} onClick={() => void devolverTudo().then(() => puxarLote())}>
+            devolver à fila
+          </button>
+        </div>
+      )}
 
       <div style={layoutRow}>
         <LoteSidebar
@@ -819,6 +872,7 @@ export function SeparacaoRunner({ title, kicker, emptyHint, queue, onBack }: Pro
               onRestart={restartLeitura}
               onSkip={() => void devolverAtual()}
               onSupervisor={() => setSupervisorOpen(true)}
+              onFaltantes={() => setFaltantesOpen(true)}
             />
           )}
         </main>
@@ -840,11 +894,28 @@ export function SeparacaoRunner({ title, kicker, emptyHint, queue, onBack }: Pro
       {historyOpen && <SeparacaoHistoryModal onClose={() => setHistoryOpen(false)} />}
       {pickingOpen && (
         <PickingGeralModal
-          queue={{ mode: queue.mode, size: queue.size }}
+          queue={queue}
           data={dataSel}
           filters={filters}
+          lote={lote}
           operadora={operadora}
+          onListaImpressa={marcarLotePresoLocalmente}
           onClose={() => setPickingOpen(false)}
+        />
+      )}
+      {faltantesOpen && order && (
+        <ItensFaltantesModal
+          order={order}
+          lidos={new Map([...progressRef.current].map(([id, p]) => [id, p.count]))}
+          onMarcado={() => {
+            setFaltantesOpen(false);
+            showNotice(
+              "Itens faltantes marcados. O pedido saiu da fila e o cliente foi avisado; a supervisão resolve pelo Nexus.",
+            );
+            // O pedido saiu da fila ⇒ repõe o lote (ele não volta na resposta).
+            void puxarLote();
+          }}
+          onClose={() => setFaltantesOpen(false)}
         />
       )}
       {filtersOpen && (
@@ -965,7 +1036,7 @@ function LoteSidebar({
   onEscolherData,
   onPickingGeral,
 }: {
-  queue: { mode: SeparationMode; size: string };
+  queue: { mode: SeparationMode; size: string; sizes: string[] };
   lote: Order[];
   restantes: number | null;
   atualId: string | null;
@@ -977,9 +1048,10 @@ function LoteSidebar({
 }) {
   const [busca, setBusca] = useState("");
   const termo = busca.trim().toLowerCase();
-  // Busca LOCAL: são no máximo 10 pedidos, todos já carregados com os itens —
-  // ir ao servidor pra filtrar dez cards seria latência à toa.
+  // Busca LOCAL: o lote inteiro já está em memória com os itens (até 50 nos
+  // mistos) — ir ao servidor pra filtrar essa lista seria latência à toa.
   const visiveis = termo.length === 0 ? lote : lote.filter((o) => casaBusca(o, termo));
+  const comLista = lote.filter((o) => !!o.listaEm).length;
 
   return (
     <aside style={sidebar}>
@@ -991,6 +1063,11 @@ function LoteSidebar({
           <span style={sidebarCount}>
             {lote.length} {lote.length === 1 ? "pedido" : "pedidos"}
           </span>
+          {comLista > 0 && (
+            <span style={listaChip} title="Lista de picking impressa — estes pedidos ficam reservados">
+              🖨 {comLista}
+            </span>
+          )}
         </div>
         <div style={sidebarHeaderRow}>
           <button
@@ -1016,13 +1093,20 @@ function LoteSidebar({
           : "Estes pedidos são só seus. Clique pra escolher qual vem agora."}
       </span>
       <div className="thin-scroll" style={sidebarList}>
+        {/* `cardSlot` liga `content-visibility: auto`: com 50 mistos na coluna
+            (Black Friday), o navegador pula a renderização do que está fora da
+            viewport em vez de montar 50 cards com 150 thumbnails. Sem cálculo
+            de janela — a rolagem continua nativa e a busca continua vendo a
+            lista inteira. Onde a propriedade não existe, tudo renderiza como
+            antes. As fotos já sobem com `loading="lazy"`. */}
         {visiveis.map((o, i) => (
-          <QueueCard
-            key={o.id}
-            item={queueItemFromOrder(o, i + 1)}
-            pinned={o.id === atualId}
-            onClick={o.id === atualId ? undefined : () => onSelecionar(o)}
-          />
+          <div key={o.id} style={cardSlot}>
+            <QueueCard
+              item={queueItemFromOrder(o, i + 1)}
+              pinned={o.id === atualId}
+              onClick={o.id === atualId ? undefined : () => onSelecionar(o)}
+            />
+          </div>
         ))}
         {visiveis.length === 0 && (
           <span style={sidebarEmpty}>
@@ -1065,7 +1149,7 @@ function DataMenu({
   valor,
   onEscolher,
 }: {
-  queue: { mode: SeparationMode; size: string };
+  queue: { mode: SeparationMode; size: string; sizes: string[] };
   filters: QueueFilters;
   valor: string | null;
   onEscolher: (d: string | null) => void;
@@ -1080,7 +1164,9 @@ function DataMenu({
   useEffect(() => {
     if (!aberto) return;
     let alive = true;
-    getQueueDates({ mode: queue.mode, size: queue.size, filters })
+    // `sizes` é o BUCKET da fila (XG cobre XXG/G1/G2/G3): sem ele o seletor
+    // contava só o tamanho-rótulo e mostrava menos pedidos do que a fila tem.
+    getQueueDates({ mode: queue.mode, size: queue.size, sizes: queue.sizes, filters })
       .then((d) => {
         if (!alive) return;
         setDados(d);
@@ -1152,6 +1238,11 @@ function DataMenu({
 }
 
 /** YYYY-MM-DD → dd/mm/aaaa (o seletor mostra a data como o posvenda mostrava). */
+/** ISO completo → `YYYY-MM-DD` no fuso local (o dia que a operadora enxerga). */
+function diaDe(iso: string): string {
+  return new Date(iso).toLocaleDateString("en-CA");
+}
+
 function fmtDataISO(iso: string): string {
   const [y, m, d] = iso.split("-");
   return y && m && d ? `${d}/${m}/${y}` : iso;
@@ -1231,7 +1322,7 @@ function cardBodyHeight(cardW: number): number {
 
 /**
  * Tamanho dos cards — regra do Leonardo (21/08/2026, go-live XG):
- * - cards GRANDES, sempre LADO A LADO, no máximo 5 por linha;
+ * - cards GRANDES, sempre LADO A LADO, no máximo `MAX_COLS` por linha;
  * - até 2 linhas o pedido inteiro cabe SEM scroll (o card encolhe pra caber
  *   na altura, nunca abaixo de MINW);
  * - da 3ª linha em diante a área ROLA, com o card do MESMO tamanho de um
@@ -1240,11 +1331,19 @@ function cardBodyHeight(cardW: number): number {
  * card maior — num pedido de 2 itens, com a área estreitada pela sidebar da
  * fila, vencia 1 COLUNA + scroll: cards empilhados e barra no meio da tela.
  */
+
+/**
+ * Quantos cards de item cabem numa fileira. Era 5; virou 4 a pedido das
+ * separadoras (26/08) — a foto do card é o que elas usam pra reconhecer a
+ * peça, e a 5 colunas ela ficava pequena demais no monitor do galpão.
+ */
+const MAX_COLS = 4;
+
 function useFitCards(nMain: number, nOff: number) {
   const ref = useRef<HTMLDivElement | null>(null);
   const [fit, setFit] = useState<{ cardW: number; cols: number; fits: boolean }>({
-    cardW: 250,
-    cols: 5,
+    cardW: 310,
+    cols: MAX_COLS,
     fits: true,
   });
 
@@ -1252,9 +1351,13 @@ function useFitCards(nMain: number, nOff: number) {
     const el = ref.current;
     if (!el) return;
     const GAP = 14;
-    const MAXW = 260;
+    // Teto de 5 → 4 colunas (26/08): as separadoras acharam a foto pequena
+    // demais pra reconhecer a peça de longe. Com 4 colunas o card ganha ~25%
+    // de largura e a imagem cresce junto, sem estourar a altura: os limites de
+    // 1366×768 continuam valendo (MINW), e em 1920×1080 o MAXW é o que segura
+    // o card num tamanho legível em vez de gigante.
+    const MAXW = 330;
     const MINW = 140;
-    const MAX_COLS = 5;
     const ROWS_SEM_SCROLL = 2;
     // Folga: se a estimativa do corpo errar por poucos px pro lado otimista,
     // o overflow decepa uma fileira (visto em campo no misto de 14 itens).
@@ -1300,6 +1403,7 @@ function OrderView({
   onRestart,
   onSkip,
   onSupervisor,
+  onFaltantes,
 }: {
   order: Order;
   progress: Map<string, ItemProgress>;
@@ -1309,6 +1413,7 @@ function OrderView({
   onRestart: () => void;
   onSkip: () => void;
   onSupervisor: () => void;
+  onFaltantes: () => void;
 }) {
   const totalExpected = order.items.reduce((a, it) => a + it.quantidade, 0);
   const totalDone = order.items.reduce(
@@ -1414,6 +1519,13 @@ function OrderView({
       <div style={actionsRow}>
         <button style={ghostBtn} onClick={onSkip} disabled={completing}>
           Devolver à fila
+        </button>
+        {/* "ITENS FALTANTES" do pós-venda legado: a peça não está na
+            prateleira. Sai da fila e o cliente é avisado — diferente de
+            "devolver", que devolve o pedido inteiro pra outra estação pegar e
+            bater na mesma falta. */}
+        <button style={faltantesBtn} onClick={onFaltantes} disabled={completing}>
+          Itens faltantes
         </button>
         {temExtras && (
           <button style={restartBtn} onClick={onRestart} disabled={completing}>
@@ -1780,6 +1892,28 @@ const sidebarEmpty: CSSProperties = {
   padding: "12px 4px",
 };
 
+/**
+ * Slot de um card na sidebar. `contentVisibility: auto` deixa o navegador
+ * pular a renderização do que está fora da viewport; `containIntrinsicSize`
+ * dá a altura estimada pro scrollbar não pular enquanto isso. É o que segura
+ * a coluna de 50 mistos sem virtualização manual.
+ */
+const cardSlot: CSSProperties = {
+  contentVisibility: "auto",
+  containIntrinsicSize: "auto 92px",
+};
+
+const listaChip: CSSProperties = {
+  fontFamily: "var(--font-mono)",
+  fontSize: 10,
+  fontWeight: 800,
+  padding: "2px 7px",
+  borderRadius: 999,
+  background: "var(--info-bg)",
+  color: "var(--info-text)",
+  border: "1px solid var(--info-border)",
+};
+
 const qCard: CSSProperties = {
   display: "flex",
   alignItems: "flex-start",
@@ -1924,6 +2058,34 @@ const mesaDownBanner: CSSProperties = {
   color: "var(--danger-text, var(--warning-text))",
   fontSize: 13,
   textAlign: "center",
+};
+
+/** Lista de picking impressa: informa que o lote está reservado pra ela. */
+const listaBanner: CSSProperties = {
+  padding: "9px 32px",
+  background: "var(--info-bg)",
+  color: "var(--info-text)",
+  fontSize: 13,
+  textAlign: "center",
+};
+
+/** Lista que atravessou a virada do dia — pede decisão. */
+const listaBannerAlerta: CSSProperties = {
+  ...listaBanner,
+  background: "var(--warning-bg)",
+  color: "var(--warning-text)",
+};
+
+/** "Itens faltantes": ação destrutiva-ish (tira o pedido da fila) mas comum. */
+const faltantesBtn: CSSProperties = {
+  padding: "12px 20px",
+  background: "var(--warning-bg)",
+  border: "1px solid var(--warning-border)",
+  borderRadius: 10,
+  color: "var(--warning-text)",
+  fontSize: 14,
+  fontWeight: 700,
+  cursor: "pointer",
 };
 
 const rejectBanner: CSSProperties = {

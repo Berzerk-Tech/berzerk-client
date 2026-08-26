@@ -9,6 +9,8 @@ export type OrderStatus =
   | "invoiced"
   | "ready"
   | "separating"
+  /** EM ESPERA por ruptura: a operadora marcou itens faltantes e o pedido saiu da fila. */
+  | "on_hold"
   | "awaiting_pickup"
   | "shipped"
   | "cancelled";
@@ -50,6 +52,16 @@ export type Order = {
   clienteNome?: string | null;
   dataEmissao?: string | null;
   prioritario?: boolean;
+  /** Quando a operadora abriu o card pra conferir (`POST /separacao/:id/iniciar`). */
+  iniciadoEm?: string | null;
+  /**
+   * Quando a LISTA de picking deste pedido foi impressa. Com carimbo, o pedido
+   * fica preso na mesa dela: o janitor não devolve e o rebalanceamento não
+   * realoca — a coleta dos mistos leva o dia. Ausente = nexus antigo.
+   */
+  listaEm?: string | null;
+  /** A lista é de um dia ANTERIOR — o app oferece Retomar/Devolver. */
+  listaDeOutroDia?: boolean;
 };
 
 export type ClaimResponse = { order: Order | null };
@@ -128,8 +140,24 @@ function filtersBody(f?: QueueFilters): Record<string, unknown> {
   return out;
 }
 
-export function getQueueCounts(): Promise<QueueCounts> {
-  return apiRequest<QueueCounts>("/separacao/queues");
+/**
+ * Contagem das filas. Aceita os MESMOS filtros da listagem: sem eles o tile
+ * dizia "637 pedidos" e a fila filtrada entregava 55. Nexus antigo ignora os
+ * campos extras (zod strip) e devolve a fila inteira, como antes.
+ */
+export function getQueueCounts(filters?: QueueFilters): Promise<QueueCounts> {
+  return apiRequest<QueueCounts>("/separacao/queues", {
+    query: {
+      dateFrom: filters?.dateFrom || undefined,
+      dateTo: filters?.dateTo || undefined,
+      includeProducts: filters?.includeProducts?.length
+        ? filters.includeProducts.join(",")
+        : undefined,
+      excludeProducts: filters?.excludeProducts?.length
+        ? filters.excludeProducts.join(",")
+        : undefined,
+    },
+  });
 }
 
 export function getMe(): Promise<Me> {
@@ -183,16 +211,25 @@ export type QueueProductsResponse = {
 export function getQueueProducts(params: {
   mode: SeparationMode;
   size?: string;
+  /** BUCKET da fila (XG cobre XXG/G1/G2/G3, P cobre PP) — é o que o lote usa. */
+  sizes?: string[];
   dateFrom?: string;
   dateTo?: string;
+  filters?: QueueFilters;
 }): Promise<QueueProductsResponse> {
+  const f = params.filters;
   return comModo(params.mode, (mode) =>
     apiRequest<QueueProductsResponse>("/separacao/queue-products", {
       query: {
         mode,
+        // `size` continua indo pra nexus antigo entender o recorte; `sizes`
+        // (plural) é o que o nexus novo usa, e vence quando os dois chegam.
         size: params.size,
+        sizes: params.sizes?.length ? params.sizes.join(",") : undefined,
         dateFrom: params.dateFrom || undefined,
         dateTo: params.dateTo || undefined,
+        includeProducts: f?.includeProducts?.length ? f.includeProducts.join(",") : undefined,
+        excludeProducts: f?.excludeProducts?.length ? f.excludeProducts.join(",") : undefined,
       },
     }),
   );
@@ -239,6 +276,8 @@ export type QueueDatesResponse = {
 export function getQueueDates(params: {
   mode: SeparationMode;
   size?: string;
+  /** BUCKET da fila — mesma semântica do lote. */
+  sizes?: string[];
   filters?: QueueFilters;
 }): Promise<QueueDatesResponse> {
   const f = params.filters;
@@ -247,6 +286,7 @@ export function getQueueDates(params: {
       query: {
         mode,
         size: params.size,
+        sizes: params.sizes?.length ? params.sizes.join(",") : undefined,
         includeProducts: f?.includeProducts?.length ? f.includeProducts.join(",") : undefined,
         excludeProducts: f?.excludeProducts?.length ? f.excludeProducts.join(",") : undefined,
       },
@@ -261,7 +301,12 @@ export type LoteResponse = {
   fila?: { restantes: number };
 };
 
-/** Quantos pedidos a operadora leva por vez (pedido das separadoras). */
+/**
+ * Fallback de tamanho de lote quando o nexus não tem a configuração (modo
+ * degradado). Desde a 0.9.4 o app NÃO manda `quantidade`: quem decide é a
+ * configuração do nexus, e ela é POR MODO — 10 nos puros, 50 nos mistos.
+ * Mandar 10 fixo (0.9.0–0.9.3) travava o lote de mistos em 10.
+ */
 export const LOTE_PADRAO = 10;
 
 /**
@@ -280,9 +325,10 @@ export function claimLote(params: {
     apiRequest<LoteResponse>("/separacao/lote", {
       method: "POST",
       body: {
+        // Sem `quantidade`: o alvo é a configuração do nexus, por modo.
         mode,
         sizes: params.sizes,
-        quantidade: params.quantidade ?? LOTE_PADRAO,
+        ...(params.quantidade ? { quantidade: params.quantidade } : {}),
         ...filtersBody(params.filters),
       },
     }),
@@ -333,6 +379,64 @@ export function devolverLote(orderIds?: string[]): Promise<{ devolvidos: number 
     if (!orderIds || orderIds.length === 0) return { devolvidos: 0 };
     const rs = await Promise.allSettled(orderIds.map((id) => releaseSeparacao(id)));
     return { devolvidos: rs.filter((r) => r.status === "fulfilled").length };
+  });
+}
+
+/**
+ * LISTA IMPRESSA: avisa o nexus que a folha de picking destes pedidos saiu na
+ * impressora. A partir daí eles ficam PRESOS na mesa da operadora — o janitor
+ * de 15 min não devolve e o rebalanceamento não realoca —, porque a coleta dos
+ * mistos leva o dia e a lista já está circulando no galpão.
+ *
+ * Best-effort: nexus antigo (404) simplesmente não tem o carimbo, e o pior caso
+ * é o comportamento de antes. Nunca vira erro na cara de quem já imprimiu.
+ */
+export function marcarListaImpressa(orderIds: string[]): Promise<{ presos: number }> {
+  if (orderIds.length === 0) return Promise.resolve({ presos: 0 });
+  return apiRequest<{ presos: number }>("/separacao/lote/lista", {
+    method: "POST",
+    body: { orderIds },
+  }).catch((e: unknown) => {
+    if (e instanceof ApiError && e.status === 404) return { presos: 0 };
+    throw e;
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Rupturas — "Itens faltantes" (o botão do posvenda legado)
+// ---------------------------------------------------------------------------
+
+/** Um item que faltou na prateleira, com a quantidade que faltou. */
+export type ItemFaltante = {
+  orderItemId: string;
+  quantidade: number;
+};
+
+export type CriarRupturaResponse = {
+  /** `true` quando o pedido saiu da fila (virou `on_hold` e soltou o claim). */
+  pedidoEmEspera?: boolean;
+  pedidoStatus?: OrderStatus;
+  webhookStatus?: number | string;
+};
+
+/**
+ * Marca itens FALTANTES de um pedido — o "ITENS FALTANTES" do pós-venda
+ * legado. O servidor registra a ruptura, TIRA o pedido da fila (`on_hold`),
+ * solta o claim e avisa o cliente pelo webhook do chat; o app repõe o lote em
+ * seguida. Quem resolve é a supervisão, na tela de Rupturas do Nexus.
+ */
+export function criarRuptura(params: {
+  orderId: string;
+  itens: ItemFaltante[];
+  observacao?: string;
+}): Promise<CriarRupturaResponse> {
+  return apiRequest<CriarRupturaResponse>("/separacao/rupturas", {
+    method: "POST",
+    body: {
+      orderId: params.orderId,
+      itens: params.itens.map((i) => ({ orderItemId: i.orderItemId, quantidade: i.quantidade })),
+      ...(params.observacao?.trim() ? { observacao: params.observacao.trim() } : {}),
+    },
   });
 }
 
