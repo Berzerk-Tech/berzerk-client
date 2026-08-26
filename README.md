@@ -8,7 +8,7 @@
 Aplicação desktop instalada nos PCs do chão de fábrica da Berzerk. Cobre os módulos do fluxo industrial:
 
 - **Etiquetagem** — aplica identidade RFID em lotes confirmados de produção. Lookup de EAN13 (local + Shopify) e impressão com margem de segurança.
-- **Separação** — a operadora entra numa fila (tamanho + puro/misto), recebe um **lote** de até 10 pedidos e confere peça a peça na mesa RFID.
+- **Separação** — a operadora entra numa fila (tamanho + puro/misto), recebe um **lote** de pedidos (o tamanho é configurado no Nexus) e confere peça a peça na mesa RFID.
 - **Expedição** — bipa etiqueta RFID, identifica pedido pronto, imprime etiqueta J&T e DANFE.
 
 Login no **Nexus** (Cognito, Google Workspace `@berzerk.com.br`) — a partir da v0.7.0.
@@ -170,7 +170,7 @@ Duas responsabilidades mudaram de lado, e é bom saber por quê:
 
 Pedido das separadoras no cutover: puxar **um pedido por vez** deixava a mesa parada entre um claim e outro, e a fila não tinha como ser atacada por dia de emissão. A 0.9.0 refaz o módulo em cima de três coisas:
 
-**Lote de 10.** Ao entrar numa fila o app chama `POST /separacao/lote` e recebe até 10 pedidos que passam a ser **dela** — a sidebar deixa de ser a fila inteira e passa a ser o lote. Clicar num card só decide qual pedido vem agora (sem claim, sem disputa com outra estação). Depois de cada conclusão ou devolução o app chama o mesmo endpoint de novo, que é **idempotente**: devolve tudo o que ela já tem e completa até 10. É esse mecanismo que divide a fila entre as operadoras logadas — cada reposição pega o que ainda não tem dono. O rodapé mostra quantos ainda estão na fila sem dono (`fila.restantes`).
+**Lote de 10.** Ao entrar numa fila o app chama `POST /separacao/lote` e recebe até 10 pedidos que passam a ser **dela** — a sidebar deixa de ser a fila inteira e passa a ser o lote. Clicar num card só decide qual pedido vem agora (sem claim, sem disputa com outra estação). Depois de cada conclusão ou devolução o app chama o mesmo endpoint de novo, que é **idempotente**: devolve tudo o que ela já tem e completa até 10. O rodapé mostra quantos ainda estão na fila sem dono (`fila.restantes`). (Na 0.9.0 o número 10 vinha do app e a divisão entre as estações era emergente — cada reposição pegava só o que ainda não tinha dono; ver a 0.9.3 abaixo.)
 
 Sair da fila (voltar ao menu, trocar de fila, logout por inatividade) **devolve o lote em aberto**, mandando os ids — senão os pedidos ficariam reservados e invisíveis pras outras mesas até o janitor expirar o claim. Se o app tiver sido fechado no meio do turno, `GET /separacao/meus-pedidos` faz a tela de filas oferecer **Retomar** (ou devolver).
 
@@ -179,6 +179,32 @@ Sair da fila (voltar ao menu, trocar de fila, logout por inatividade) **devolve 
 **Picking Geral.** O botão na sidebar abre o agregado da fila (`GET /separacao/queue-products`, agora com `resumo`): uma seção por tamanho com SKU / Produto / Qtd, e os totais "N produtos • N itens • N pedidos". Serve nas duas filas — no misto os itens vêm de tamanhos variados e as seções aparecem todas. **Imprimir Tudo** e **Imprimir `<tamanho>`** geram um PDF A4 (`src/lib/pickingPdf.ts`, jsPDF) e mandam pelo caminho **silencioso** do app (`src/lib/printer.ts` → SumatraPDF), o mesmo da etiqueta J&T e da DANFE; `window.print()` dentro do WebView abriria um diálogo do Windows, que é justamente o que a mesa não tem como responder. Sai na impressora **padrão** do Windows (a configurada em Configurações é a térmica de etiqueta, 100×150 mm).
 
 Endpoints novos que esta versão consome: `POST /separacao/lote`, `POST /separacao/lote/devolver`, `GET /separacao/meus-pedidos`, `GET /separacao/queue-dates`. Enquanto o Nexus não tiver o do lote, o app **degrada** pro claim de um pedido por vez (lote de um, sem "faltam X") em vez de mostrar erro — o app se atualiza sozinho em todas as estações, então as duas ordens de deploy precisam funcionar.
+
+### Lote configurável e divisão da fila (0.9.3)
+
+Duas mudanças de servidor que o app passa a acompanhar (ver
+`docs/separacao-fila-lote.md` no Nexus):
+
+**O tamanho do lote saiu do app.** Era `quantidade: 10` no corpo do
+`POST /separacao/lote`; agora quem manda é a configuração
+`separacao_lote_tamanho` (Configurações do Nexus → *Separação*), e o app não
+manda mais o campo. Mudar de 10 para 6 deixou de exigir uma versão nova do
+desktop.
+
+**A fila esgotada é dividida.** Quando uma estação entra numa fila onde não
+sobrou nada livre, o servidor tira das colegas que estão acima da divisão igual
+os pedidos que elas **ainda não começaram a conferir** — fila com 10 e uma
+operadora segurando os 10: a segunda a entrar sai com 5. Quem perdeu pedidos
+recebe o `queue.changed` e o app re-busca o lote; como a resposta do
+`POST /separacao/lote` é o retrato inteiro, a sidebar encolhe sozinha.
+
+**`POST /separacao/:id/iniciar`** é o que protege a bancada: ao ABRIR um card
+pra conferir, o app carimba o pedido no servidor e ele deixa de ser realocável.
+A chamada é uma por pedido, best-effort (falha de rede não trava nada, e o app
+tenta de novo quando a janela volta ao foco) e degrada em silêncio num Nexus
+sem a rota. Se ainda assim o pedido da mesa sumir da resposta do lote, a tela
+avisa *"Este pedido foi redistribuído para outra estação"* e volta pro lote —
+ela nunca fica conferindo um pedido que o `complete` recusaria com 409.
 
 ### Deep link (abrir pelo Nexus)
 
