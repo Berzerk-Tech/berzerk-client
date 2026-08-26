@@ -11,8 +11,8 @@
 // `POST /desktop/handoff` (ver `identity/token-claims.ts` e
 // `jwt-auth.guard.ts` lá). É também o que o app web do nexus manda.
 //
-// Supabase Auth deixou de ser login: a sessão Supabase (ainda necessária só na
-// Etiquetagem/Rastreio) é DERIVADA desta — ver `supabase-derivada.ts`.
+// Desde a 0.8.0 esta é a ÚNICA sessão do app: a Etiquetagem e o Rastreio, os
+// últimos consumidores do Supabase, passaram a falar com a API do nexus.
 
 import { invoke } from "@tauri-apps/api/core";
 import { openUrl } from "@tauri-apps/plugin-opener";

@@ -4,12 +4,10 @@ import {
   useState,
   type CSSProperties,
 } from "react";
-import type { Session } from "@supabase/supabase-js";
-import { supabase } from "../lib/supabase";
 import { getStationId } from "../lib/station";
+import { subscribePrintJobsChanged } from "../lib/realtime";
 import { printJob as itagPrintJob } from "../lib/itag/iprint";
 import { applyMargin, type ApplyMarginInput } from "../lib/settings";
-import { clearLookupCaches } from "../services/ean13Lookup";
 import * as printJobsService from "../services/printJobs";
 import type {
   RfidPrintJob,
@@ -47,10 +45,10 @@ const MAX_VISIBLE = 50;
  * só virar esta flag.
  */
 const MOVIMENTACAO_ENABLED: boolean = false;
-// Concorrência baixa pra não estourar rate limit do shopify-analytics.
-// O cache module-level dedupa requests pro mesmo product_id, então
-// mesmo com 50 batches só batemos 1x por produto único.
-const CONCURRENCY = 4;
+// Uma chamada por lote (`GET /etiquetagem/lotes/:id/eans`) contra as três do
+// Supabase. A concorrência agora só evita abrir 50 conexões de uma vez contra a
+// API — não há mais rate limit de edge function a respeitar.
+const CONCURRENCY = 6;
 
 type PrintingState = { jobId: string; startedAt: number };
 type Filter =
@@ -83,7 +81,6 @@ function formatError(e: unknown): string {
 async function resolveAllWithConcurrency(
   batches: ProductionBatch[],
   concurrency: number,
-  opts?: { skipShopifyFallback?: boolean },
 ): Promise<ResolvedBatch[]> {
   const out: ResolvedBatch[] = new Array(batches.length);
   let next = 0;
@@ -93,7 +90,7 @@ async function resolveAllWithConcurrency(
       while (next < batches.length) {
         const i = next++;
         try {
-          out[i] = await resolveBatch(batches[i], opts);
+          out[i] = await resolveBatch(batches[i]);
         } catch (e) {
           console.warn(
             "[BatchBrowser] resolveBatch failed for",
@@ -107,10 +104,9 @@ async function resolveAllWithConcurrency(
             sources: {},
             missingSizes: batches[i].sizes.map((s) => s.size),
             isPrintable: false,
-            shopifyTitle: batches[i].design_name,
-            shopifyColor: batches[i].shirt_color,
-            shopifyReference: null,
-            shopifyFallbackAvailable: false,
+            catalogTitle: batches[i].design_name,
+            catalogColor: batches[i].shirt_color,
+            motivo: null,
           };
         }
       }
@@ -121,10 +117,17 @@ async function resolveAllWithConcurrency(
 }
 
 export function BatchBrowser({
-  session,
+  operatorId,
+  operatorEmail,
   onBack,
 }: {
-  session: Session;
+  /**
+   * `sub` do JWT do Cognito. A API resolve o ator sozinha pelo Bearer — isto
+   * aqui só alimenta o que ainda é LOCAL: o payload de auditoria que vai à
+   * iTAG e o rótulo do operador na tela.
+   */
+  operatorId: string;
+  operatorEmail: string;
   onBack: () => void;
 }) {
   const [batches, setBatches] = useState<ResolvedBatch[]>([]);
@@ -156,9 +159,6 @@ export function BatchBrowser({
   const [realtimeStatus, setRealtimeStatus] = useState<
     "connecting" | "connected" | "disconnected"
   >("connecting");
-  const [searchingShopify, setSearchingShopify] = useState<Set<string>>(
-    new Set(),
-  );
   // Busca na base toda (sem filtro de status/estampa): acionada pelo operador
   // quando o lote não está na listagem normal. null = ainda não buscou.
   const [globalResults, setGlobalResults] = useState<
@@ -170,50 +170,23 @@ export function BatchBrowser({
   );
 
   const stationId = getStationId();
-  const operatorId = session.user.id;
-  const operatorEmail = session.user.email ?? "(sem email)";
 
   const load = useCallback(async (showRefreshing: boolean) => {
-    if (showRefreshing) {
-      setRefreshing(true);
-      clearLookupCaches();
-    }
+    if (showRefreshing) setRefreshing(true);
     try {
       const [pending, hist] = await Promise.all([
         fetchPendingBatches(),
         fetchTodayHistory(),
       ]);
       const visible = pending.slice(0, MAX_VISIBLE);
-      // Pula shopify-analytics no load — usa só cache local (unified_products
-      // + cache em memória/localStorage do Shopify). Lotes sem cobertura
-      // completa ficam com `shopifyFallbackAvailable: true` e o operador
-      // pode disparar a busca via botão no card.
-      const resolved = await resolveAllWithConcurrency(visible, CONCURRENCY, {
-        skipShopifyFallback: true,
-      });
+      // Resolve tudo de uma vez. Antes havia DOIS passos — um rápido com o
+      // cache local e outro em background chamando a edge `shopify-analytics`
+      // — porque aquele fallback era lento e podia falhar. O catálogo do nexus
+      // responde numa chamada por lote, então o segundo passo (e o cache em
+      // localStorage que o amortizava) deixaram de existir.
+      const resolved = await resolveAllWithConcurrency(visible, CONCURRENCY);
       setBatches(resolved);
       setHistory(hist);
-
-      // 2º passo (background): lotes com produto Shopify vinculado mas sem EAN
-      // local viram `shopifyFallbackAvailable`. Resolve via Shopify sozinho —
-      // assim "just works" como o painel do industrial, sem clicar "Buscar no
-      // Shopify". O cache (localStorage 1h) deixa as próximas cargas rápidas.
-      const needShopify = resolved.filter((r) => r.shopifyFallbackAvailable);
-      if (needShopify.length > 0) {
-        void (async () => {
-          try {
-            const reresolved = await resolveAllWithConcurrency(
-              needShopify.map((r) => r.batch),
-              CONCURRENCY,
-              { skipShopifyFallback: false },
-            );
-            const byId = new Map(reresolved.map((r) => [r.batch.id, r]));
-            setBatches((prev) => prev.map((b) => byId.get(b.batch.id) ?? b));
-          } catch (e) {
-            console.warn("[BatchBrowser] auto Shopify resolve falhou:", e);
-          }
-        })();
-      }
       // Quais lotes visíveis têm impressão de teste pra limpar (botão no card).
       // allSettled-style: falha aqui não derruba o load.
       try {
@@ -255,12 +228,17 @@ export function BatchBrowser({
     };
   }, [load]);
 
-  // Fila de impressão: fetch + Realtime sub em rfid_print_jobs
+  // Fila de impressão: fetch + evento `print-jobs.changed` do WS do nexus.
+  //
+  // Substitui o Realtime do Supabase (`postgres_changes` em `rfid_print_jobs`,
+  // canal `rfid-print-jobs-queue`). Mesma disciplina do resto do app: o WS é
+  // GATILHO — quem recebe refaz o fetch —, e `onChange` também dispara ao
+  // (re)conectar, ressincronizando o que se perdeu offline.
   useEffect(() => {
     let alive = true;
     async function loadJobs() {
-      // Independentes — se a tabela rfid_epc_inventory ainda não existir,
-      // não derrubar a fila de impressão. allSettled isola as falhas.
+      // Independentes: uma falha na lista de movimentação não pode derrubar a
+      // fila de impressão. allSettled isola as duas.
       const [jobsRes, awaitingRes] = await Promise.allSettled([
         printJobsService.fetchActivePrintJobs(),
         printJobsService.fetchJobsAwaitingMovimentacao(),
@@ -269,41 +247,32 @@ export function BatchBrowser({
       if (jobsRes.status === "fulfilled") {
         setActiveJobs(jobsRes.value);
       } else {
-        console.warn("[BatchBrowser] fetchActivePrintJobs failed:", jobsRes.reason);
+        console.warn("[BatchBrowser] fetchActivePrintJobs falhou:", jobsRes.reason);
       }
       if (awaitingRes.status === "fulfilled") {
         setAwaitingJobs(awaitingRes.value);
       } else {
         console.warn(
-          "[BatchBrowser] fetchJobsAwaitingMovimentacao failed:",
+          "[BatchBrowser] fetchJobsAwaitingMovimentacao falhou:",
           awaitingRes.reason,
         );
       }
     }
-    loadJobs();
-    const channel = supabase
-      .channel("rfid-print-jobs-queue")
-      .on(
-        "postgres_changes",
-        { event: "*", schema: "public", table: "rfid_print_jobs" },
-        () => loadJobs(),
-      )
-      .subscribe((status) => {
-        if (!alive) return;
-        if (status === "SUBSCRIBED") setRealtimeStatus("connected");
-        else if (status === "CHANNEL_ERROR" || status === "CLOSED" || status === "TIMED_OUT")
-          setRealtimeStatus("disconnected");
-        else setRealtimeStatus("connecting");
-      });
+    const parar = subscribePrintJobsChanged(
+      () => void loadJobs(),
+      (status) => {
+        if (alive) setRealtimeStatus(status);
+      },
+    );
     return () => {
       alive = false;
-      supabase.removeChannel(channel);
+      parar();
     };
   }, []);
 
   // Tick por segundo quando há jobs imprimindo (local OU global)
   const hasPrintingJobs =
-    printing.size > 0 || activeJobs.some((j) => j.status === "printing");
+    printing.size > 0 || activeJobs.some((j) => j.status === "imprimindo");
   useEffect(() => {
     if (!hasPrintingJobs) return;
     const id = setInterval(() => setNow(Date.now()), 1000);
@@ -335,11 +304,8 @@ export function BatchBrowser({
       try {
         await printJobsService.discardTestForBatch(batchId);
         logAction({
-          action: "discard_test",
+          action: "descartar_teste",
           batchId,
-          batchCode,
-          operatorId,
-          operatorEmail,
         });
       } catch (e) {
         console.error("[BatchBrowser] discardTestForBatch failed:", e);
@@ -352,34 +318,6 @@ export function BatchBrowser({
     },
     [load, operatorId, operatorEmail],
   );
-
-  // Re-resolve um lote específico forçando o fallback do Shopify. Usado
-  // quando o operador clica "Buscar no Shopify" em card bloqueado por
-  // EAN13 faltante. Resultado substitui a entry correspondente em batches[].
-  const handleSearchShopify = useCallback(async (resolved: ResolvedBatch) => {
-    const batchId = resolved.batch.id;
-    setSearchingShopify((s) => {
-      const next = new Set(s);
-      next.add(batchId);
-      return next;
-    });
-    try {
-      const updated = await resolveBatch(resolved.batch, {
-        skipShopifyFallback: false,
-      });
-      setBatches((prev) =>
-        prev.map((b) => (b.batch.id === batchId ? updated : b)),
-      );
-    } catch (e) {
-      console.warn("[BatchBrowser] handleSearchShopify failed:", e);
-    } finally {
-      setSearchingShopify((s) => {
-        const next = new Set(s);
-        next.delete(batchId);
-        return next;
-      });
-    }
-  }, []);
 
   const confirmAndPrint = useCallback(
     async (marginConfig: ApplyMarginInput, override?: PrintOverride) => {
@@ -410,15 +348,13 @@ export function BatchBrowser({
 
       let jobId: string;
       try {
+        // Sem `batchCode`, `shirtColor`, `designName`, `totalEtiquetas` nem
+        // operador: o servidor lê o retrato do lote no banco, soma o total dos
+        // itens e resolve o ator pelo Bearer. Menos coisa que o cliente pode
+        // mandar errado.
         jobId = await printJobsService.createPrintJob({
           batchId: batch.id,
-          batchCode: batch.batch_code,
           items,
-          shirtColor: resolved.shopifyColor ?? batch.shirt_color,
-          designName: batch.design_name,
-          totalEtiquetas: totalRequested,
-          operatorId,
-          operatorEmail,
           stationId,
           isTest,
           isManual,
@@ -438,7 +374,7 @@ export function BatchBrowser({
           batchId: batch.id,
           batchCode: batch.batch_code,
           items,
-          shirtColor: resolved.shopifyColor ?? batch.shirt_color,
+          shirtColor: resolved.catalogColor ?? batch.shirt_color,
           designName: batch.design_name,
           operatorId,
           audit: { operatorName: operatorEmail },
@@ -453,12 +389,9 @@ export function BatchBrowser({
           if (isTest) {
             setBatchesWithTest((prev) => new Set(prev).add(batch.id));
             logAction({
-              action: "print_test",
+              action: "impressao_teste",
               batchId: batch.id,
-              batchCode: batch.batch_code,
               jobId,
-              operatorId,
-              operatorEmail,
               details: { printed: result.count, requested: totalRequested },
             });
           } else if (partial) {
@@ -474,12 +407,9 @@ export function BatchBrowser({
               ),
             );
             logAction({
-              action: "print_partial",
+              action: "impressao_parcial",
               batchId: batch.id,
-              batchCode: batch.batch_code,
               jobId,
-              operatorId,
-              operatorEmail,
               details: { printed: result.count, requested: totalRequested },
             });
           } else if (result.count > 0) {
@@ -498,12 +428,9 @@ export function BatchBrowser({
               console.warn("[BatchBrowser] markBatchRfidPrinted falhou:", e);
             }
             logAction({
-              action: "print_done",
+              action: "impressao_concluida",
               batchId: batch.id,
-              batchCode: batch.batch_code,
               jobId,
-              operatorId,
-              operatorEmail,
               details: {
                 printed: result.count,
                 requested: totalRequested,
@@ -518,12 +445,9 @@ export function BatchBrowser({
           await printJobsService.markFailed(jobId, msg);
           setErrors((m) => new Map(m).set(batch.id, msg));
           logAction({
-            action: "print_failed",
+            action: "impressao_falhou",
             batchId: batch.id,
-            batchCode: batch.batch_code,
             jobId,
-            operatorId,
-            operatorEmail,
             details: { error: msg },
           });
         }
@@ -536,12 +460,9 @@ export function BatchBrowser({
         }
         setErrors((m) => new Map(m).set(batch.id, msg));
         logAction({
-          action: "print_failed",
+          action: "impressao_falhou",
           batchId: batch.id,
-          batchCode: batch.batch_code,
           jobId,
-          operatorId,
-          operatorEmail,
           details: { error: msg },
         });
       } finally {
@@ -571,11 +492,8 @@ export function BatchBrowser({
       try {
         await unmarkBatchRfidPrinted(entry.id);
         logAction({
-          action: "reprint_queue",
+          action: "reimpressao_enfileirada",
           batchId: entry.id,
-          batchCode: entry.batch_code,
-          operatorId,
-          operatorEmail,
           details: { origem: "historico" },
         });
       } catch (e) {
@@ -628,11 +546,8 @@ export function BatchBrowser({
       try {
         await unmarkBatchRfidPrinted(entry.batch.id);
         logAction({
-          action: "reprint_queue",
+          action: "reimpressao_enfileirada",
           batchId: entry.batch.id,
-          batchCode: entry.batch.batch_code,
-          operatorId,
-          operatorEmail,
           details: {
             origem: "busca_global",
             receiptStatus: entry.batch.receiptStatus,
@@ -664,9 +579,7 @@ export function BatchBrowser({
       if (resolvingGlobal.has(id)) return;
       setResolvingGlobal((s) => new Set(s).add(id));
       try {
-        const resolved = await resolveBatch(entry.batch, {
-          skipShopifyFallback: false,
-        });
+        const resolved = await resolveBatch(entry.batch);
         if (!resolved.isPrintable) {
           window.alert(
             `Lote ${entry.batch.batch_code} sem cobertura de EAN13 ` +
@@ -696,7 +609,7 @@ export function BatchBrowser({
     !q ||
     matchesQuery(b.batch.batch_code) ||
     matchesQuery(b.batch.design_name) ||
-    matchesQuery(b.shopifyTitle);
+    matchesQuery(b.catalogTitle);
 
   // Lote agrupado é sempre imprimível; o único gate restante é a cobertura de
   // EAN13 (isPrintable). Sem EAN → "Faltando info".
@@ -820,15 +733,11 @@ export function BatchBrowser({
         await printJobsService.markMoved({
           epcs: pendingEpcs,
           situacaoDestino: config.situacaoDestino,
-          operatorId,
         });
         logAction({
           action: "movimentar",
           batchId: job.batch_id,
-          batchCode: job.batch_code,
           jobId: job.id,
-          operatorId,
-          operatorEmail,
           details: {
             epcs: pendingEpcs.length,
             situacaoDestino: config.situacaoDestino,
@@ -843,12 +752,9 @@ export function BatchBrowser({
         const msg = formatError(e);
         console.error("[BatchBrowser] handleMovimentar failed:", e);
         logAction({
-          action: "movimentar_failed",
+          action: "movimentar_falhou",
           batchId: job.batch_id,
-          batchCode: job.batch_code,
           jobId: job.id,
-          operatorId,
-          operatorEmail,
           details: { error: msg },
         });
         window.alert(`Movimentação falhou: ${msg}`);
@@ -885,8 +791,8 @@ export function BatchBrowser({
   const showBlocked = filter === "all" || filter === "blocked";
   const showHistory = filter === "all" || filter === "history";
 
-  const printingCount = activeJobs.filter((j) => j.status === "printing").length;
-  const failedCount = activeJobs.filter((j) => j.status === "failed").length;
+  const printingCount = activeJobs.filter((j) => j.status === "imprimindo").length;
+  const failedCount = activeJobs.filter((j) => j.status === "falhou").length;
 
   // iTAG cloud reachability: inferido do histórico recente.
   // Sem endpoint de health-check dedicado, usa o último outcome conhecido:
@@ -898,7 +804,7 @@ export function BatchBrowser({
     const cutoff = Date.now() - HOUR;
     const recentFailed = activeJobs.some(
       (j) =>
-        j.status === "failed" &&
+        j.status === "falhou" &&
         j.completed_at &&
         new Date(j.completed_at).getTime() > cutoff,
     );
@@ -911,7 +817,7 @@ export function BatchBrowser({
   })();
 
   const handleCancelJob = useCallback((job: RfidPrintJob) => {
-    if (job.status === "printing") {
+    if (job.status === "imprimindo") {
       const ok = window.confirm(
         `Cancelar impressão de ${job.batch_code}?\n\n` +
           "A impressora RFID pode continuar imprimindo as etiquetas que já foram enviadas pra ela. " +
@@ -1129,8 +1035,6 @@ export function BatchBrowser({
                         handleDiscardTest(r.batch.id, r.batch.batch_code)
                       }
                       hasTest={batchesWithTest.has(r.batch.id)}
-                      onSearchShopify={handleSearchShopify}
-                      searchingShopify={searchingShopify.has(r.batch.id)}
                     />
                   ))
                 )}
@@ -1154,8 +1058,6 @@ export function BatchBrowser({
                       handleDiscardTest(r.batch.id, r.batch.batch_code)
                     }
                     hasTest={batchesWithTest.has(r.batch.id)}
-                    onSearchShopify={handleSearchShopify}
-                    searchingShopify={searchingShopify.has(r.batch.id)}
                   />
                 ))}
               </Section>
@@ -1298,35 +1200,35 @@ function formatElapsedSec(sec: number): string {
 }
 
 const JOB_STATUS_LABEL: Record<RfidPrintJobStatus, string> = {
-  queued: "Aguardando",
-  printing: "Imprimindo",
-  done: "Concluído",
-  failed: "Falhou",
-  cancelled: "Cancelado",
+  na_fila: "Aguardando",
+  imprimindo: "Imprimindo",
+  concluido: "Concluído",
+  falhou: "Falhou",
+  cancelado: "Cancelado",
 };
 
 const JOB_STATUS_STYLE: Record<RfidPrintJobStatus, CSSProperties> = {
-  queued: {
+  na_fila: {
     background: "var(--bg-input)",
     color: "var(--text-secondary)",
     borderColor: "var(--border)",
   },
-  printing: {
+  imprimindo: {
     background: "var(--info-bg)",
     color: "var(--info-text)",
     borderColor: "var(--info-border)",
   },
-  done: {
+  concluido: {
     background: "var(--bg-input)",
     color: "var(--text-secondary)",
     borderColor: "var(--border)",
   },
-  failed: {
+  falhou: {
     background: "var(--danger-bg)",
     color: "var(--danger-text)",
     borderColor: "var(--danger-border)",
   },
-  cancelled: {
+  cancelado: {
     background: "var(--bg-input)",
     color: "var(--text-muted)",
     borderColor: "var(--border)",
@@ -1344,12 +1246,12 @@ function PrintJobRow({
 }) {
   const startedTs = job.started_at ? new Date(job.started_at).getTime() : null;
   const elapsed =
-    job.status === "printing" && startedTs
+    job.status === "imprimindo" && startedTs
       ? Math.max(0, Math.floor((nowTs - startedTs) / 1000))
       : null;
   const completed = job.completed_at ? formatTime(job.completed_at) : null;
   const cancelLabel =
-    job.status === "failed" ? "Descartar" : "Cancelar";
+    job.status === "falhou" ? "Descartar" : "Cancelar";
 
   return (
     <div style={queueRow}>
@@ -1369,7 +1271,7 @@ function PrintJobRow({
             )}
           </span>
         </div>
-        {job.status === "failed" && job.error_message && (
+        {job.status === "falhou" && job.error_message && (
           <div style={queueError}>{job.error_message}</div>
         )}
       </div>
@@ -1378,10 +1280,10 @@ function PrintJobRow({
         {elapsed != null && (
           <span style={queueTime}>{formatElapsedSec(elapsed)}</span>
         )}
-        {job.status === "failed" && completed && (
+        {job.status === "falhou" && completed && (
           <span style={queueTime}>{completed}</span>
         )}
-        {job.status === "queued" && <span style={queueTime}>aguarda…</span>}
+        {job.status === "na_fila" && <span style={queueTime}>aguarda…</span>}
       </div>
       <button
         onClick={() => onCancel(job)}
@@ -1417,7 +1319,7 @@ function AwaitingMovRow({
       <span
         style={{
           ...queueBadge,
-          ...(partial ? JOB_STATUS_STYLE.failed : JOB_STATUS_STYLE.done),
+          ...(partial ? JOB_STATUS_STYLE.falhou : JOB_STATUS_STYLE.concluido),
         }}
       >
         {partial ? "PARCIAL" : "IMPRESSO"}

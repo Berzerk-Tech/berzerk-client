@@ -5,16 +5,15 @@
 //   berzerk://login                                   (0.7.0)
 //   berzerk://open
 //
-// O que mudou na 0.7.0: quem manda na identidade é o Cognito. O `token_hash`
-// do Nexus (magic link do Supabase) deixou de ser LOGIN e virou só o atalho pra
-// sessão Supabase DERIVADA que a Etiquetagem ainda precisa. Por isso:
+// O que mudou na 0.8.0: a Etiquetagem saiu do Supabase (fase 3 do
+// `docs/plano-corte-supabase.md` do nexus), e com ela o ÚNICO consumidor do
+// `token_hash`. O parâmetro continua sendo aceito e IGNORADO — o Nexus em
+// produção ainda emite `berzerk://auth?token_hash=…` para clientes antigos, e
+// um link desses tem de continuar abrindo o app logado em vez de dar erro.
 //
-// - sem sessão do Nexus, `auth` dispara primeiro o login PKCE no navegador
-//   (que já está logado no Nexus/Google — costuma voltar sozinho) e só depois
-//   aplica o `token_hash`;
-// - com sessão do Nexus, aplica o `token_hash` direto (economiza um handoff);
-// - `berzerk://login` só dispara o login;
-// - `berzerk://open` só foca a janela.
+// Hoje os três hosts fazem a mesma coisa útil: focar a janela e, se não houver
+// sessão do Nexus, disparar o login PKCE no navegador (que já está logado no
+// Google — costuma voltar sozinho).
 //
 // No Windows/Linux o SO abre uma SEGUNDA instância do app com a URL como argv —
 // o `tauri-plugin-single-instance` (feature `deep-link`) repassa isso pra
@@ -23,8 +22,7 @@
 
 import { getCurrent, onOpenUrl } from "@tauri-apps/plugin-deep-link";
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import { getSessaoSync, iniciarLogin, onSessaoChange } from "./cognito";
-import { aplicarTokenHash, garantirSessaoSupabase } from "./supabase-derivada";
+import { getSessaoSync, iniciarLogin } from "./cognito";
 
 const SCHEME = "berzerk:";
 
@@ -32,17 +30,12 @@ export type DeepLinkAuthResult =
   | { kind: "success"; email: string }
   | { kind: "error"; message: string };
 
-export const LINK_INVALIDO_MSG = "Link expirado ou inválido — entre com o Google.";
-
 type Handlers = {
-  /** Resultado de aplicar o `token_hash` (sessão da Etiquetagem). */
+  /** Resultado do `berzerk://auth` — hoje só diz "está logado" ou o erro do login. */
   onAuthResult?: (result: DeepLinkAuthResult) => void;
   /** O link disparou o login no navegador — a tela de login mostra o "aguardando". */
   onLoginIniciado?: () => void;
 };
-
-/** `token_hash` que chegou antes da sessão do Nexus — aplicado quando ela existir. */
-let tokenHashPendente: string | null = null;
 
 /**
  * Liga os listeners de deep link. Chamar UMA vez no boot do app (App.tsx),
@@ -51,14 +44,6 @@ let tokenHashPendente: string | null = null;
 export function initDeepLinks(handlers: Handlers): () => void {
   let stopped = false;
   let unlisten: (() => void) | null = null;
-
-  // Login concluído com um `token_hash` na fila: aplica agora.
-  const pararSessao = onSessaoChange((sessao) => {
-    if (!sessao || !tokenHashPendente) return;
-    const hash = tokenHashPendente;
-    tokenHashPendente = null;
-    void aplicarComAviso(hash, handlers);
-  });
 
   // URL que já abriu o app nesta execução (cold start via deep link).
   getCurrent()
@@ -78,7 +63,6 @@ export function initDeepLinks(handlers: Handlers): () => void {
 
   return () => {
     stopped = true;
-    pararSessao();
     unlisten?.();
   };
 }
@@ -145,45 +129,27 @@ async function dispararLogin(handlers: Handlers): Promise<boolean> {
   return true;
 }
 
-async function handleAuth(url: URL, handlers: Handlers): Promise<void> {
+/**
+ * `berzerk://auth?token_hash=…` — o link que o Nexus emite hoje.
+ *
+ * O `token_hash` é IGNORADO desde a 0.8.0: ele existia para derivar a sessão
+ * Supabase da Etiquetagem, que agora fala com a API do Nexus. O host continua
+ * aceito de propósito — o Nexus em produção segue emitindo esses links, e um
+ * link legítimo tem de abrir o app logado em vez de dar erro na cara de quem
+ * clicou.
+ */
+async function handleAuth(_url: URL, handlers: Handlers): Promise<void> {
   await focusWindow();
 
-  const tokenHash = url.searchParams.get("token_hash");
-  const type = url.searchParams.get("type");
-
-  // NUNCA logar tokenHash — é credencial de sessão de curta duração.
-  if (!tokenHash || type !== "magiclink") {
-    console.warn("[deep-link] auth sem token_hash/type=magiclink, ignorando");
-    handlers.onAuthResult?.({ kind: "error", message: LINK_INVALIDO_MSG });
+  if (getSessaoSync()) {
+    handlers.onAuthResult?.({
+      kind: "success",
+      email: getSessaoSync()?.email ?? "(sem email)",
+    });
     return;
   }
 
-  // Sem sessão do Nexus, o login vem primeiro: o `token_hash` sozinho não
-  // autentica mais nada (só serve pra Etiquetagem). Fica na fila e é aplicado
-  // assim que o PKCE voltar.
-  if (!getSessaoSync()) {
-    tokenHashPendente = tokenHash;
-    const ok = await dispararLogin(handlers);
-    if (!ok) tokenHashPendente = null;
-    return;
-  }
-
-  await aplicarComAviso(tokenHash, handlers);
-}
-
-async function aplicarComAviso(tokenHash: string, handlers: Handlers): Promise<void> {
-  const ok = await aplicarTokenHash(tokenHash);
-  if (!ok) {
-    // Link velho/já usado não é motivo pra travar: o handoff normal (Bearer
-    // Cognito) tenta de novo e costuma resolver.
-    const derivou = await garantirSessaoSupabase({ forcar: true });
-    if (!derivou) {
-      handlers.onAuthResult?.({ kind: "error", message: LINK_INVALIDO_MSG });
-      return;
-    }
-  }
-  handlers.onAuthResult?.({
-    kind: "success",
-    email: getSessaoSync()?.email ?? "(sem email)",
-  });
+  const ok = await dispararLogin(handlers);
+  // `dispararLogin` já reportou o erro; o sucesso vem pelo callback do PKCE.
+  if (!ok) return;
 }

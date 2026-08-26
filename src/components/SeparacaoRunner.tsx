@@ -15,24 +15,27 @@ import { beepError, beepOk } from "../lib/beep";
 import { subscribeQueueChanged } from "../lib/realtime";
 import { onBeforeForcedLogout } from "../lib/idleSession";
 import { SupervisorModal } from "./SupervisorModal";
+import { PickingGeralModal } from "./PickingGeralModal";
+import { nomeDaOperadora } from "./OperatorChip";
+import { getSessaoSync } from "../lib/cognito";
 import { SeparacaoHistoryModal } from "./SeparacaoHistoryModal";
 import { PickingFiltersModal, emptyFilters, loadFilters, saveFilters } from "./PickingFiltersModal";
 import { ApiError } from "../lib/api";
 import {
-  claimOrder,
+  claimLote,
   completeSeparacao,
-  getQueueList,
+  devolverLote,
+  getQueueDates,
   releaseSeparacao,
-  type ClaimResponse,
   type EpcLookupItem,
   type LiberacaoFaltante,
   type LeituraResolvida,
   type LiberacaoSupervisor,
   type Order,
   type OrderItem,
+  type QueueDatesResponse,
   type QueueFilters,
   type QueueListItem,
-  type QueueListResponse,
   type SeparationMode,
 } from "../services/orders";
 
@@ -164,21 +167,35 @@ const LOG_MAX = 50;
 type Props = {
   title: string;
   kicker: string;
-  /** Como puxar o próximo pedido (fila normal por tamanho, ou mistos). */
-  claim: (filters?: QueueFilters) => Promise<ClaimResponse>;
   /** Texto quando a fila esvazia. */
   emptyHint: string;
-  /** Fila ativa (mode+size) — habilita a sidebar com os próximos pedidos. */
-  queue?: { mode: SeparationMode; size: string };
+  /**
+   * Fila ativa. `size` é o rótulo (uma das 5 filas fixas) e `sizes` são os
+   * tamanhos REAIS do bucket — é a lista que vai no lote, pra XG cobrir
+   * XXG/G1/G2/G3 e nenhum pedido ficar órfão.
+   */
+  queue: { mode: SeparationMode; size: string; sizes: string[] };
   onBack: () => void;
 };
 
-export function SeparacaoRunner({ title, kicker, claim, emptyHint, queue, onBack }: Props) {
+export function SeparacaoRunner({ title, kicker, emptyHint, queue, onBack }: Props) {
   const rfid = useRfid();
   const [phase, setPhase] = useState<Phase>("loading");
   const [order, setOrder] = useState<Order | null>(null);
+  // LOTE da operadora (0.9.0): ela entra na fila e leva até 10 pedidos que
+  // aparecem SÓ pra ela — a sidebar é o lote, não a fila inteira. Puxar 1 por
+  // vez era o que as separadoras reclamavam no cutover. A divisão da fila
+  // entre as estações É este mecanismo: cada reposição pega o que ainda não
+  // tem dono, então duas mesas nunca disputam o mesmo pedido.
+  const [lote, setLote] = useState<Order[]>([]);
+  /** Pedidos ainda SEM DONO na fila (o "faltam X"). null = servidor não disse. */
+  const [restantes, setRestantes] = useState<number | null>(null);
+  const loteRef = useRef<Order[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [completing, setCompleting] = useState(false);
+  const completingRef = useRef(false);
+  /** Uma reposição por vez — o push do WS não pode atropelar a do complete. */
+  const puxandoRef = useRef(false);
   // progresso por item (ref pra ler dentro do closure de leitura; state pra render)
   const progressRef = useRef<Map<string, ItemProgress>>(new Map());
   // Sobressalentes por EPC (bloqueiam o Concluir até reiniciar a leitura).
@@ -189,6 +206,7 @@ export function SeparacaoRunner({ title, kicker, claim, emptyHint, queue, onBack
   const tick = () => forceRender((n) => n + 1);
   const orderRef = useRef<Order | null>(null);
   orderRef.current = order;
+  loteRef.current = lote;
   // Época da leitura: bump = reset da sessão (zera dedupe + limpa o buffer da
   // mesa, sem desarmar o leitor) — é o "Reiniciar (R)".
   const [sessionEpoch, setSessionEpoch] = useState(0);
@@ -196,8 +214,6 @@ export function SeparacaoRunner({ title, kicker, claim, emptyHint, queue, onBack
   const [filters, setFilters] = useState<QueueFilters>(() => loadFilters());
   const filtersRef = useRef(filters);
   filtersRef.current = filters;
-  // Troca de pedido por clique em andamento (não deixa concorrer com claim).
-  const switchingRef = useRef(false);
   // Aviso não-bloqueante (claim por clique falhou, degradação de endpoint…).
   const [notice, setNotice] = useState<string | null>(null);
   const noticeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -214,29 +230,78 @@ export function SeparacaoRunner({ title, kicker, claim, emptyHint, queue, onBack
     setServerFaltantes(null);
   }, []);
 
-  const fetchNext = useCallback(async () => {
-    setPhase("loading");
-    setError(null);
-    resetLeitura();
-    try {
-      const { order: next } = await claim(filtersRef.current);
-      if (!next) {
-        setOrder(null);
-        setPhase("empty");
-        return;
+  /**
+   * (Re)carrega o lote e coloca um pedido na mesa. É o MESMO caminho pra
+   * entrar na fila e pra repor depois de concluir/devolver: o endpoint é
+   * idempotente (devolve tudo o que já é dela e completa até 10), então
+   * chamar de novo nunca duplica nem perde pedido.
+   *
+   * `preservarAtual` mantém na mesa o pedido que a operadora está conferindo
+   * (troca de filtro/data no meio do pedido não pode zerar a leitura dela).
+   */
+  const puxarLote = useCallback(
+    async (opts?: { preservarAtual?: boolean }) => {
+      // Reposição em background (push do WS, troca de filtro) cede a vez: o
+      // caminho do complete já vai repor, e duas chamadas em voo trocariam o
+      // pedido da mesa no meio da conferência.
+      if (opts?.preservarAtual && (puxandoRef.current || completingRef.current)) return;
+      const atual = opts?.preservarAtual ? orderRef.current : null;
+      if (!atual) {
+        setPhase("loading");
+        resetLeitura();
       }
-      setOrder(next);
-      setPhase("separating");
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
-      setPhase("error");
-    }
-  }, [claim, resetLeitura]);
+      setError(null);
+      puxandoRef.current = true;
+      try {
+        const { orders, fila } = await claimLote({
+          mode: queue.mode,
+          sizes: queue.sizes,
+          filters: filtersRef.current,
+        });
+        setLote(orders);
+        loteRef.current = orders;
+        setRestantes(fila?.restantes ?? null);
+        const proximo = (atual && orders.find((o) => o.id === atual.id)) ?? orders[0] ?? null;
+        if (proximo?.id !== atual?.id) resetLeitura();
+        setOrder(proximo);
+        setPhase(proximo ? "separating" : "empty");
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        // Com pedido na mesa a falha é só aviso: o lote dela continua válido.
+        if (atual) {
+          showNotice(`Não deu pra atualizar o lote: ${msg}`);
+          return;
+        }
+        setError(msg);
+        setPhase("error");
+      } finally {
+        puxandoRef.current = false;
+      }
+    },
+    [queue.mode, queue.sizes, resetLeitura, showNotice],
+  );
 
-  // Primeiro pedido ao montar.
+  // Entrar na fila = puxar o lote.
   useEffect(() => {
-    void fetchNext();
-  }, [fetchNext]);
+    void puxarLote();
+  }, [puxarLote]);
+
+  // Reposição por push: `queue.changed` (pedido novo do tiny-sync, pedido
+  // devolvido por outra estação) completa o lote sem a operadora fazer nada —
+  // é o que tira o "Procurar de novo" do caminho quando a fila estava vazia.
+  // Debounce porque o evento vem em rajada num sync; `preservarAtual` garante
+  // que o pedido em conferência não sai da mesa.
+  useEffect(() => {
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const unsubscribe = subscribeQueueChanged(() => {
+      if (timer) clearTimeout(timer);
+      timer = setTimeout(() => void puxarLote({ preservarAtual: true }), 3000);
+    });
+    return () => {
+      if (timer) clearTimeout(timer);
+      unsubscribe();
+    };
+  }, [puxarLote]);
 
   const allDone = useCallback((ord: Order): boolean => {
     const prog = progressRef.current;
@@ -273,10 +338,12 @@ export function SeparacaoRunner({ title, kicker, claim, emptyHint, queue, onBack
     // Sobressalente na mesa TRAVA o complete — senão iria peça a mais.
     if (!ord || completing || extrasRef.current.size > 0) return;
     setCompleting(true);
+    completingRef.current = true;
     try {
       const tags = collectedTags();
       await completeSeparacao(ord.id, tags, undefined, await leiturasPayload(tags));
-      await fetchNext();
+      // Reposição: o lote volta a ter 10 (ou o que a fila ainda tiver).
+      await puxarLote();
     } catch (e) {
       // 422 `liberacao_necessaria`: a contagem local fechou mas o servidor NÃO
       // reconheceu todas as peças (EPC fora do inventário do nexus, surpresa
@@ -307,9 +374,10 @@ export function SeparacaoRunner({ title, kicker, claim, emptyHint, queue, onBack
       const msg = e instanceof Error ? e.message : String(e);
       showNotice(negocio ? `Não dá pra concluir: ${msg}` : `Falha ao concluir: ${msg} — tenta de novo ou chama o suporte.`);
     } finally {
+      completingRef.current = false;
       setCompleting(false);
     }
-  }, [completing, collectedTags, fetchNext, showNotice, leiturasPayload]);
+  }, [completing, collectedTags, puxarLote, showNotice, leiturasPayload]);
 
   /**
    * Reinicia a conferência do pedido atual: a operadora tirou a peça errada da
@@ -325,54 +393,52 @@ export function SeparacaoRunner({ title, kicker, claim, emptyHint, queue, onBack
   }, [completing, resetLeitura]);
 
   /**
-   * Avança pra um pedido ESPECÍFICO clicado na fila (ex.: o atual espera
-   * reposição). Sem duplicação: devolve o atual (release) e claima o clicado
-   * ATOMICAMENTE no nexus — se outra estação levou primeiro, avisa e volta
-   * pro fluxo normal. Nexus antigo (sem o endpoint) degrada com aviso.
+   * Troca o pedido da mesa por outro DO PRÓPRIO LOTE (clique no card). Sem
+   * release nem claim: os dez já estão reservados pra ela — decidir a ordem de
+   * atacar é escolha local, não ida ao servidor.
    */
-  const jumpToOrder = useCallback(
-    async (target: QueueListItem) => {
-      if (switchingRef.current || completing) return;
-      const ord = orderRef.current;
-      if (ord && ord.id === target.id) return;
-      switchingRef.current = true;
-      setPhase("loading");
-      setError(null);
-      try {
-        if (ord && ord.status === "separating") {
-          orderRef.current = null;
-          setOrder(null);
-          await releaseSeparacao(ord.id).catch(() => {
-            /* best-effort: o janitor recupera */
-          });
-        }
-        resetLeitura();
-        const { order: next } = await claimOrder(target.id);
-        if (!next) {
-          await fetchNext();
-          return;
-        }
-        setOrder(next);
-        setPhase("separating");
-      } catch (e) {
-        if (e instanceof ApiError && e.status === 409) {
-          showNotice(
-            `O pedido #${target.numero ?? ""} acabou de ser puxado por outra estação — seguindo com o próximo da fila.`,
-          );
-        } else if (e instanceof ApiError && e.status === 404) {
-          showNotice(
-            "O servidor ainda não suporta avançar por clique (aguardando atualização do nexus) — puxando o próximo da fila.",
-          );
-        } else {
-          showNotice(e instanceof Error ? e.message : String(e));
-        }
-        await fetchNext();
-      } finally {
-        switchingRef.current = false;
-      }
+  const selecionarPedido = useCallback(
+    (alvo: Order) => {
+      if (completing || orderRef.current?.id === alvo.id) return;
+      resetLeitura();
+      setOrder(alvo);
+      setPhase("separating");
     },
-    [completing, fetchNext, resetLeitura, showNotice],
+    [completing, resetLeitura],
   );
+
+  /** Devolve SÓ o pedido da mesa e repõe o lote (o resto continua dela). */
+  const devolverAtual = useCallback(async () => {
+    const ord = orderRef.current;
+    if (!ord || completing) return;
+    setPhase("loading");
+    orderRef.current = null;
+    setOrder(null);
+    await releaseSeparacao(ord.id).catch(() => {
+      /* best-effort: o janitor recupera */
+    });
+    await puxarLote();
+  }, [completing, puxarLote]);
+
+  /**
+   * Sair da fila devolve o LOTE INTEIRO. Sem isto os pedidos reservados
+   * ficariam invisíveis pras outras estações até o janitor expirar o claim —
+   * que é justamente o que o lote não pode causar.
+   */
+  const saindoRef = useRef(false);
+  const devolverTudo = useCallback(async () => {
+    if (saindoRef.current) return;
+    // Devolve SÓ os ids que ela tem de fato. Sem lista o servidor devolveria
+    // "todos os em aberto" — e o remonte do StrictMode (dev) chegaria aqui com
+    // o lote ainda em voo, jogando fora o que acabou de ser reservado.
+    const ids = loteRef.current.map((o) => o.id);
+    if (ids.length === 0) return;
+    saindoRef.current = true;
+    orderRef.current = null;
+    await devolverLote(ids).catch(() => {
+      /* best-effort: o janitor recupera */
+    });
+  }, []);
 
   // === Liberação por supervisor (concluir SEM todas as peças no RFID) ===
   const [supervisorOpen, setSupervisorOpen] = useState(false);
@@ -405,9 +471,9 @@ export function SeparacaoRunner({ title, kicker, claim, emptyHint, queue, onBack
       await completeSeparacao(ord.id, tags, liberacao, await leiturasPayload(tags));
       setSupervisorOpen(false);
       setServerFaltantes(null);
-      await fetchNext();
+      await puxarLote();
     },
-    [collectedTags, fetchNext, leiturasPayload],
+    [collectedTags, puxarLote, leiturasPayload],
   );
 
   // Acha o item esperado que casa com a tag lida. Casa por QUALQUER
@@ -610,54 +676,46 @@ export function SeparacaoRunner({ title, kicker, claim, emptyHint, queue, onBack
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [phase, completing, supervisorOpen, restartLeitura]);
 
-  // Devolve o pedido pra fila se sair no meio.
+  // Devolve o lote se a tela sair de cena por qualquer caminho.
   useEffect(() => {
     return () => {
-      const ord = orderRef.current;
-      if (ord && ord.status === "separating") {
-        void releaseSeparacao(ord.id).catch(() => {
-          /* best-effort: o janitor recupera */
-        });
-      }
+      void devolverTudo();
     };
-  }, []);
+  }, [devolverTudo]);
 
-  // Logout forçado (inatividade/nexus): devolve o claim ANTES de perder o
-  // token — no desmontar acima já seria tarde (release iria sem Authorization).
-  useEffect(
-    () =>
-      onBeforeForcedLogout(async () => {
-        const ord = orderRef.current;
-        if (!ord || ord.status !== "separating") return;
-        orderRef.current = null;
-        await releaseSeparacao(ord.id).catch(() => {
-          /* best-effort: o janitor recupera */
-        });
-      }),
-    [],
-  );
+  // Logout forçado (inatividade/nexus): devolve o lote ANTES de perder o
+  // token — no desmontar acima já seria tarde (a chamada iria sem Authorization).
+  useEffect(() => onBeforeForcedLogout(() => devolverTudo()), [devolverTudo]);
 
   const handleBack = () => {
-    const ord = orderRef.current;
-    if (ord && ord.status === "separating") {
-      void releaseSeparacao(ord.id).catch(() => {});
-      orderRef.current = null;
-    }
-    onBack();
+    // Espera devolver antes de sair: a tela de filas consulta os pedidos em
+    // aberto assim que aparece e mostraria o banner de retomada do lote que
+    // acabou de ser devolvido.
+    setPhase("loading");
+    void devolverTudo().finally(() => onBack());
   };
 
   const [historyOpen, setHistoryOpen] = useState(false);
   const [filtersOpen, setFiltersOpen] = useState(false);
+  const [pickingOpen, setPickingOpen] = useState(false);
   const extras = Array.from(extrasRef.current.values());
+  // A data tem controle próprio na sidebar — não conta como "filtro".
   const filtrosAtivos =
-    (filters.includeProducts?.length ?? 0) +
-    (filters.excludeProducts?.length ?? 0) +
-    (filters.dateFrom || filters.dateTo ? 1 : 0);
+    (filters.includeProducts?.length ?? 0) + (filters.excludeProducts?.length ?? 0);
 
   const aplicarFiltros = (f: QueueFilters) => {
     setFilters(f);
+    filtersRef.current = f;
     saveFilters(f);
+    void puxarLote({ preservarAtual: true });
   };
+
+  /** Data de emissão escolhida no seletor (dia único) — null = todas. */
+  const dataSel = filters.dateFrom && filters.dateFrom === filters.dateTo ? filters.dateFrom : null;
+  const escolherData = (d: string | null) =>
+    aplicarFiltros({ ...filters, dateFrom: d ?? undefined, dateTo: d ?? undefined });
+
+  const operadora = nomeDaOperadora(getSessaoSync()?.email ?? null);
 
   return (
     <div style={page}>
@@ -709,21 +767,23 @@ export function SeparacaoRunner({ title, kicker, claim, emptyHint, queue, onBack
       {notice && <div style={noticeBanner}>ℹ {notice}</div>}
 
       <div style={layoutRow}>
-        {queue && (
-          <QueueSidebar
-            mode={queue.mode}
-            size={queue.size}
-            currentOrder={order}
-            filters={filters}
-            onJump={(item) => void jumpToOrder(item)}
-          />
-        )}
+        <LoteSidebar
+          queue={queue}
+          lote={lote}
+          restantes={restantes}
+          atualId={order?.id ?? null}
+          filters={filters}
+          data={dataSel}
+          onSelecionar={selecionarPedido}
+          onEscolherData={escolherData}
+          onPickingGeral={() => setPickingOpen(true)}
+        />
         <main style={main}>
           {phase === "loading" && <Centered>Puxando próximo pedido…</Centered>}
           {phase === "error" && (
             <Centered>
               <div style={errorBox}>{error}</div>
-              <button style={primaryBtn} onClick={() => void fetchNext()}>
+              <button style={primaryBtn} onClick={() => void puxarLote()}>
                 Tentar de novo
               </button>
             </Centered>
@@ -731,7 +791,11 @@ export function SeparacaoRunner({ title, kicker, claim, emptyHint, queue, onBack
           {phase === "empty" && (
             <Centered>
               <div style={emptyTitle}>Fila vazia</div>
-              <p style={emptyText}>{emptyHint}</p>
+              <p style={emptyText}>
+                {restantes && restantes > 0
+                  ? `Seu lote acabou, mas ainda há ${restantes} na fila — procure de novo.`
+                  : emptyHint}
+              </p>
               {filtrosAtivos > 0 && (
                 <p style={emptyText}>
                   Você tem filtros de picking ativos — eles também valem pro claim.{" "}
@@ -740,7 +804,7 @@ export function SeparacaoRunner({ title, kicker, claim, emptyHint, queue, onBack
                   </button>
                 </p>
               )}
-              <button style={primaryBtn} onClick={() => void fetchNext()}>
+              <button style={primaryBtn} onClick={() => void puxarLote()}>
                 Procurar de novo
               </button>
             </Centered>
@@ -753,7 +817,7 @@ export function SeparacaoRunner({ title, kicker, claim, emptyHint, queue, onBack
               completing={completing}
               onComplete={() => void finish()}
               onRestart={restartLeitura}
-              onSkip={handleBack}
+              onSkip={() => void devolverAtual()}
               onSupervisor={() => setSupervisorOpen(true)}
             />
           )}
@@ -774,6 +838,15 @@ export function SeparacaoRunner({ title, kicker, claim, emptyHint, queue, onBack
         />
       )}
       {historyOpen && <SeparacaoHistoryModal onClose={() => setHistoryOpen(false)} />}
+      {pickingOpen && (
+        <PickingGeralModal
+          queue={{ mode: queue.mode, size: queue.size }}
+          data={dataSel}
+          filters={filters}
+          operadora={operadora}
+          onClose={() => setPickingOpen(false)}
+        />
+      )}
       {filtersOpen && (
         <PickingFiltersModal
           filters={filters}
@@ -874,97 +947,221 @@ function ReadLogPanel({
 }
 
 /**
- * Sidebar com a fila da vez (réplica do painel esquerdo do posvenda): o pedido
- * em separação fica pinado no topo e os próximos vêm da listagem read-only da
- * API, na MESMA ordem em que o claim vai entregá-los. Atualiza por push
- * (`queue.changed` via WS) com fallback de 60s.
+ * Sidebar do LOTE (0.9.0): os pedidos QUE JÁ SÃO DELA, na ordem da fila. Antes
+ * esta coluna mostrava a fila inteira e cada pedido exigia um claim; agora a
+ * operadora entra na fila, recebe o lote e a coluna é a lista dela — clicar num
+ * card só decide qual vem agora (nada de ida ao servidor, nada de disputa com
+ * outra estação). O contador da fila (o que ainda não tem dono) abre o
+ * Picking Geral, e o seletor "Data" recorta tudo por dia de emissão.
  */
-function QueueSidebar({
-  mode,
-  size,
-  currentOrder,
+function LoteSidebar({
+  queue,
+  lote,
+  restantes,
+  atualId,
   filters,
-  onJump,
+  data,
+  onSelecionar,
+  onEscolherData,
+  onPickingGeral,
 }: {
-  mode: SeparationMode;
-  size: string;
-  currentOrder: Order | null;
+  queue: { mode: SeparationMode; size: string };
+  lote: Order[];
+  restantes: number | null;
+  atualId: string | null;
   filters: QueueFilters;
-  /** Clique num card: avança pra ESTE pedido (release do atual + claim dele). */
-  onJump: (item: QueueListItem) => void;
+  data: string | null;
+  onSelecionar: (o: Order) => void;
+  onEscolherData: (d: string | null) => void;
+  onPickingGeral: () => void;
 }) {
-  const [data, setData] = useState<QueueListResponse | null>(null);
-  const [search, setSearch] = useState("");
-  const [q, setQ] = useState("");
-
-  // Debounce da busca: o filtro roda no servidor (indexado), não aqui.
-  useEffect(() => {
-    const t = setTimeout(() => setQ(search.trim()), 300);
-    return () => clearTimeout(t);
-  }, [search]);
-
-  useEffect(() => {
-    let alive = true;
-    const load = () => {
-      getQueueList({ mode, size, q: q || undefined, filters, limit: 50 })
-        .then((d) => {
-          if (alive) setData(d);
-        })
-        .catch(() => {
-          /* rede: mantém a última lista boa */
-        });
-    };
-    load();
-    const unsubscribe = subscribeQueueChanged(load);
-    const id = setInterval(load, 60_000);
-    return () => {
-      alive = false;
-      clearInterval(id);
-      unsubscribe();
-    };
-  }, [mode, size, q, filters]);
-
-  const searching = q.length > 0;
-  const current = !searching && currentOrder ? queueItemFromOrder(currentOrder) : null;
+  const [busca, setBusca] = useState("");
+  const termo = busca.trim().toLowerCase();
+  // Busca LOCAL: são no máximo 10 pedidos, todos já carregados com os itens —
+  // ir ao servidor pra filtrar dez cards seria latência à toa.
+  const visiveis = termo.length === 0 ? lote : lote.filter((o) => casaBusca(o, termo));
 
   return (
     <aside style={sidebar}>
       <div style={sidebarHeader}>
-        <span style={sidebarTitle}>Fila {size}</span>
-        <span style={sidebarCount}>
-          {data ? `${data.total + (current ? 1 : 0)} pedidos` : "…"}
-        </span>
+        <div style={sidebarHeaderTop}>
+          <span style={sidebarTitle}>
+            Fila {queue.size} — {queue.mode === "total" ? "Mistos" : "Puro"}
+          </span>
+          <span style={sidebarCount}>
+            {lote.length} {lote.length === 1 ? "pedido" : "pedidos"}
+          </span>
+        </div>
+        <div style={sidebarHeaderRow}>
+          <button
+            style={pickingChip}
+            onClick={onPickingGeral}
+            title="Ver e imprimir o Picking Geral desta fila"
+          >
+            🖨 Picking Geral
+          </button>
+          <DataMenu queue={queue} filters={filters} valor={data} onEscolher={onEscolherData} />
+        </div>
       </div>
       <input
         style={sidebarSearch}
-        value={search}
-        onChange={(e) => setSearch(e.target.value)}
-        placeholder="Buscar pedido, cliente ou item…"
+        value={busca}
+        onChange={(e) => setBusca(e.target.value)}
+        placeholder="Buscar item…"
         spellCheck={false}
       />
-      <span style={sidebarHint}>Clique num pedido pra avançar direto pra ele.</span>
+      <span style={sidebarHint}>
+        {termo
+          ? "Buscando dentro do seu lote."
+          : "Estes pedidos são só seus. Clique pra escolher qual vem agora."}
+      </span>
       <div className="thin-scroll" style={sidebarList}>
-        {current && <QueueCard item={current} pinned />}
-        {data?.items.map((it) => (
-          <QueueCard key={it.id} item={it} onClick={() => onJump(it)} />
+        {visiveis.map((o, i) => (
+          <QueueCard
+            key={o.id}
+            item={queueItemFromOrder(o, i + 1)}
+            pinned={o.id === atualId}
+            onClick={o.id === atualId ? undefined : () => onSelecionar(o)}
+          />
         ))}
-        {data && data.items.length === 0 && !current && (
+        {visiveis.length === 0 && (
           <span style={sidebarEmpty}>
-            {searching ? "Nada encontrado nessa fila." : "Fila vazia."}
+            {termo ? "Nada encontrado no seu lote." : "Lote vazio."}
           </span>
         )}
-        {data && data.total > data.items.length && (
-          <span style={sidebarMore}>+{data.total - data.items.length} pedidos na fila…</span>
-        )}
       </div>
+      {restantes !== null && (
+        <div style={sidebarFooter}>
+          {restantes > 0
+            ? `faltam ${restantes} na fila`
+            : "fila vazia — só o que está no seu lote"}
+        </div>
+      )}
     </aside>
   );
 }
 
-/** O pedido claimado sai da fila na API — remontamos o card dele pra pinar no topo. */
-function queueItemFromOrder(order: Order): QueueListItem {
+/** Casa o termo com número, cliente ou item (nome/EAN/SKU) do pedido. */
+function casaBusca(o: Order, termo: string): boolean {
+  if ((o.numero ?? "").toLowerCase().includes(termo)) return true;
+  if ((o.clienteNome ?? "").toLowerCase().includes(termo)) return true;
+  return o.items.some(
+    (it) =>
+      (it.nome ?? "").toLowerCase().includes(termo) ||
+      (it.ean ?? "").toLowerCase().includes(termo) ||
+      (it.sku ?? "").toLowerCase().includes(termo),
+  );
+}
+
+/**
+ * Seletor "Data" do posvenda: uma linha por data de EMISSÃO presente na fila,
+ * com quantos pedidos ela tem ("14/08/2026 (168)"), mais "Todos". Escolher uma
+ * data manda `dateFrom = dateTo` em tudo — lote, produtos e picking. Era o
+ * controle que as separadoras mais usavam pra atacar o atraso por dia.
+ */
+function DataMenu({
+  queue,
+  filters,
+  valor,
+  onEscolher,
+}: {
+  queue: { mode: SeparationMode; size: string };
+  filters: QueueFilters;
+  valor: string | null;
+  onEscolher: (d: string | null) => void;
+}) {
+  const [aberto, setAberto] = useState(false);
+  const [dados, setDados] = useState<QueueDatesResponse | null>(null);
+  const [indisponivel, setIndisponivel] = useState(false);
+
+  // Troca de fila/filtro invalida a contagem — recarrega na próxima abertura.
+  useEffect(() => setDados(null), [queue.mode, queue.size, filters]);
+
+  useEffect(() => {
+    if (!aberto) return;
+    let alive = true;
+    getQueueDates({ mode: queue.mode, size: queue.size, filters })
+      .then((d) => {
+        if (!alive) return;
+        setDados(d);
+        setIndisponivel(false);
+      })
+      .catch((e) => {
+        if (!alive) return;
+        setDados({ dates: [], total: 0, semData: 0 });
+        setIndisponivel(e instanceof ApiError && e.status === 404);
+      });
+    return () => {
+      alive = false;
+    };
+  }, [aberto, queue.mode, queue.size, filters]);
+
+  useEffect(() => {
+    if (!aberto) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setAberto(false);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [aberto]);
+
+  const escolher = (d: string | null) => {
+    onEscolher(d);
+    setAberto(false);
+  };
+
+  return (
+    <div style={dataWrap}>
+      <button style={valor ? dataBtnOn : dataBtn} onClick={() => setAberto((v) => !v)}>
+        {valor ? fmtDataISO(valor) : "Data"} ▾
+      </button>
+      {aberto && (
+        <>
+          <div style={dataBackdrop} onClick={() => setAberto(false)} />
+          <div className="thin-scroll" style={dataMenu}>
+            <button style={valor === null ? dataItemOn : dataItem} onClick={() => escolher(null)}>
+              <span style={dataItemLabel}>Todos</span>
+              <span style={dataItemCount}>{dados ? `(${dados.total})` : ""}</span>
+            </button>
+            {dados === null && <span style={dataAviso}>Carregando datas…</span>}
+            {indisponivel && (
+              <span style={dataAviso}>
+                O servidor ainda não separa a fila por data (aguardando atualização do nexus).
+              </span>
+            )}
+            {dados?.dates.map((d) => (
+              <button
+                key={d.date}
+                style={valor === d.date ? dataItemOn : dataItem}
+                onClick={() => escolher(d.date)}
+              >
+                <span style={dataItemLabel}>{fmtDataISO(d.date)}</span>
+                <span style={dataItemCount}>({d.count})</span>
+              </button>
+            ))}
+            {dados !== null && dados.semData > 0 && (
+              <span style={dataAviso}>
+                {dados.semData} sem data de emissão — só aparecem em "Todos".
+              </span>
+            )}
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
+/** YYYY-MM-DD → dd/mm/aaaa (o seletor mostra a data como o posvenda mostrava). */
+function fmtDataISO(iso: string): string {
+  const [y, m, d] = iso.split("-");
+  return y && m && d ? `${d}/${m}/${y}` : iso;
+}
+
+/** Card da sidebar a partir do pedido do lote (o resumo da fila não serve: os
+ *  pedidos do lote já vêm completos no `POST /separacao/lote`). */
+function queueItemFromOrder(order: Order, position: number): QueueListItem {
   return {
-    position: 0,
+    position,
     id: order.id,
     numero: order.numero ?? order.tinyOrderId,
     clienteNome: order.clienteNome ?? null,
@@ -1424,11 +1621,124 @@ const sidebar: CSSProperties = {
 
 const sidebarHeader: CSSProperties = {
   display: "flex",
+  flexDirection: "column",
+  gap: 10,
+  padding: "14px 16px",
+  borderBottom: "1px solid var(--border)",
+};
+
+const sidebarHeaderTop: CSSProperties = {
+  display: "flex",
   alignItems: "baseline",
   justifyContent: "space-between",
   gap: 8,
-  padding: "14px 16px",
-  borderBottom: "1px solid var(--border)",
+};
+
+const sidebarHeaderRow: CSSProperties = { display: "flex", alignItems: "center", gap: 8 };
+
+const pickingChip: CSSProperties = {
+  flex: 1,
+  padding: "7px 10px",
+  background: "var(--bg-card)",
+  border: "1px solid var(--border-strong)",
+  borderRadius: 8,
+  color: "var(--text)",
+  fontSize: 12,
+  fontWeight: 700,
+  cursor: "pointer",
+  whiteSpace: "nowrap",
+};
+
+/** "faltam X na fila" — o que ainda está sem dono, fora do lote dela. */
+const sidebarFooter: CSSProperties = {
+  padding: "9px 16px",
+  borderTop: "1px solid var(--border)",
+  fontFamily: "var(--font-mono)",
+  fontSize: 11,
+  color: "var(--text-muted)",
+  textAlign: "center",
+};
+
+// --- Seletor "Data" (dropdown com contagem por dia de emissão) ---
+
+const dataWrap: CSSProperties = { position: "relative", flexShrink: 0 };
+
+const dataBtn: CSSProperties = {
+  padding: "7px 12px",
+  background: "var(--bg-card)",
+  border: "1px solid var(--border-strong)",
+  borderRadius: 8,
+  color: "var(--text-secondary)",
+  fontSize: 12,
+  fontWeight: 700,
+  cursor: "pointer",
+  whiteSpace: "nowrap",
+};
+
+const dataBtnOn: CSSProperties = {
+  ...dataBtn,
+  background: "var(--info-bg)",
+  border: "1px solid var(--info-border)",
+  color: "var(--info-text)",
+};
+
+/** Captura o clique fora sem depender de listener global. */
+const dataBackdrop: CSSProperties = { position: "fixed", inset: 0, zIndex: 40 };
+
+const dataMenu: CSSProperties = {
+  position: "absolute",
+  top: "calc(100% + 6px)",
+  right: 0,
+  zIndex: 41,
+  width: 210,
+  maxHeight: 320,
+  overflowY: "auto",
+  display: "flex",
+  flexDirection: "column",
+  gap: 2,
+  padding: 6,
+  background: "var(--bg-elevated)",
+  border: "1px solid var(--border-strong)",
+  borderRadius: 10,
+  boxShadow: "0 12px 32px rgba(0, 0, 0, 0.45)",
+};
+
+const dataItem: CSSProperties = {
+  display: "flex",
+  alignItems: "center",
+  justifyContent: "space-between",
+  gap: 8,
+  padding: "7px 10px",
+  background: "transparent",
+  border: 0,
+  borderRadius: 7,
+  color: "var(--text-secondary)",
+  fontSize: 12,
+  fontWeight: 600,
+  cursor: "pointer",
+  textAlign: "left",
+  width: "100%",
+};
+
+const dataItemOn: CSSProperties = {
+  ...dataItem,
+  background: "var(--info-bg)",
+  color: "var(--info-text)",
+};
+
+const dataItemLabel: CSSProperties = { fontFamily: "var(--font-mono)" };
+
+const dataItemCount: CSSProperties = {
+  fontFamily: "var(--font-mono)",
+  fontSize: 11,
+  color: "var(--text-muted)",
+};
+
+const dataAviso: CSSProperties = {
+  padding: "6px 10px",
+  fontSize: 11,
+  color: "var(--text-muted)",
+  lineHeight: 1.4,
 };
 
 const sidebarTitle: CSSProperties = {
@@ -1468,13 +1778,6 @@ const sidebarEmpty: CSSProperties = {
   fontSize: 13,
   color: "var(--text-muted)",
   padding: "12px 4px",
-};
-
-const sidebarMore: CSSProperties = {
-  fontSize: 12,
-  color: "var(--text-muted)",
-  textAlign: "center",
-  padding: "6px 0 10px",
 };
 
 const qCard: CSSProperties = {

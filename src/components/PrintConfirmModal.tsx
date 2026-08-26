@@ -138,9 +138,9 @@ export function PrintConfirmModal({ resolved, onCancel, onConfirm }: Props) {
     setPerSize(next);
   }
 
-  const { batch, shopifyTitle, shopifyColor } = resolved;
-  const title = shopifyTitle ?? batch.design_name ?? batch.batch_code;
-  const color = shopifyColor ?? batch.shirt_color;
+  const { batch, catalogTitle, catalogColor } = resolved;
+  const title = catalogTitle ?? batch.design_name ?? batch.batch_code;
+  const color = catalogColor ?? batch.shirt_color;
 
   return (
     <div style={overlay} onClick={onCancel}>

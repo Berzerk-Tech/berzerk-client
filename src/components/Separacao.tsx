@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState, type CSSProperties } from "react";
+import { useEffect, useState, type CSSProperties } from "react";
 import { BackButton } from "./BackButton";
 import { AmbientBackground } from "./AmbientBackground";
 import { OperatorChip } from "./OperatorChip";
@@ -7,11 +7,11 @@ import { useRfid } from "../contexts/RfidContext";
 import { ApiError } from "../lib/api";
 import { subscribeQueueChanged } from "../lib/realtime";
 import {
-  claimNext,
-  claimNextMixed,
+  devolverLote,
+  getMeusPedidos,
   getQueueCounts,
+  type Order,
   type QueueCounts,
-  type QueueFilters,
 } from "../services/orders";
 
 type Props = { onBack: () => void };
@@ -53,6 +53,9 @@ export function Separacao({ onBack }: Props) {
   } | null>(null);
   const [counts, setCounts] = useState<QueueCounts | null>(null);
   const [authError, setAuthError] = useState<string | null>(null);
+  /** Pedidos que já são da operadora (lote de outra sessão/estação). */
+  const [emAberto, setEmAberto] = useState<Order[]>([]);
+  const [devolvendo, setDevolvendo] = useState(false);
 
   // Contagem das filas: o WS do nexus empurra `queue.changed` (tiny-sync,
   // claim, complete, release) e cada evento refaz o fetch; o intervalo de 60s
@@ -90,16 +93,21 @@ export function Separacao({ onBack }: Props) {
     };
   }, []);
 
-  // Os filtros de picking moram no runner (por estação) e valem no claim.
-  const claim = useCallback(
-    (filters?: QueueFilters) => {
-      if (!confirmed) return claimNext([""], filters);
-      return confirmed.mode === "mistos"
-        ? claimNextMixed(confirmed.sizes, filters)
-        : claimNext(confirmed.sizes, filters);
-    },
-    [confirmed],
-  );
+  // Lote em aberto de antes: app fechado no meio do turno, troca de estação,
+  // sessão derrubada. Sem isto os pedidos ficariam reservados e invisíveis pra
+  // ela e pras outras até o janitor expirar o claim. 404 = nexus antigo.
+  useEffect(() => {
+    if (confirmed) return;
+    let alive = true;
+    getMeusPedidos()
+      .then((r) => alive && setEmAberto(r.orders))
+      .catch(() => {
+        /* sem retomada: o fluxo normal segue */
+      });
+    return () => {
+      alive = false;
+    };
+  }, [confirmed]);
 
   if (confirmed) {
     const isMixed = confirmed.mode === "mistos";
@@ -112,8 +120,11 @@ export function Separacao({ onBack }: Props) {
             ? "Nenhum pedido misto pronto nesse tamanho. Tente outra aba ou aguarde a sincronização."
             : "Nenhum pedido pronto nessa fila. Tente outra ou aguarde a sincronização."
         }
-        claim={claim}
-        queue={{ mode: isMixed ? "total" : "normal", size: confirmed.size }}
+        queue={{
+          mode: isMixed ? "total" : "normal",
+          size: confirmed.size,
+          sizes: confirmed.sizes,
+        }}
         onBack={() => setConfirmed(null)}
       />
     );
@@ -144,6 +155,40 @@ export function Separacao({ onBack }: Props) {
   };
 
   const effectiveSelected = selected as Queue | null;
+
+  /** Fila de onde veio o lote em aberto (pelo 1º pedido) + tamanhos reais. */
+  const filaEmAberto = (() => {
+    const primeiro = emAberto[0];
+    if (!primeiro) return null;
+    const m: QueueMode = primeiro.separationMode === "total" ? "mistos" : "puro";
+    const q = queueFor(primeiro.predominantSize ?? "") ?? "XG";
+    // Junta os tamanhos reais dos pedidos em aberto: o bucket vem dos counts,
+    // que podem não listar um tamanho que só existe nos pedidos JÁ reservados
+    // (eles saíram da fila e por isso não contam mais).
+    const sizes = Array.from(
+      new Set([
+        ...sizesForQueue(q, m),
+        ...emAberto
+          .map((o) => (o.predominantSize ?? "").trim().toUpperCase())
+          .filter((t) => t.length > 0),
+      ]),
+    );
+    return { size: q, mode: m, sizes };
+  })();
+
+  const devolverEmAberto = async () => {
+    setDevolvendo(true);
+    try {
+      // Manda os ids: é o que permite devolver um a um num nexus que ainda
+      // não tenha o endpoint do lote.
+      await devolverLote(emAberto.map((o) => o.id));
+      setEmAberto([]);
+    } catch {
+      /* fica o banner: ela pode retomar e devolver de dentro da fila */
+    } finally {
+      setDevolvendo(false);
+    }
+  };
 
   return (
     <div style={page}>
@@ -176,6 +221,23 @@ export function Separacao({ onBack }: Props) {
       )}
 
       {authError && <div style={mesaDownBanner}>{authError}</div>}
+
+      {filaEmAberto && (
+        <div style={retomarBanner}>
+          Você tem <strong>{emAberto.length}</strong>{" "}
+          {emAberto.length === 1 ? "pedido em aberto" : "pedidos em aberto"} na fila{" "}
+          <strong>
+            {filaEmAberto.size} {filaEmAberto.mode === "mistos" ? "Mistos" : "Puro"}
+          </strong>
+          .{" "}
+          <button style={retomarBtn} onClick={() => setConfirmed(filaEmAberto)}>
+            Retomar
+          </button>
+          <button style={devolverBtn} onClick={() => void devolverEmAberto()} disabled={devolvendo}>
+            {devolvendo ? "devolvendo…" : "devolver pra fila"}
+          </button>
+        </div>
+      )}
 
       <main style={main}>
         <p style={lead}>
@@ -313,6 +375,39 @@ const mesaDownBanner: CSSProperties = {
   color: "var(--danger-text, var(--warning-text))",
   fontSize: 13,
   textAlign: "center",
+};
+
+const retomarBanner: CSSProperties = {
+  display: "flex",
+  alignItems: "center",
+  justifyContent: "center",
+  flexWrap: "wrap",
+  gap: 8,
+  padding: "10px 32px",
+  background: "var(--info-bg)",
+  color: "var(--info-text)",
+  fontSize: 13,
+};
+
+const retomarBtn: CSSProperties = {
+  padding: "5px 14px",
+  background: "var(--info-text)",
+  border: "1px solid var(--info-text)",
+  borderRadius: 8,
+  color: "var(--bg)",
+  fontSize: 12,
+  fontWeight: 800,
+  cursor: "pointer",
+};
+
+const devolverBtn: CSSProperties = {
+  background: "transparent",
+  border: 0,
+  color: "inherit",
+  textDecoration: "underline",
+  cursor: "pointer",
+  fontSize: 12,
+  fontWeight: 600,
 };
 
 const inlineReconnect: CSSProperties = {

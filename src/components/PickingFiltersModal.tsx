@@ -2,10 +2,14 @@
 // lista dos PRODUTOS presentes na fila com checkbox (foto, tamanho, quantidade,
 // nº de pedidos), busca, e o rodapé dizendo quantos pedidos serão ocultados.
 // Duas abas: Exclusão ("marque o que você NÃO tem" — pedidos com eles somem)
-// e Adição (só pedidos com os marcados aparecem). Janela de data de emissão
-// no topo. Tudo vale pra FILA e pro CLAIM (o nexus aplica as mesmas condições)
-// e persiste por estação. ESC fecha. Nexus antigo (sem /queue-products)
-// degrada pra entrada manual de termos.
+// e Adição (só pedidos com os marcados aparecem). Tudo vale pra FILA e pro
+// LOTE (o nexus aplica as mesmas condições) e persiste por estação. ESC fecha.
+// Nexus antigo (sem /queue-products) degrada pra entrada manual de termos.
+//
+// A DATA saiu daqui (0.9.0): virou o seletor "Data" da sidebar, com contagem
+// por dia de emissão — do jeito que as separadoras usavam no posvenda. Os
+// campos `dateFrom`/`dateTo` continuam sendo o transporte dela nos filtros
+// (dia único: `dateFrom === dateTo`), e este modal só os repassa intactos.
 
 import { useEffect, useMemo, useState, type CSSProperties } from "react";
 import { ApiError } from "../lib/api";
@@ -27,9 +31,14 @@ export function loadFilters(): QueueFilters {
     const raw = localStorage.getItem(STORAGE_KEY);
     if (!raw) return {};
     const f = JSON.parse(raw) as QueueFilters;
+    // Janela de data salva por uma versão anterior (dateFrom ≠ dateTo) é
+    // DESCARTADA: o seletor novo é de dia único e não teria como mostrar a
+    // janela — ela ficaria filtrando a fila sem aparecer em lugar nenhum.
+    const diaUnico =
+      typeof f.dateFrom === "string" && f.dateFrom === f.dateTo ? f.dateFrom : undefined;
     return {
-      dateFrom: typeof f.dateFrom === "string" ? f.dateFrom : undefined,
-      dateTo: typeof f.dateTo === "string" ? f.dateTo : undefined,
+      dateFrom: diaUnico,
+      dateTo: diaUnico,
       includeProducts: Array.isArray(f.includeProducts) ? f.includeProducts : undefined,
       excludeProducts: Array.isArray(f.excludeProducts) ? f.excludeProducts : undefined,
     };
@@ -46,21 +55,6 @@ export function saveFilters(f: QueueFilters): void {
   }
 }
 
-function hojeISO(): string {
-  const d = new Date();
-  const mm = String(d.getMonth() + 1).padStart(2, "0");
-  const dd = String(d.getDate()).padStart(2, "0");
-  return `${d.getFullYear()}-${mm}-${dd}`;
-}
-
-function diasAtrasISO(dias: number): string {
-  const d = new Date();
-  d.setDate(d.getDate() - dias);
-  const mm = String(d.getMonth() + 1).padStart(2, "0");
-  const dd = String(d.getDate()).padStart(2, "0");
-  return `${d.getFullYear()}-${mm}-${dd}`;
-}
-
 type Aba = "exclusao" | "adicao";
 
 type Props = {
@@ -73,8 +67,6 @@ type Props = {
 };
 
 export function PickingFiltersModal({ filters, queue, onApply, onClear, onClose }: Props) {
-  const [dateFrom, setDateFrom] = useState(filters.dateFrom ?? "");
-  const [dateTo, setDateTo] = useState(filters.dateTo ?? "");
   const [exclude, setExclude] = useState<string[]>(filters.excludeProducts ?? []);
   const [include, setInclude] = useState<string[]>(filters.includeProducts ?? []);
   const [aba, setAba] = useState<Aba>("exclusao");
@@ -92,8 +84,9 @@ export function PickingFiltersModal({ filters, queue, onApply, onClear, onClose 
     return () => window.removeEventListener("keydown", onKey);
   }, [onClose]);
 
-  // Produtos da fila (refaz quando a janela de data muda — a lista deve
+  // Produtos da fila (refaz quando a data escolhida muda — a lista deve
   // refletir exatamente o que a operadora está vendo).
+  const dataSel = filters.dateFrom ?? undefined;
   useEffect(() => {
     if (!queue) return;
     let alive = true;
@@ -101,8 +94,8 @@ export function PickingFiltersModal({ filters, queue, onApply, onClear, onClose 
     getQueueProducts({
       mode: queue.mode,
       size: queue.size,
-      dateFrom: dateFrom || undefined,
-      dateTo: dateTo || undefined,
+      dateFrom: dataSel,
+      dateTo: dataSel,
     })
       .then((d) => alive && setProducts(d.products))
       .catch((e) => {
@@ -119,7 +112,7 @@ export function PickingFiltersModal({ filters, queue, onApply, onClear, onClose 
     return () => {
       alive = false;
     };
-  }, [queue, dateFrom, dateTo]);
+  }, [queue, dataSel]);
 
   const selected = aba === "exclusao" ? exclude : include;
   const setSelected = aba === "exclusao" ? setExclude : setInclude;
@@ -168,8 +161,9 @@ export function PickingFiltersModal({ filters, queue, onApply, onClear, onClose 
 
   const aplicar = () => {
     onApply({
-      dateFrom: dateFrom || undefined,
-      dateTo: dateTo || undefined,
+      // A data é do seletor da sidebar — passa intacta.
+      dateFrom: filters.dateFrom,
+      dateTo: filters.dateTo,
       excludeProducts: exclude.length ? exclude : undefined,
       includeProducts: include.length ? include : undefined,
     });
@@ -185,50 +179,6 @@ export function PickingFiltersModal({ filters, queue, onApply, onClear, onClose 
           <button style={fecharBtn} onClick={onClose} title="Fechar (Esc)">
             ×
           </button>
-        </div>
-
-        <div style={datasRow}>
-          <span style={secaoTitulo}>Emissão</span>
-          <button
-            style={chip}
-            onClick={() => {
-              setDateFrom(hojeISO());
-              setDateTo(hojeISO());
-            }}
-          >
-            Hoje
-          </button>
-          <button
-            style={chip}
-            onClick={() => {
-              setDateFrom(diasAtrasISO(7));
-              setDateTo("");
-            }}
-          >
-            7 dias
-          </button>
-          <button
-            style={chip}
-            onClick={() => {
-              setDateFrom("");
-              setDateTo("");
-            }}
-          >
-            Tudo
-          </button>
-          <input
-            type="date"
-            style={dataInput}
-            value={dateFrom}
-            onChange={(e) => setDateFrom(e.target.value)}
-          />
-          <span style={{ color: "var(--text-muted)", fontSize: 12 }}>—</span>
-          <input
-            type="date"
-            style={dataInput}
-            value={dateTo}
-            onChange={(e) => setDateTo(e.target.value)}
-          />
         </div>
 
         <div style={abasRow}>
@@ -419,30 +369,6 @@ const secaoTitulo: CSSProperties = {
   letterSpacing: 1,
   textTransform: "uppercase",
   color: "var(--text-muted)",
-};
-
-const datasRow: CSSProperties = { display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" };
-
-const chip: CSSProperties = {
-  padding: "4px 12px",
-  background: "var(--bg-card)",
-  border: "1px solid var(--border)",
-  borderRadius: 999,
-  color: "var(--text-secondary)",
-  fontSize: 12,
-  fontWeight: 600,
-  cursor: "pointer",
-};
-
-const dataInput: CSSProperties = {
-  padding: "4px 8px",
-  background: "var(--bg-input)",
-  border: "1px solid var(--border)",
-  borderRadius: 8,
-  color: "var(--text)",
-  fontSize: 12,
-  outline: "none",
-  colorScheme: "dark",
 };
 
 const abasRow: CSSProperties = {

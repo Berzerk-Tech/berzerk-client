@@ -1,7 +1,7 @@
 // Wrappers da separacao-api (fila de separação). Os tipos espelham
 // @berzerk/contracts (o app é repo separado, então duplicamos os shapes).
 
-import { apiRequest } from "../lib/api";
+import { ApiError, apiRequest } from "../lib/api";
 
 export type OrderStatus =
   | "received"
@@ -103,8 +103,6 @@ export type QueueListItem = {
   createdAt: string;
 };
 
-export type QueueListResponse = { items: QueueListItem[]; total: number };
-
 /**
  * Filtros opcionais da fila (espelham o picking do posvenda): janela de data
  * de emissão (YYYY-MM-DD) e Filtro Adição/Exclusão por nome de produto. Valem
@@ -130,32 +128,6 @@ function filtersBody(f?: QueueFilters): Record<string, unknown> {
   return out;
 }
 
-/** Listagem read-only da fila (sidebar) — mesma ordem do claim. */
-export function getQueueList(params: {
-  mode: SeparationMode;
-  size?: string;
-  /** Busca server-side (numero, cliente, item/EAN/SKU) — indexada no nexus. */
-  q?: string;
-  filters?: QueueFilters;
-  limit?: number;
-  offset?: number;
-}): Promise<QueueListResponse> {
-  const f = params.filters;
-  return apiRequest<QueueListResponse>("/separacao/queue", {
-    query: {
-      mode: params.mode,
-      size: params.size,
-      q: params.q || undefined,
-      dateFrom: f?.dateFrom || undefined,
-      dateTo: f?.dateTo || undefined,
-      includeProducts: f?.includeProducts?.length ? f.includeProducts.join(",") : undefined,
-      excludeProducts: f?.excludeProducts?.length ? f.excludeProducts.join(",") : undefined,
-      limit: params.limit?.toString(),
-      offset: params.offset?.toString(),
-    },
-  });
-}
-
 export function getQueueCounts(): Promise<QueueCounts> {
   return apiRequest<QueueCounts>("/separacao/queues");
 }
@@ -164,6 +136,7 @@ export function getMe(): Promise<Me> {
   return apiRequest<Me>("/separacao/me");
 }
 
+/** Claim de UM pedido — desde a 0.9.0 só o caminho degradado do lote. */
 export function claimNext(sizes: string[], filters?: QueueFilters): Promise<ClaimResponse> {
   return apiRequest<ClaimResponse>("/separacao/claim", {
     method: "POST",
@@ -171,23 +144,11 @@ export function claimNext(sizes: string[], filters?: QueueFilters): Promise<Clai
   });
 }
 
+/** Claim de UM misto — desde a 0.9.0 só o caminho degradado do lote. */
 export function claimNextMixed(sizes?: string[], filters?: QueueFilters): Promise<ClaimResponse> {
   return apiRequest<ClaimResponse>("/separacao/claim-mixed", {
     method: "POST",
     body: { ...(sizes && sizes.length > 0 ? { sizes } : {}), ...filtersBody(filters) },
-  });
-}
-
-/**
- * Claim de um pedido ESPECÍFICO (clique no card da fila pra avançar). Atômico
- * no nexus; 409 `{error:'pedido_indisponivel'}` se outra estação levou; replay
- * idempotente quando o pedido já é da própria operadora. 404 = nexus antigo
- * (sem o endpoint) — o caller degrada com aviso.
- */
-export function claimOrder(orderId: string): Promise<ClaimResponse> {
-  return apiRequest<ClaimResponse>("/separacao/claim-order", {
-    method: "POST",
-    body: { orderId },
   });
 }
 
@@ -207,20 +168,171 @@ export type QueueProduct = {
   orderIds: string[];
 };
 
+/**
+ * Totais da fila consultada (cabeçalho do Picking Geral). Opcional: nexus
+ * antigo devolve só `products` e o app recalcula pela lista.
+ */
+export type QueueProductsResumo = { pedidos: number; itens: number; produtos: number };
+
+export type QueueProductsResponse = {
+  products: QueueProduct[];
+  resumo?: QueueProductsResumo;
+};
+
 /** Produtos distintos da fila consultada (404 = nexus antigo → degradar). */
 export function getQueueProducts(params: {
   mode: SeparationMode;
   size?: string;
   dateFrom?: string;
   dateTo?: string;
-}): Promise<{ products: QueueProduct[] }> {
-  return apiRequest<{ products: QueueProduct[] }>("/separacao/queue-products", {
-    query: {
-      mode: params.mode,
-      size: params.size,
-      dateFrom: params.dateFrom || undefined,
-      dateTo: params.dateTo || undefined,
-    },
+}): Promise<QueueProductsResponse> {
+  return comModo(params.mode, (mode) =>
+    apiRequest<QueueProductsResponse>("/separacao/queue-products", {
+      query: {
+        mode,
+        size: params.size,
+        dateFrom: params.dateFrom || undefined,
+        dateTo: params.dateTo || undefined,
+      },
+    }),
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Datas de emissão da fila (seletor "Data" do posvenda) + LOTE da operadora
+// ---------------------------------------------------------------------------
+
+/**
+ * O contrato dos endpoints novos (lote/datas) foi escrito com
+ * `mode=normal|mixed`; o resto da separação usa o `separationModeSchema` do
+ * nexus, que é `normal|total`. Enquanto os dois nomes convivem no cutover,
+ * mandamos o nome canônico e, se o servidor recusar o VALOR (400/422 do zod),
+ * repetimos uma vez com `mixed`. Cai fora sozinho quando o nexus fechar o nome.
+ */
+function comModo<T>(mode: SeparationMode, chamar: (m: string) => Promise<T>): Promise<T> {
+  return chamar(mode).catch((e: unknown) => {
+    const recusaDeValor = e instanceof ApiError && (e.status === 400 || e.status === 422);
+    if (mode === "total" && recusaDeValor) return chamar("mixed");
+    throw e;
+  });
+}
+
+export type QueueDate = {
+  /** YYYY-MM-DD (emissão, America/Sao_Paulo). */
+  date: string;
+  count: number;
+};
+
+export type QueueDatesResponse = {
+  dates: QueueDate[];
+  /** Pedidos da fila inteira (o "Todos (637)" do seletor). */
+  total: number;
+  /** Pedidos sem data de emissão — não cabem em nenhuma linha do seletor. */
+  semData: number;
+};
+
+/**
+ * Datas de emissão presentes na fila, com contagem por dia — é o dropdown
+ * "Data" do posvenda. Escolher uma data vira `dateFrom = dateTo` nos demais
+ * endpoints. 404 = nexus antigo (o seletor some, a fila segue completa).
+ */
+export function getQueueDates(params: {
+  mode: SeparationMode;
+  size?: string;
+  filters?: QueueFilters;
+}): Promise<QueueDatesResponse> {
+  const f = params.filters;
+  return comModo(params.mode, (mode) =>
+    apiRequest<QueueDatesResponse>("/separacao/queue-dates", {
+      query: {
+        mode,
+        size: params.size,
+        includeProducts: f?.includeProducts?.length ? f.includeProducts.join(",") : undefined,
+        excludeProducts: f?.excludeProducts?.length ? f.excludeProducts.join(",") : undefined,
+      },
+    }),
+  );
+}
+
+/** Lote da operadora + quantos ainda estão na fila sem dono. */
+export type LoteResponse = {
+  orders: Order[];
+  /** Ausente no modo degradado (nexus sem `/separacao/lote`). */
+  fila?: { restantes: number };
+};
+
+/** Quantos pedidos a operadora leva por vez (pedido das separadoras). */
+export const LOTE_PADRAO = 10;
+
+/**
+ * Puxa/repõe o LOTE da operadora: IDEMPOTENTE — devolve TODOS os pedidos em
+ * aberto dela nessa fila e completa com o que faltar até `quantidade`. É o que
+ * divide a fila entre as estações: cada uma enxerga só o próprio lote. Chamar
+ * ao entrar na fila e depois de cada complete/release.
+ */
+export function claimLote(params: {
+  mode: SeparationMode;
+  sizes: string[];
+  quantidade?: number;
+  filters?: QueueFilters;
+}): Promise<LoteResponse> {
+  return comModo(params.mode, (mode) =>
+    apiRequest<LoteResponse>("/separacao/lote", {
+      method: "POST",
+      body: {
+        mode,
+        sizes: params.sizes,
+        quantidade: params.quantidade ?? LOTE_PADRAO,
+        ...filtersBody(params.filters),
+      },
+    }),
+  ).catch((e: unknown) => {
+    if (e instanceof ApiError && e.status === 404) return loteDegradado(params);
+    throw e;
+  });
+}
+
+/**
+ * Nexus AINDA sem `/separacao/lote` (app atualizou antes da API): cai no claim
+ * de um pedido só. A operadora continua separando — lote de um, sem "faltam X"
+ * — em vez de olhar pra uma tela de erro. O app se atualiza sozinho em todas
+ * as estações, então as duas ordens de deploy têm que funcionar.
+ */
+async function loteDegradado(params: {
+  mode: SeparationMode;
+  sizes: string[];
+  filters?: QueueFilters;
+}): Promise<LoteResponse> {
+  const { order } =
+    params.mode === "total"
+      ? await claimNextMixed(params.sizes, params.filters)
+      : await claimNext(params.sizes, params.filters);
+  return { orders: order ? [order] : [] };
+}
+
+/**
+ * Todos os pedidos em aberto da operadora, de qualquer fila — usado ao abrir o
+ * módulo pra oferecer "retomar" (troca de estação, app fechado no meio).
+ */
+export function getMeusPedidos(): Promise<{ orders: Order[] }> {
+  return apiRequest<{ orders: Order[] }>("/separacao/meus-pedidos");
+}
+
+/**
+ * Devolve pedidos do lote pra fila. Sem `orderIds` = todos os em aberto — é o
+ * que roda ao sair da fila (voltar ao menu, trocar de fila, logout).
+ */
+export function devolverLote(orderIds?: string[]): Promise<{ devolvidos: number }> {
+  return apiRequest<{ devolvidos: number }>("/separacao/lote/devolver", {
+    method: "POST",
+    body: orderIds && orderIds.length > 0 ? { orderIds } : {},
+  }).catch(async (e: unknown) => {
+    // Degradação (nexus sem o endpoint): devolve um a um os ids que o caller
+    // conhece. Sem ids não há o que fazer aqui — o janitor recupera.
+    if (!(e instanceof ApiError) || e.status !== 404) throw e;
+    if (!orderIds || orderIds.length === 0) return { devolvidos: 0 };
+    const rs = await Promise.allSettled(orderIds.map((id) => releaseSeparacao(id)));
+    return { devolvidos: rs.filter((r) => r.status === "fulfilled").length };
   });
 }
 
