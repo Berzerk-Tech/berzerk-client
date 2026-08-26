@@ -14,6 +14,7 @@ import { useRfid, type ReadingSession } from "../contexts/RfidContext";
 import { beepError, beepOk } from "../lib/beep";
 import { subscribeQueueChanged } from "../lib/realtime";
 import { onBeforeForcedLogout } from "../lib/idleSession";
+import { onAntesDeBloquear } from "../lib/updateGate";
 import { SupervisorModal } from "./SupervisorModal";
 import { PickingGeralModal } from "./PickingGeralModal";
 import { nomeDaOperadora } from "./OperatorChip";
@@ -686,6 +687,13 @@ export function SeparacaoRunner({ title, kicker, emptyHint, queue, onBack }: Pro
   // Logout forçado (inatividade/nexus): devolve o lote ANTES de perder o
   // token — no desmontar acima já seria tarde (a chamada iria sem Authorization).
   useEffect(() => onBeforeForcedLogout(() => devolverTudo()), [devolverTudo]);
+
+  // Trava de atualização (426 do nexus ou versão nova no updater): devolve o
+  // lote ANTES de a tela de bloqueio entrar. O desmontar acima também
+  // devolveria, mas depois — e a mesa bloqueada teria segurado os pedidos das
+  // outras estações nesse meio-tempo. O `devolver` pode voltar 426 também;
+  // `devolverTudo` já engole a falha (o janitor recupera).
+  useEffect(() => onAntesDeBloquear(() => devolverTudo()), [devolverTudo]);
 
   const handleBack = () => {
     // Espera devolver antes de sair: a tela de filas consulta os pedidos em

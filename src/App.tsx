@@ -2,7 +2,12 @@ import { useEffect, useState, type CSSProperties, type ReactNode } from "react";
 import { getSessao, getSessaoSync, onSessaoChange, type SessaoCognito } from "./lib/cognito";
 import { handleOAuthCallback, listenForOAuthCallback } from "./lib/auth";
 import { initDeepLinks, type DeepLinkAuthResult } from "./lib/deep-link";
-import { checkForUpdate, type AvailableUpdate } from "./lib/updater";
+import {
+  bloqueioAtual,
+  onBloqueioChange,
+  verificarAtualizacao,
+  type Bloqueio,
+} from "./lib/updateGate";
 import { getStationShortId } from "./lib/station";
 import { Login } from "./components/Login";
 import { BatchBrowser } from "./components/BatchBrowser";
@@ -11,7 +16,7 @@ import { Expedicao } from "./components/Expedicao";
 import { PieceTrace } from "./components/PieceTrace";
 import { Separacao } from "./components/Separacao";
 import { SettingsPlaceholder } from "./components/SettingsPlaceholder";
-import { UpdateBanner } from "./components/UpdateBanner";
+import { UpdateRequired } from "./components/UpdateRequired";
 import { Toast } from "./components/Toast";
 import { IdleSessionGuard } from "./components/IdleSessionGuard";
 import { RfidProvider } from "./contexts/RfidContext";
@@ -24,14 +29,19 @@ import { RfidProvider } from "./contexts/RfidContext";
  * satisfazer a RLS delas. Com a fase 3 do corte, tudo passou a ser API do
  * Nexus com o mesmo Bearer — e com a sessão foram embora o handoff, a tela de
  * "Etiquetagem indisponível" e o retry que ela oferecia.
+ *
+ * Desde a 0.9.2 a ATUALIZAÇÃO é obrigatória: o banner dispensável saiu e no
+ * lugar dele entra uma tela cheia de bloqueio (`UpdateRequired`), disparada
+ * pelo 426 do nexus ou pelo updater. Ela vem ANTES de tudo — inclusive do
+ * Login: uma mesa desatualizada não tem por que trocar de operadora primeiro.
+ * Ver `lib/updateGate.ts`.
  */
 export default function App() {
   // Sessão do NEXUS (Cognito): é ela que diz se o app está logado.
   const [sessao, setSessao] = useState<SessaoCognito | null>(() => getSessaoSync());
   const [loading, setLoading] = useState(true);
   const [screen, setScreen] = useState<Screen>("home");
-  const [update, setUpdate] = useState<AvailableUpdate | null>(null);
-  const [updateDismissed, setUpdateDismissed] = useState(false);
+  const [bloqueio, setBloqueio] = useState<Bloqueio | null>(() => bloqueioAtual());
   const [toast, setToast] = useState<string | null>(null);
   // Mensagem de um deep link berzerk://auth que falhou — repassada pro Login.
   const [deepLinkError, setDeepLinkError] = useState<string | null>(null);
@@ -75,69 +85,78 @@ export default function App() {
       },
     });
 
-    // Check de atualização 5s após o boot pra não competir com auth/sessão
-    const updateTimer = setTimeout(async () => {
-      try {
-        const found = await checkForUpdate();
-        if (found) setUpdate(found);
-      } catch (err) {
-        console.warn("update check falhou:", err);
-      }
-    }, 5000);
+    const pararBloqueio = onBloqueioChange(setBloqueio);
+
+    // Check de atualização 5s após o boot pra não competir com auth/sessão.
+    // Achou versão nova → bloqueia (não é mais um banner que dá pra ignorar).
+    const updateTimer = setTimeout(() => void verificarAtualizacao(), 5000);
 
     return () => {
       pararSessao();
       stopDeepLink();
       stopNexusHandoff();
+      pararBloqueio();
       clearTimeout(updateTimer);
     };
   }, []);
 
-  const banner =
-    update && !updateDismissed ? (
-      <UpdateBanner update={update} onDismiss={() => setUpdateDismissed(true)} />
-    ) : null;
-
-  const withBanner = (node: ReactNode) => (
+  const naCasca = (node: ReactNode) => (
     <div style={shell}>
-      {banner}
       <div style={shellMain}>{node}</div>
     </div>
   );
 
   const back = () => setScreen("home");
 
+  /**
+   * Entrar num módulo dispara uma verificação de atualização — é o momento em
+   * que uma versão velha custa caro (lote reservado, etiqueta impressa errada).
+   * Não esperamos a resposta: a tela abre normalmente e o bloqueio entra por
+   * cima se vier. Prender a entrada num round-trip ao GitHub deixaria a mesa
+   * parada toda vez que a internet estivesse ruim, que é o oposto do desejado.
+   */
+  const entrar = (destino: Screen) => {
+    if (destino === "rfid" || destino === "separacao" || destino === "nf") {
+      void verificarAtualizacao();
+    }
+    setScreen(destino);
+  };
+
   let content: ReactNode;
-  if (loading) {
+  if (bloqueio) {
+    // Antes do `loading` e antes do Login: uma mesa desatualizada não opera,
+    // e não há tela abaixo desta que faça sentido mostrar.
+    content = <UpdateRequired bloqueio={bloqueio} />;
+  } else if (loading) {
     content = (
       <div style={loadingPage}>
         <div style={{ color: "var(--text-muted)", fontSize: 13 }}>Carregando…</div>
       </div>
     );
   } else if (!sessao) {
-    content = withBanner(<Login deepLinkError={deepLinkError} aguardandoNavegador={loginEmVoo} />);
+    content = naCasca(<Login deepLinkError={deepLinkError} aguardandoNavegador={loginEmVoo} />);
   } else {
     const email = sessao.email ?? "(sem email)";
     const stationShortId = getStationShortId();
     if (screen === "rfid")
-      content = withBanner(
+      content = naCasca(
         <BatchBrowser operatorId={sessao.sub} operatorEmail={email} onBack={back} />,
       );
-    else if (screen === "nf") content = withBanner(<Expedicao onBack={back} />);
-    else if (screen === "rastreio") content = withBanner(<PieceTrace onBack={back} />);
-    else if (screen === "separacao") content = withBanner(<Separacao onBack={back} />);
-    else if (screen === "settings") content = withBanner(<SettingsPlaceholder onBack={back} />);
+    else if (screen === "nf") content = naCasca(<Expedicao onBack={back} />);
+    else if (screen === "rastreio") content = naCasca(<PieceTrace onBack={back} />);
+    else if (screen === "separacao") content = naCasca(<Separacao onBack={back} />);
+    else if (screen === "settings") content = naCasca(<SettingsPlaceholder onBack={back} />);
     else
-      content = withBanner(
-        <HomeMenu email={email} stationShortId={stationShortId} onEnter={setScreen} />,
+      content = naCasca(
+        <HomeMenu email={email} stationShortId={stationShortId} onEnter={entrar} />,
       );
   }
 
   // RfidProvider acima da sessão: a conexão da mesa sobrevive a logout/troca de operadora.
   return (
     <RfidProvider>
-      {sessao && <IdleSessionGuard />}
-      {toast && <Toast message={toast} onDismiss={() => setToast(null)} />}
+      {sessao && !bloqueio && <IdleSessionGuard />}
+      {toast && !bloqueio && <Toast message={toast} onDismiss={() => setToast(null)} />}
       {content}
     </RfidProvider>
   );
@@ -163,10 +182,3 @@ const shellMain: CSSProperties = {
   flexDirection: "column",
   minHeight: 0,
 };
-
-
-
-
-
-
-
