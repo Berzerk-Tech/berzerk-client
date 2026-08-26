@@ -30,6 +30,7 @@
 import { getCurrent, onOpenUrl } from "@tauri-apps/plugin-deep-link";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { getSessao, getSessaoSync, iniciarLogin } from "./cognito";
+import { bloqueioAtual } from "./updateGate";
 
 const SCHEME = "berzerk:";
 
@@ -117,6 +118,15 @@ async function handleUrl(raw: string, handlers: Handlers): Promise<void> {
       return;
     case "login":
     case "auth":
+      if (bloqueioAtual()) {
+        // Mesa bloqueada por atualização obrigatória (0.9.2): a janela vem pra
+        // frente — quem clicou espera ver o app — mas nada de login. Abrir o
+        // navegador aqui tiraria a operadora justamente da tela que ela precisa
+        // resolver, e o login não a levaria a lugar nenhum atrás do bloqueio.
+        console.info("[deep-link] bloqueio de atualização ativo, só focando a janela");
+        await focusWindow();
+        return;
+      }
       await handleAuth(url, handlers);
       return;
     default:

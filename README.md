@@ -33,13 +33,15 @@ Tempo total: ~3 minutos por PC.
 
 5. Pronto. A janela do navegador fecha sozinha, o app já abre na tela principal.
 
-### Atualizações
+### Atualizações (obrigatórias desde a 0.9.2)
 
-O app verifica atualizações **automaticamente toda vez que abre**. Quando uma nova versão estiver disponível, aparece um banner no topo:
+O app verifica atualizações **ao abrir e ao entrar em cada módulo** (Etiquetagem, Separação, Expedição). Quando há versão nova, ele **para**: uma tela cheia com
 
-> **Atualização disponível: v0.X.Y** [Atualizar agora] [Mais tarde]
+> **Atualize o Berzerk Client** — instalada v0.X.Y → necessária v0.X.Z — [Atualizar agora]
 
-Clicando em "Atualizar agora", baixa, valida assinatura, substitui o executável e reinicia. Leva ~30 segundos. Também pode ser disparado manualmente em **Configurações → Atualizações → Verificar**.
+Não há "mais tarde". Clicando em "Atualizar agora" ele baixa, valida a assinatura, substitui o executável e reinicia — ~30 segundos. Se a mesa estava com um lote de separação reservado, o lote **volta para a fila sozinho** antes do bloqueio, para não travar as outras estações.
+
+A mesma tela aparece se o Nexus recusar uma chamada com **426** (`app_desatualizado`): o servidor tem uma **versão mínima** configurada (Configurações → Versão mínima do Berzerk Client, no Nexus) e abaixo dela não há fila, etiquetagem nem expedição. É essa a trava de verdade — o check do GitHub é só o aviso antecipado, e falha de rede nele **não** bloqueia ninguém.
 
 Não é necessário reinstalar manualmente — uma vez instalado, esquece.
 
@@ -67,7 +69,11 @@ A Etiquetagem passou a exigir a permissão **`etiquetagem:operate`** no Nexus (0
 
 ### "Falha ao verificar atualização"
 
-Geralmente é falta de internet no PC. O app continua funcionando offline com a versão atual.
+Geralmente é falta de internet no PC. O app continua funcionando com a versão atual — o check do GitHub **não** bloqueia quando falha.
+
+### Travou na tela "Atualize o Berzerk Client" e não baixa
+
+Ela mostra "Não foi possível baixar a atualização automaticamente" quando o GitHub não responde. Use **Abrir página de versões**, baixe o instalador e rode por cima da instalação atual. Se o número exigido ainda não existe na página de releases, a versão mínima no Nexus foi subida cedo demais — falar com o time de tecnologia (dá pra desligar a exigência na hora, em Configurações → Versão mínima do Berzerk Client).
 
 ### Quero forçar logout
 
@@ -180,6 +186,31 @@ Sair da fila (voltar ao menu, trocar de fila, logout por inatividade) **devolve 
 
 Endpoints novos que esta versão consome: `POST /separacao/lote`, `POST /separacao/lote/devolver`, `GET /separacao/meus-pedidos`, `GET /separacao/queue-dates`. Enquanto o Nexus não tiver o do lote, o app **degrada** pro claim de um pedido por vez (lote de um, sem "faltam X") em vez de mostrar erro — o app se atualiza sozinho em todas as estações, então as duas ordens de deploy precisam funcionar.
 
+### Atualização forçada (0.9.2)
+
+Pedido do dono: "não quero gente usando versão antiga". Antes, a atualização era um banner com **Mais tarde** — e na mesa do CD "mais tarde" é nunca; máquinas ficavam meses atrás e cada correção publicada só valia pra quem por acaso clicou.
+
+**A trava é do servidor, não do app.** O app velho é justamente o que não tem a regra nova: qualquer verificação que dependa do binário instalado só passa a valer a partir da versão que a contém. Então quem barra é o Nexus, pela porta que o app velho já usa hoje.
+
+Três peças:
+
+| Peça | Onde | O quê |
+|---|---|---|
+| Header `X-Berzerk-Client-Version` | `src/lib/api.ts` | vai em **toda** chamada ao Nexus, com `getVersion()` do Tauri (resolvido uma vez e cacheado) |
+| Bloqueio | `src/lib/updateGate.ts` + `src/components/UpdateRequired.tsx` | estado global com subscribe; tela cheia sem saída |
+| Verificação antecipada | `App.tsx` | `verificarAtualizacao()` no boot (5 s) e ao entrar em Etiquetagem / Separação / Expedição |
+
+Duas portas levam ao mesmo bloqueio, e a divisão é de propósito:
+
+1. **426 do Nexus** (`{ error: "app_desatualizado", versaoMinima, versaoAtual }`) em qualquer chamada — a trava dura. Não tem como um app velho ignorá-la: quem responde é o outro lado.
+2. **Updater do GitHub** — o aviso antecipado. Se o GitHub estiver fora, essa porta não abre (só um `console.warn`): falha de rede não pode parar a operação.
+
+Antes de a tela entrar, os hooks de `onAntesDeBloquear` rodam — hoje só a Separação, devolvendo o lote (`SeparacaoRunner`, ao lado do `onBeforeForcedLogout`). Sem isso a mesa bloqueada levaria os pedidos reservados junto, invisíveis pras outras estações até o janitor expirar o claim. Teto de 2,5 s, e a falha é engolida (o janitor recupera).
+
+Fora do Tauri (`bun dev` no navegador) `getVersion()` falha e o header não vai. É o certo: sem header o Nexus entende "não é o desktop" e deixa passar — desenvolver no browser não fica atrás de uma trava que existe pra máquina da mesa.
+
+Quem define a mínima: **Nexus → Configurações → Versão mínima do Berzerk Client** (`PUT /settings/versao-desktop`, exige `identity:manage`). A ordem do rollout é sempre deploy da API → release do client → subir a mínima; ver `docs/aplicativo-desktop.md` no nexus.
+
 ### Deep link (abrir pelo Nexus)
 
 O Nexus (web) tem um botão "Abrir Berzerk Client" que navega pra uma URL `berzerk://...`. O app abre (ou vem pra frente se já estiver aberto) e fica logado sem o operador digitar nada — pensado pra estação de fábrica onde o navegador roda num monitor e o app noutro.
@@ -236,7 +267,9 @@ GitHub Actions builda em ~7min, assina com a chave privada Ed25519, publica rele
 - `berzerk-client_0.X.Y_x64-setup.nsis.zip.sig` — assinatura Ed25519
 - `latest.json` — manifest que o updater consulta
 
-PCs instalados pegam a atualização sozinhos na próxima abertura.
+PCs instalados pegam a atualização sozinhos na próxima abertura — e, desde a 0.9.2, **param** até atualizar.
+
+**Passo 3 (opcional, quando a versão for obrigatória):** depois que as mesas já pegaram o release, subir a mínima no Nexus (**Configurações → Versão mínima do Berzerk Client**). Nunca antes: exigir um número que ainda não está publicado bloqueia todo mundo de uma vez, sem ter o que instalar.
 
 ### Onde mora o quê
 
@@ -247,6 +280,7 @@ PCs instalados pegam a atualização sozinhos na próxima abertura.
 | App client do login (desktop) | `berzerk-infra` → `stacks/nexus/<env>/auth.tf` → `aws_cognito_user_pool_client.desktop` (output `cognito_desktop_client_id`) |
 | Pool + Hosted UI + IdP Google | `berzerk-infra` → `stacks/auth/<env>` (`auth.cloud.berzerk.com.br`) |
 | Envs do login no CI | GitHub → repo → Settings → Variables: `VITE_COGNITO_DOMAIN`, `VITE_COGNITO_CLIENT_ID`, `VITE_COGNITO_REGION` |
+| Versão mínima exigida | Nexus → Configurações → **Versão mínima do Berzerk Client** (chave `desktop_versao_minima` em `system_settings`) |
 
 ### Desenvolver em Linux
 
