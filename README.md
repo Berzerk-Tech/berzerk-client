@@ -184,15 +184,18 @@ Endpoints novos que esta versão consome: `POST /separacao/lote`, `POST /separac
 
 O Nexus (web) tem um botão "Abrir Berzerk Client" que navega pra uma URL `berzerk://...`. O app abre (ou vem pra frente se já estiver aberto) e fica logado sem o operador digitar nada — pensado pra estação de fábrica onde o navegador roda num monitor e o app noutro.
 
-**Esquema:** `berzerk`, registrado em `plugins.deep-link.desktop.schemes` no `tauri.conf.json`. Três URLs:
+**Esquema:** `berzerk`, registrado em `plugins.deep-link.desktop.schemes` no `tauri.conf.json`. URLs:
 
-- `berzerk://auth?token_hash=<hash>&type=magiclink` — contrato da 0.6.0, mantido. **O `token_hash` é ignorado desde a 0.8.0** (ele existia só para derivar a sessão Supabase); o host continua aceito porque o Nexus em produção ainda emite esses links, e um link legítimo tem de abrir o app logado em vez de dar erro na cara de quem clicou.
-- `berzerk://login` — dispara o login no navegador (0.7.0).
+- `berzerk://auth?email=<e-mail>` — contrato ATUAL (Nexus ≥ 26/08). O link não carrega credencial nenhuma: só o e-mail de quem clicou, que vira `login_hint`.
+- `berzerk://auth?token_hash=<hash>&type=magiclink` — contrato da 0.6.0, mantido. **O `token_hash` é ignorado desde a 0.8.0** (ele existia só para derivar a sessão Supabase); o host continua aceito porque links emitidos por versões antigas do Nexus ainda chegam.
+- `berzerk://login` — mesmo tratamento do `auth` (0.7.0).
 - `berzerk://open` — só foca a janela.
 
-**Fluxo de auth (0.8.0):** os três hosts fazem a mesma coisa útil — focar a janela e, se não houver sessão do Nexus, disparar o login PKCE no navegador (que já está logado no Google, então costuma voltar sozinho, sem digitar nada).
+**Fluxo de auth (0.9.1):** focar a janela, RESOLVER a sessão do Nexus (renovando pelo refresh token se estiver vencida) e só então decidir. Com sessão viva não há nada a fazer além do toast. Sem sessão, o app dispara o PKCE no navegador **sem `prompt=select_account`** e com `login_hint=<e-mail>`: o navegador que mandou o link acabou de logar no Nexus, então o Hosted UI do Cognito devolve o código sozinho, a aba do loopback se fecha em ~1,5 s e o app entra logado — sem ninguém digitar nada.
 
-Sucesso → toast "Conectado como `<e-mail>`" e tela inicial. Falha → tela de login com o motivo.
+Até a 0.9.0 esse login pedia `prompt=select_account`, então clicar em "Abrir Berzerk Client" abria o app e jogava a pessoa **de volta no navegador**, na tela de escolher a conta do Google. Era esse o bug de 26/08. O `prompt=select_account` continua no botão "Entrar com Google" da tela de login, onde ele existe por um motivo real: mesa compartilhada (a operadora que chega precisa escolher a conta dela) e o beco sem saída do `org_internal` quando o Google pega sozinho um gmail pessoal.
+
+Sucesso → toast "Conectado como `<e-mail>`" e tela inicial. Falha → tela de login com o motivo (e o botão "Entrar com Google" ali do lado, que pede o seletor de contas).
 
 **Segunda instância (Windows/Linux):** o SO abre uma nova instância do processo passando a URL como argumento de linha de comando. `tauri-plugin-single-instance` (feature `deep-link`) detecta isso, repassa a URL pra instância já rodando — que reemite como o evento `deep-link://new-url` do `tauri-plugin-deep-link`, o mesmo que `onOpenUrl` no front escuta — e a segunda instância se encerra. macOS recebe o evento diretamente do SO, sem precisar do single-instance.
 
@@ -202,7 +205,7 @@ Sucesso → toast "Conectado como `<e-mail>`" e tela inicial. Falha → tela de 
 - **Linux (AppImage):** não tem instalador que registre nada — o `register_all()` no `setup()` é quem grava a associação MIME (`xdg-mime`/`~/.local/share/applications`) na primeira vez que o AppImage roda. Se o AppImage não tiver sido integrado ao sistema (ex.: via AppImageLauncher), o registro ainda funciona porque aponta pro caminho onde o binário está sendo executado no momento — mas se o usuário mover o AppImage depois, o registro fica apontando pro lugar errado até o app rodar de novo do novo caminho.
 - Testado localmente em Hyprland com `gio open 'berzerk://open'` / `gio open 'berzerk://login'` / `gio open 'berzerk://auth?token_hash=...&type=magiclink'` — registra e dispara corretamente.
 
-**Exigência de versão:** o Nexus só mostra o botão pra quem já está em ≥ **0.6.0** (primeira versão com deep link). Quem estiver numa versão anterior não tem o esquema registrado — o link cai no browser sem handler.
+**Exigência de versão:** o Nexus só mostra o botão pra quem já está em ≥ **0.9.1** (`DESKTOP_VERSAO_MINIMA_DEEP_LINK`; 0.6.0 foi a primeira com deep link, mas só a 0.9.1 abre logado de verdade). Quem estiver numa versão anterior não tem o esquema registrado — o link cai no browser sem handler.
 
 **Limitações conhecidas:**
 

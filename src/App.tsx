@@ -1,7 +1,11 @@
 import { useEffect, useState, type CSSProperties, type ReactNode } from "react";
 import { getSessao, getSessaoSync, onSessaoChange, type SessaoCognito } from "./lib/cognito";
 import { handleOAuthCallback, listenForOAuthCallback } from "./lib/auth";
-import { initDeepLinks, type DeepLinkAuthResult } from "./lib/deep-link";
+import {
+  initDeepLinks,
+  liberarLoginDoHandoff,
+  type DeepLinkAuthResult,
+} from "./lib/deep-link";
 import { checkForUpdate, type AvailableUpdate } from "./lib/updater";
 import { getStationShortId } from "./lib/station";
 import { Login } from "./components/Login";
@@ -37,6 +41,8 @@ export default function App() {
   const [deepLinkError, setDeepLinkError] = useState<string | null>(null);
   // Login disparado por deep link: a tela de login mostra o "aguardando navegador".
   const [loginEmVoo, setLoginEmVoo] = useState(false);
+  // E-mail que veio no deep link do Nexus — a tela de login diz de quem é a vez.
+  const [emailDoHandoff, setEmailDoHandoff] = useState<string | null>(null);
 
   useEffect(() => {
     // Boot: renova a sessão do Cognito se estiver perto de expirar e só então
@@ -53,6 +59,7 @@ export default function App() {
     const stopDeepLink = listenForOAuthCallback(async (url) => {
       const { error } = await handleOAuthCallback(url);
       setLoginEmVoo(false);
+      liberarLoginDoHandoff();
       if (error) {
         console.error("OAuth callback falhou:", error);
         setDeepLinkError(error.message);
@@ -63,13 +70,18 @@ export default function App() {
 
     // Deep links do Nexus: berzerk://auth (compat), berzerk://login, berzerk://open.
     const stopNexusHandoff = initDeepLinks({
-      onLoginIniciado: () => setLoginEmVoo(true),
+      onLoginIniciado: (email) => {
+        setEmailDoHandoff(email);
+        setLoginEmVoo(true);
+      },
       onAuthResult: (result: DeepLinkAuthResult) => {
         if (result.kind === "success") {
           setDeepLinkError(null);
           setScreen("home");
           setToast(`Conectado como ${result.email}`);
         } else {
+          setLoginEmVoo(false);
+          liberarLoginDoHandoff();
           setDeepLinkError(result.message);
         }
       },
@@ -115,7 +127,17 @@ export default function App() {
       </div>
     );
   } else if (!sessao) {
-    content = withBanner(<Login deepLinkError={deepLinkError} aguardandoNavegador={loginEmVoo} />);
+    content = withBanner(
+      <Login
+        deepLinkError={deepLinkError}
+        aguardandoNavegador={loginEmVoo}
+        emailDoHandoff={emailDoHandoff}
+        onCancelarHandoff={() => {
+          setLoginEmVoo(false);
+          liberarLoginDoHandoff();
+        }}
+      />,
+    );
   } else {
     const email = sessao.email ?? "(sem email)";
     const stationShortId = getStationShortId();

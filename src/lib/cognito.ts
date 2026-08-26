@@ -175,7 +175,31 @@ function renovar(): Promise<SessaoCognito | null> {
  * Sobe o loopback, monta a URL do Hosted UI e abre no navegador do sistema.
  * O `code` volta pelo evento `oauth-callback-url` (ver `auth.ts`).
  */
-export async function iniciarLogin(): Promise<{ error: Error | null }> {
+export type OpcoesLogin = {
+  /**
+   * Mostrar o seletor de contas do Google (`prompt=select_account`).
+   *
+   * `true` (padrão) no botão "Entrar com Google": a mesa é compartilhada e a
+   * operadora que chega precisa escolher a conta DELA em vez de herdar a
+   * anterior. Também é o que evita o beco sem saída do `org_internal` (o Google
+   * pegaria a conta ativa — um gmail pessoal — e o app é Internal).
+   *
+   * `false` no handoff do Nexus ("Abrir Berzerk Client"): quem clicou ACABOU de
+   * provar quem é no navegador, e é justamente a sessão viva do Hosted UI que
+   * faz o `authorize` voltar sozinho, sem tela nenhuma. Pedir `select_account`
+   * aqui é o que jogava a pessoa de volta pro navegador pedindo login.
+   */
+  seletorDeConta?: boolean;
+  /**
+   * E-mail de quem pediu o login (vem no deep link do Nexus) — vira
+   * `login_hint`, que o Google usa pra já escolher a conta certa quando a
+   * sessão do Hosted UI expirou e o navegador tem mais de uma conta logada.
+   * Parâmetro desconhecido é ignorado pelo Cognito, então no pior caso é inerte.
+   */
+  email?: string | null;
+};
+
+export async function iniciarLogin(opcoes: OpcoesLogin = {}): Promise<{ error: Error | null }> {
   if (!config) return { error: new Error(CONFIG_AUSENTE_MSG) };
 
   let redirectUri: string;
@@ -189,6 +213,9 @@ export async function iniciarLogin(): Promise<{ error: Error | null }> {
   const state = novoState();
   guardarFluxo({ state, verifier, redirectUri, criadoEm: Date.now() });
 
+  const seletorDeConta = opcoes.seletorDeConta ?? true;
+  const email = opcoes.email?.trim();
+
   const params = new URLSearchParams({
     client_id: config.clientId,
     response_type: "code",
@@ -199,9 +226,8 @@ export async function iniciarLogin(): Promise<{ error: Error | null }> {
     state,
     // Direto pro Google, sem a tela de seleção de provedor do Cognito.
     identity_provider: "Google",
-    // Máquina compartilhada: o chooser do Google SEMPRE aparece, então a
-    // operadora que chega escolhe a conta dela em vez de herdar a anterior.
-    prompt: "select_account",
+    ...(seletorDeConta ? { prompt: "select_account" } : {}),
+    ...(email ? { login_hint: email } : {}),
   });
 
   try {

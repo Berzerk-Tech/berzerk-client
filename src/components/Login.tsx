@@ -11,9 +11,18 @@ type Props = {
   deepLinkError?: string | null;
   /** Um deep link já abriu o navegador — a tela nasce no estado "aguardando". */
   aguardandoNavegador?: boolean;
+  /** E-mail que veio no deep link do Nexus — quem pediu pra abrir o app. */
+  emailDoHandoff?: string | null;
+  /** Cancelar o "aguardando" de um login que veio por deep link. */
+  onCancelarHandoff?: () => void;
 };
 
-export function Login({ deepLinkError, aguardandoNavegador }: Props = {}) {
+export function Login({
+  deepLinkError,
+  aguardandoNavegador,
+  emailDoHandoff,
+  onCancelarHandoff,
+}: Props = {}) {
   // Semeia com o erro do deep link (se houver) — depois disso é só o estado normal
   // de erro de clique no botão de login.
   const [error, setError] = useState<string | null>(deepLinkError ?? null);
@@ -52,6 +61,7 @@ export function Login({ deepLinkError, aguardandoNavegador }: Props = {}) {
   function handleCancel() {
     setBusy(false);
     setError(null);
+    onCancelarHandoff?.();
   }
 
   return (
@@ -97,7 +107,15 @@ export function Login({ deepLinkError, aguardandoNavegador }: Props = {}) {
                 <span style={spinnerText}>Abrindo o navegador…</span>
               </div>
               <p style={busyNote}>
-                Continue o login no navegador.<br />
+                {emailDoHandoff ? (
+                  <>
+                    Entrando como {emailDoHandoff}.<br />
+                  </>
+                ) : (
+                  <>
+                    Continue o login no navegador.<br />
+                  </>
+                )}
                 Esta janela voltará automaticamente.
               </p>
               <button type="button" onClick={handleCancel} style={cancelBtn}>
