@@ -12,15 +12,21 @@ export function OperatorChip() {
   useEffect(() => onSessaoChange((s) => setEmail(s?.email ?? null)), []);
 
   if (!email) return null;
-  const local = email.split("@")[0] ?? email;
-  const first = local.split(".")[0] ?? local;
-  const name = first.charAt(0).toUpperCase() + first.slice(1).toLowerCase();
 
   return (
     <span style={chip} title={email}>
-      {name}
+      {nomeDaOperadora(email)}
     </span>
   );
+}
+
+/** Primeiro nome a partir do e-mail (`ana.silva@…` → "Ana"). Também é o nome
+ *  que assina a folha do Picking Geral. */
+export function nomeDaOperadora(email: string | null): string {
+  if (!email) return "operadora";
+  const local = email.split("@")[0] ?? email;
+  const first = local.split(".")[0] ?? local;
+  return first.charAt(0).toUpperCase() + first.slice(1).toLowerCase();
 }
 
 const chip: CSSProperties = {
