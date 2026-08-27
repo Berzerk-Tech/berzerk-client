@@ -182,7 +182,7 @@ Sair da fila (voltar ao menu, trocar de fila, logout por inatividade) **devolve 
 
 **Seletor "Data".** A janela de data saiu do Filtro Inteligente e virou o botão **Data** na sidebar, com uma linha por data de emissão presente na fila e a contagem do dia (`GET /separacao/queue-dates`) — o mesmo controle do posvenda. Escolher uma data manda `dateFrom = dateTo` em tudo (lote, produtos, picking). Filtro de data salvo por versão anterior como *janela* (`dateFrom ≠ dateTo`) é descartado no load: o seletor é de dia único e não teria como mostrá-la — ela ficaria filtrando a fila sem aparecer em lugar nenhum.
 
-**Picking Geral.** O botão na sidebar abre o agregado da fila (`GET /separacao/queue-products`, agora com `resumo`): uma seção por tamanho com SKU / Produto / Qtd, e os totais "N produtos • N itens • N pedidos". Serve nas duas filas — no misto os itens vêm de tamanhos variados e as seções aparecem todas. **Imprimir Tudo** e **Imprimir `<tamanho>`** geram um PDF A4 (`src/lib/pickingPdf.ts`, jsPDF) e mandam pelo caminho **silencioso** do app (`src/lib/printer.ts` → SumatraPDF), o mesmo da etiqueta J&T e da DANFE; `window.print()` dentro do WebView abriria um diálogo do Windows, que é justamente o que a mesa não tem como responder. Sai na impressora **padrão** do Windows (a configurada em Configurações é a térmica de etiqueta, 100×150 mm).
+**Picking Geral.** O botão na sidebar abre o agregado da fila (`GET /separacao/queue-products`, agora com `resumo`): uma seção por tamanho com SKU / Produto / Qtd, e os totais "N produtos • N itens • N pedidos". Serve nas duas filas — no misto os itens vêm de tamanhos variados e as seções aparecem todas. **Imprimir Tudo** e **Imprimir `<tamanho>`** geram o PDF (`src/lib/pickingPdf.ts`, jsPDF) e mandam pelo caminho **silencioso** do app (`src/lib/printer.ts` → SumatraPDF), o mesmo da etiqueta J&T e da DANFE; `window.print()` dentro do WebView abriria um diálogo do Windows, que é justamente o que a mesa não tem como responder. (A folha saía em A4 na impressora padrão até a 0.9.5 — ver abaixo.)
 
 Endpoints novos que esta versão consome: `POST /separacao/lote`, `POST /separacao/lote/devolver`, `GET /separacao/meus-pedidos`, `GET /separacao/queue-dates`. Enquanto o Nexus não tiver o do lote, o app **degrada** pro claim de um pedido por vez (lote de um, sem "faltam X") em vez de mostrar erro — o app se atualiza sozinho em todas as estações, então as duas ordens de deploy precisam funcionar.
 
@@ -211,6 +211,35 @@ tenta de novo quando a janela volta ao foco) e degrada em silêncio num Nexus
 sem a rota. Se ainda assim o pedido da mesa sumir da resposta do lote, a tela
 avisa *"Este pedido foi redistribuído para outra estação"* e volta pro lote —
 ela nunca fica conferindo um pedido que o `complete` recusaria com 409.
+
+### Picking Geral em etiqueta (0.9.5)
+
+Duas correções do que o campo reportou em 27/08.
+
+**A folha virou etiqueta 100×150 mm.** O PDF do Picking Geral era A4 e ia pra
+impressora **padrão** do Windows — que nas bancadas é a térmica de etiquetas.
+Resultado: a página A4 inteira encolhida dentro de uma etiqueta de 10×15 cm,
+fonte minúscula, ilegível de pé. Agora `src/lib/pickingPdf.ts` gera páginas de
+**100×150 mm** (retrato, margem 4 mm) com corpo de fonte de bancada — tamanho
+da seção em 22pt, produto em 11pt (quebra em até 2 linhas), quantidade em 14pt
+negrito —, **uma seção de tamanho por etiqueta** (continua em `P (2/3)` quando
+não cabe), cabeçalho repetido em toda etiqueta (operadora, escopo, data/hora,
+fila, contagem da seção) e rodapé `Página N/M`. Cabem ~15 produtos por etiqueta.
+O EAN saiu da folha: na prateleira ela pega pelo NOME, e os 10 cm valem mais em
+corpo de fonte — o SKU continua na tela do Picking Geral.
+
+E a impressão passa a usar **explicitamente a impressora de etiquetas
+configurada** em Configurações (`getLabelPrinter()`, a mesma da etiqueta J&T e
+da DANFE), em vez da padrão do Windows.
+
+**Mistos não listam o tamanho da própria bancada.** Na fila de mistos GG as
+peças GG já estão com a operadora na bancada; a folha existe pra ela buscar os
+OUTROS tamanhos do pedido na prateleira. A seção da bancada agora fica fora —
+no lote e na "fila inteira" —, com o recorte pelo mesmo **bucket** do claim
+(`src/lib/filas.ts`, extraído de `Separacao.tsx`): a fila XG tira também
+XXG/G1/G2/G3, a fila P tira PP. O cabeçalho (tela e etiqueta) mostra
+*"sem GG (bancada)"* e os totais já vêm recalculados. Nas filas de **puros**
+nada muda — ali a lista é a própria bancada.
 
 ### Atualização forçada (0.9.2)
 

@@ -3,14 +3,20 @@
 // tamanho, com SKU/Produto/Qtd. É a folha que a separadora leva pra prateleira
 // e traz tudo de uma vez, em vez de ir e voltar pedido a pedido.
 //
-// Mesma tela pra fila de puros e de mistos — muda só o agregado (no misto os
-// itens vêm de tamanhos variados e as seções aparecem todas). Impressão em
-// papel pelo caminho silencioso do app (lib/printer.ts + lib/pickingPdf.ts).
+// Mesma tela pra fila de puros e de mistos — muda o agregado (no misto os itens
+// vêm de tamanhos variados e as seções aparecem todas) e o RECORTE: nos mistos
+// o tamanho da própria bancada fica de fora, porque aquelas peças já estão ali.
+//
+// Impressão pelo caminho silencioso do app (lib/printer.ts + lib/pickingPdf.ts),
+// em ETIQUETA 100×150 mm e na impressora de etiquetas configurada — é a única
+// que as bancadas têm.
 
 import { useEffect, useMemo, useState, type CSSProperties } from "react";
 import { ApiError } from "../lib/api";
+import { SEM_TAMANHO, queueFor } from "../lib/filas";
 import { gerarPickingPdf, type PickingSecao } from "../lib/pickingPdf";
 import { printPdfBase64 } from "../lib/printer";
+import { getLabelPrinter } from "../services/printerConfig";
 import {
   getQueueProducts,
   marcarListaImpressa,
@@ -19,8 +25,6 @@ import {
   type QueueProduct,
   type SeparationMode,
 } from "../services/orders";
-
-const SEM_TAMANHO = "SEM TAMANHO";
 
 /** Ordem das seções: as filas reais primeiro, o resto em ordem alfabética. */
 const ORDEM_TAMANHOS = ["PP", "P", "M", "G", "GG", "XG", "XXG", "G1", "G2", "G3"];
@@ -184,6 +188,12 @@ export function PickingGeralModal({
     // roda de novo quando a operadora troca o filtro, que é o que se quer.
   }, [escopo, produtosDoLote, lote.length, queue.mode, queue.size, queue.sizes, data, filters]);
 
+  // MISTOS: o tamanho da própria bancada não entra na folha. Na fila de mistos
+  // GG as peças GG já estão com ela na bancada — o que ela precisa buscar na
+  // prateleira são os OUTROS tamanhos do pedido. Vale pro lote e pra fila
+  // inteira. Nos PUROS nada é tirado: ali a lista é a própria bancada.
+  const bancada = queue.mode === "total" ? queue.size : null;
+
   // Recorte por NOME, defensivo: desde 26/08 o nexus aplica os filtros de
   // produto no próprio `queue-products`, e o LOTE já nasceu filtrado. Isto
   // sobra pra nexus antigo, que ignora os campos e devolveria a fila inteira.
@@ -191,13 +201,20 @@ export function PickingGeralModal({
     if (!products) return [];
     const inc = (filters.includeProducts ?? []).map((t) => t.toLowerCase());
     const exc = (filters.excludeProducts ?? []).map((t) => t.toLowerCase());
+    // BUCKET, o mesmo do claim (lib/filas.ts): a fila XG tira também
+    // XXG/G1/G2/G3, a fila P tira PP. `queue.sizes` entra junto porque é a
+    // lista de tamanhos reais que o claim usou pra montar este lote.
+    const naBancada = (tamanho: string) =>
+      bancada !== null && (queueFor(tamanho) === bancada || queue.sizes.includes(tamanho));
     return products.filter((p) => {
+      const tamanho = p.tamanho?.trim().toUpperCase() || SEM_TAMANHO;
+      if (naBancada(tamanho)) return false;
       const nome = p.nome.toLowerCase();
       if (exc.some((t) => nome.includes(t))) return false;
       if (inc.length > 0 && !inc.some((t) => nome.includes(t))) return false;
       return true;
     });
-  }, [products, filters]);
+  }, [products, filters, bancada, queue.sizes]);
 
   const secoes = useMemo<Secao[]>(() => {
     const mapa = new Map<string, QueueProduct[]>();
@@ -226,9 +243,11 @@ export function PickingGeralModal({
   }, [visiveis]);
 
   // Totais: os da API quando vierem (fila inteira), senão recalculados aqui.
+  // Filtro de produto ou recorte da bancada ⇒ o resumo da API conta demais.
   const filtrando = (filters.includeProducts?.length ?? 0) + (filters.excludeProducts?.length ?? 0) > 0;
+  const recortando = filtrando || bancada !== null;
   const total = useMemo(() => {
-    if (resumoApi && !filtrando) return resumoApi;
+    if (resumoApi && !recortando) return resumoApi;
     const ids = new Set<string>();
     let itens = 0;
     for (const p of visiveis) {
@@ -236,11 +255,15 @@ export function PickingGeralModal({
       for (const id of p.orderIds) ids.add(id);
     }
     return { produtos: visiveis.length, itens, pedidos: ids.size };
-  }, [resumoApi, filtrando, visiveis]);
+  }, [resumoApi, recortando, visiveis]);
 
-  const dataLabel = data ? fmtData(data) : "todas as datas";
+  const dataLabel = data ? `emissão ${fmtData(data)}` : "todas as datas";
   const escopoLabel = escopo === "lote" ? "Meu lote" : "Fila inteira";
-  const subtitulo = `${escopoLabel} · ${dataLabel} · ${total.produtos} produtos • ${total.itens} itens • ${total.pedidos} pedidos`;
+  const semBancada = bancada ? `sem ${bancada} (bancada)` : null;
+  const filaLabel = `Fila ${queue.size} · ${queue.mode === "total" ? "Mistos" : "Puros"}`;
+  const subtitulo =
+    `${escopoLabel} · ${dataLabel} · ${total.produtos} produtos • ${total.itens} itens • ${total.pedidos} pedidos` +
+    (semBancada ? ` · ${semBancada}` : "");
 
   const imprimir = async (apenas?: Secao) => {
     if (imprimindo) return;
@@ -253,23 +276,23 @@ export function PickingGeralModal({
     setStatus("Enviando pra impressora…");
     try {
       const base64 = gerarPickingPdf({
-        titulo: `Picking Geral — ${operadora}`,
-        subtitulo: apenas
-          ? `Tamanho ${apenas.tamanho} · ${dataLabel} · ${apenas.produtos.length} produtos • ${apenas.itens} itens • ${apenas.pedidos} pedidos`
-          : subtitulo,
+        operadora,
+        fila: filaLabel,
+        escopo: `${escopo === "lote" ? `Meu lote (${lote.length})` : "Fila inteira"} · ${dataLabel}`,
+        observacao: semBancada,
         secoes: alvo.map<PickingSecao>((s) => ({
           tamanho: s.tamanho,
           produtos: s.produtos.length,
           itens: s.itens,
           pedidos: s.pedidos,
-          linhas: s.produtos.map((p) => ({
-            sku: p.ean ?? "",
-            produto: p.nome,
-            qtd: p.quantidade,
-          })),
+          linhas: s.produtos.map((p) => ({ produto: p.nome, qtd: p.quantidade })),
         })),
       });
+      // A impressora de ETIQUETAS configurada em Configurações — a mesma da
+      // etiqueta J&T e da DANFE. Cair na "padrão do Windows" foi o que mandou
+      // a folha A4 pra térmica de 100×150 e a deixou ilegível.
       const out = await printPdfBase64(base64, {
+        printer: getLabelPrinter(),
         jobName: apenas ? `Picking ${apenas.tamanho}` : `Picking Geral ${queue.size}`,
       });
       // Lista do LOTE impressa ⇒ os pedidos ficam PRESOS na mesa dela: a coleta
@@ -332,7 +355,11 @@ export function PickingGeralModal({
         <div className="thin-scroll" style={corpo}>
           {products === null && !erro && <span style={vazio}>Carregando produtos da fila…</span>}
           {products !== null && secoes.length === 0 && !erro && (
-            <span style={vazio}>Nenhum produto nesta fila com os filtros atuais.</span>
+            <span style={vazio}>
+              {semBancada
+                ? `Nada a buscar fora da bancada ${bancada} — todos os itens são desse tamanho.`
+                : "Nenhum produto nesta fila com os filtros atuais."}
+            </span>
           )}
           {secoes.map((s) => (
             <section key={s.tamanho} style={secaoWrap}>

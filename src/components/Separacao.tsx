@@ -5,6 +5,7 @@ import { OperatorChip } from "./OperatorChip";
 import { SeparacaoRunner } from "./SeparacaoRunner";
 import { useRfid } from "../contexts/RfidContext";
 import { ApiError } from "../lib/api";
+import { QUEUES, SEM_TAMANHO, queueFor, type Queue } from "../lib/filas";
 import { subscribeQueueChanged } from "../lib/realtime";
 import {
   devolverLote,
@@ -15,39 +16,6 @@ import {
 } from "../services/orders";
 
 type Props = { onBack: () => void };
-
-/**
- * Filas FIXAS da Separação (regra do Victor): só os 5 tamanhos que existem de
- * verdade na operação. Tamanhos raros são agrupados — o claim manda a lista de
- * tamanhos reais do bucket, então nenhum pedido fica órfão:
- *   PP → fila P;  XXG/G1/G2/G3/qualquer outro → fila XG.
- * "SEM TAMANHO" fica FORA (pedidos antigos, pré-junho — o corte por data é
- * feito no nexus).
- */
-const QUEUES = ["P", "M", "G", "GG", "XG"] as const;
-
-/**
- * Sentinela da fila "sem tamanho" — o MESMO valor que o nexus define em
- * `@berzerk/contracts` (`SEM_TAMANHO`) e aceita em `sizes`. São os pedidos
- * cujo tamanho a ingestão não reconheceu: no banco, `predominant_size IS NULL`.
- */
-const SEM_TAMANHO = "SEM TAMANHO";
-
-/**
- * Filas selecionáveis: as 5 fixas + "Sem tamanho". A sexta fica FORA das 5
- * bancadas (não tem bancada própria) e o tile só aparece quando tem pedido —
- * mas ela precisa existir: sem ela, pedido com tamanho não reconhecido ficava
- * invisível E inclaimável pra sempre, e a fila nunca esvaziava.
- */
-type Queue = (typeof QUEUES)[number] | typeof SEM_TAMANHO;
-
-function queueFor(sizeKey: string): Queue {
-  const s = sizeKey.trim().toUpperCase();
-  if ((QUEUES as readonly string[]).includes(s)) return s as Queue;
-  if (s === "PP") return "P";
-  if (s === SEM_TAMANHO) return SEM_TAMANHO;
-  return "XG";
-}
 
 /** Cada tamanho tem duas abas: Puro (grade normal) e Mistos (grade mista). */
 type QueueMode = "puro" | "mistos";
