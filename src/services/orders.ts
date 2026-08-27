@@ -88,6 +88,15 @@ export type Me = {
    *  PR #79). null/ausente = sem limite. Quem mede a inatividade é o app —
    *  ver `lib/idleSession.ts`. */
   sessaoInatividadeMinutos?: number | null;
+  /**
+   * Trava `separacao_liberacao_supervisor_ativa` do nexus (Configurações →
+   * Separação): `false` deixa a operadora concluir com peças faltando SEM o PIN
+   * do supervisor (a conclusão vira auditoria sem supervisor do lado de lá).
+   * AUSENTE = `true`: nexus anterior a 27/08 não conhece o campo e lá a
+   * exigência é incondicional — assumir o contrário afrouxaria uma trava por
+   * causa da versão do servidor.
+   */
+  liberacaoSupervisorAtiva?: boolean;
 };
 
 export type QueueCounts = {

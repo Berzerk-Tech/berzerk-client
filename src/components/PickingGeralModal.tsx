@@ -355,10 +355,24 @@ export function PickingGeralModal({
         <div className="thin-scroll" style={corpo}>
           {products === null && !erro && <span style={vazio}>Carregando produtos da fila…</span>}
           {products !== null && secoes.length === 0 && !erro && (
+            // "Vazio" quase nunca é a fila estar vazia: é filtro herdado. Os
+            // filtros ficam no localStorage da ESTAÇÃO e sobrevivem à troca de
+            // fila, então dá pra entrar na fila M com a data de ontem ainda
+            // selecionada e ver esta tela sem entender por quê — as
+            // separadoras relataram isso como "o Picking Geral não aparece".
+            // Por isso a mensagem DIZ qual recorte está ativo.
             <span style={vazio}>
-              {semBancada
-                ? `Nada a buscar fora da bancada ${bancada} — todos os itens são desse tamanho.`
-                : "Nenhum produto nesta fila com os filtros atuais."}
+              {recortando
+                ? `Nenhum produto com o recorte atual (${[
+                    data ? `emissão ${fmtData(data)}` : null,
+                    filtrando ? "filtro de produto" : null,
+                    semBancada,
+                  ]
+                    .filter(Boolean)
+                    .join(" · ")}). Revise os filtros na tela da fila.`
+                : escopo === "lote"
+                  ? "Seu lote está vazio — puxe pedidos na fila ou veja a fila inteira."
+                  : "Nenhum produto nesta fila."}
             </span>
           )}
           {secoes.map((s) => (

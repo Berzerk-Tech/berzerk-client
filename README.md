@@ -212,6 +212,45 @@ sem a rota. Se ainda assim o pedido da mesa sumir da resposta do lote, a tela
 avisa *"Este pedido foi redistribuído para outra estação"* e volta pro lote —
 ela nunca fica conferindo um pedido que o `complete` recusaria com 409.
 
+### Sequência do lote, filtros na tela e trava do supervisor (0.9.5)
+
+O que as separadoras reportaram no primeiro dia da 0.9.4.
+
+**A mesa segue SEQUENCIAL.** Concluir (ou devolver) voltava pro PRIMEIRO card do
+lote; agora abre o pedido SEGUINTE ao que saiu, e só volta ao começo quando não
+sobrou nenhum depois dele — que é o caso "a lista acabou, o servidor repôs,
+continua do primeiro novo". Clicar num card pra escolher a ordem continua
+valendo.
+
+**Pular (P).** A peça ainda não chegou da dobra: o pedido vai pro FIM da ordem
+local e a mesa segue pro próximo. Ele **continua reservado** pra ela — pular não
+fala com o servidor (só o `iniciar` do pedido que entra na mesa) —, aparece na
+sidebar marcado como *pulado* e volta depois do último.
+
+**O filtro vale sobre o lote.** Desde 27/08 o `POST /separacao/lote` do Nexus
+devolve tudo o que já é dela no modo+tamanho, ignorando data/produto: os filtros
+decidem só o que ENTRA de novo (foi o conserto de uma operadora com 81 pedidos).
+Isso tirou o efeito que a operação usava — excluir "calça" e não ver calça. O
+recorte de EXIBIÇÃO passa a ser do app: sidebar, Picking Geral e o "próximo"
+percorrem só o que bate com o filtro, nada é devolvido ao servidor, e o rodapé
+conta `N ocultos pelo filtro`. A regra de casamento é a mesma do servidor
+(`ilike %termo%` sobre o nome do item) e a data usa o dia de **São Paulo**.
+A data passou a contar no chip `Filtros (N)` do topo: ela sobrevive à troca de
+fila (fica no `localStorage` da estação) e, invisível ali, deixava a operadora
+entrar numa fila nova com o recorte de outro dia ativo — a fila e o Picking
+Geral vinham vazios sem explicação. O Picking Geral também ganhou uma porta no
+topo, ao lado de Filtros/Histórico, e a mensagem de "vazio" agora diz QUAL
+recorte está ativo.
+
+**Trava da liberação por supervisor.** O Nexus expõe em `GET /separacao/me` a
+configuração `liberacaoSupervisorAtiva` (Configurações → Separação, padrão
+ligada). Com ela DESLIGADA, **K** / "Concluir com faltantes" conclui direto
+depois de um `Faltam N peças — concluir mesmo assim?`, sem o diálogo do PIN
+(o Nexus grava a auditoria sem supervisor). Com ela ligada, nada muda. Se o
+servidor recusar mesmo assim (a trava mudou no meio do turno), o 422
+`liberacao_necessaria` cai no diálogo do PIN, como antes. Ausente na resposta =
+ligada — nunca se afrouxa trava por causa da versão do servidor.
+
 ### Picking Geral em etiqueta (0.9.5)
 
 Duas correções do que o campo reportou em 27/08.
