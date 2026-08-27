@@ -13,9 +13,13 @@ import { OperatorChip } from "./OperatorChip";
 import { useRfid } from "../contexts/RfidContext";
 import { beepError, beepOk } from "../lib/beep";
 import { LARGURA_PICKING, imagemRedimensionada, miniatura } from "../lib/imagens";
-import { printEtiqueta, printEngineStatus } from "../lib/printer";
-import { getLabelPrinter } from "../services/printerConfig";
-import { gerarDanfeSimplificadaPdf } from "../lib/danfe";
+import { printEngineStatus } from "../lib/printer";
+import {
+  documentoDaConta,
+  imprimirDocumentoDoPedido,
+  rotuloDocumento,
+} from "../lib/reimpressao";
+import { ExpedicaoHistoryModal } from "./ExpedicaoHistoryModal";
 import {
   epcMatch,
   expedicaoErrorCode,
@@ -62,7 +66,14 @@ type Flow =
   | { kind: "printing"; order: ExpedicaoOrder }
   | { kind: "packing"; order: ExpedicaoOrder; lidas: string[]; override?: string }
   | { kind: "done"; order: ExpedicaoOrder; modo: ExpedicaoMode; enfileirado: boolean }
-  | { kind: "error"; code: string; message: string; order?: ExpedicaoOrder };
+  | {
+      kind: "error";
+      code: string;
+      message: string;
+      order?: ExpedicaoOrder;
+      /** Só no `ja_expedido`: o pedido lá atrás, pra oferecer a reimpressão. */
+      jaExpedido?: JaExpedido;
+    };
 
 const PACKING_MS = 5000;
 const RESOLVE_DEBOUNCE_MS = 250;
@@ -154,7 +165,7 @@ function jaExpedidoMsg(js: JaExpedido[]): string {
     : null;
   const quem = j?.shippedByEmail ?? j?.shippedBy ?? null;
   const det = [quando && `em ${quando}`, quem && `por ${quem}`].filter(Boolean).join(" ");
-  return `O pedido #${j?.numero ?? ""} já foi expedido${det ? ` ${det}` : ""}. Tire essas peças da mesa e aperte Nova leitura.`;
+  return `O pedido #${j?.numero ?? ""} já foi expedido${det ? ` ${det}` : ""}. Tire essas peças da mesa — ou reimprima o documento, se ele não saiu.`;
 }
 
 function statusOfStep(flow: Flow, step: Step): "active" | "done" | "pending" {
@@ -192,6 +203,7 @@ export function Expedicao({ onBack }: Props) {
   const [overrideOpen, setOverrideOpen] = useState(false);
   const [engineWarn, setEngineWarn] = useState<string | null>(null);
   const [reprintingId, setReprintingId] = useState<string | null>(null);
+  const [historyOpen, setHistoryOpen] = useState(false);
   // Automação (power-user): bipar → imprimir sozinho quando o pedido completa.
   const [autoPrint, setAutoPrint] = useState(true);
   const autoPrintRef = useRef(true);
@@ -280,7 +292,12 @@ export function Expedicao({ onBack }: Props) {
       if (matches.length === 0) {
         if (!retrying) beepError();
         if (jaExpedidos.length > 0) {
-          setFlow({ kind: "error", code: "ja_expedido", message: jaExpedidoMsg(jaExpedidos) });
+          setFlow({
+            kind: "error",
+            code: "ja_expedido",
+            message: jaExpedidoMsg(jaExpedidos),
+            jaExpedido: jaExpedidos[0],
+          });
           scheduleRetry();
           return;
         }
@@ -367,7 +384,6 @@ export function Expedicao({ onBack }: Props) {
       setOverrideOpen(false);
       setFlow({ kind: "printing", order });
       const oficial = modoRef.current === "oficial";
-      const printer = getLabelPrinter();
       let docs: Documentos;
       try {
         docs = await getDocumentos(order.id);
@@ -385,38 +401,36 @@ export function Expedicao({ onBack }: Props) {
         return;
       }
 
-      // 1) Etiqueta J&T (dispara a máquina). Pré-requisito rígido no oficial.
-      if (docs.etiqueta) {
-        try {
-          const out = await printEtiqueta(docs.etiqueta.base64, docs.etiqueta.formato, { jobName: `JT ${order.numero ?? order.id}`, printer });
-          if (!out.ok) throw new Error(out.message ?? "impressão falhou");
-          if (oficial && order.numero) await markLabelPrinted(order.numero, order.tinyAccount);
-        } catch (e) {
-          const msg = e instanceof Error ? e.message : String(e);
-          if (oficial) {
-            setFlow({ kind: "error", code: "etiqueta_impressao", message: `Falha na etiqueta J&T: ${msg}. Verifique a impressora — o pedido não avança sem a etiqueta.`, order });
-            return;
-          }
-          showNotice(`Etiqueta J&T não imprimiu (${msg}) — seguindo em teste.`);
+      // UM documento, UMA página, escolhido pela CONTA (regra do legado):
+      // JT → etiqueta da transportadora; FM → DANFE simplificada, que é a
+      // etiqueta desses pedidos. NUNCA os dois — a máquina de embalagem solta
+      // um saco por etiqueta impressa, então a segunda página vira um saco a
+      // mais no chão. Era esse o bug de produção: a mesa mandava etiqueta E
+      // DANFE como dois jobs pra mesma térmica.
+      const documento = documentoDaConta(order.tinyAccount);
+      const rotulo = rotuloDocumento(documento);
+      const r = await imprimirDocumentoDoPedido(order, "mesa", docs);
+
+      if (!r.ok) {
+        // No oficial o documento é pré-requisito: sem papel, não expede.
+        if (oficial) {
+          setFlow({
+            kind: "error",
+            code: documento === "etiqueta" ? "etiqueta_ausente" : "danfe_ausente",
+            message: `${r.mensagem} Verifique a impressora — o pedido não avança sem a ${rotulo}.`,
+            order,
+          });
+          return;
         }
-      } else if (oficial) {
-        setFlow({ kind: "error", code: "etiqueta_ausente", message: "Etiqueta da transportadora (J&T) ainda não chegou pra este pedido. Aguarde a etiqueta antes de expedir.", order });
+        showNotice(`${r.mensagem} Seguindo em teste.`);
+        setFlow({ kind: "packing", order, lidas, override });
         return;
-      } else {
-        showNotice("Sem etiqueta J&T ainda — seguindo em teste sem imprimir.");
       }
 
-      // 2) DANFE (quando houver) — best-effort nos dois modos.
-      if (docs.danfe) {
-        try {
-          const pdf = gerarDanfeSimplificadaPdf(docs.danfe);
-          if (pdf) {
-            const out = await printEtiqueta(pdf, "pdf", { jobName: `DANFE ${order.numero ?? order.id}`, printer });
-            if (!out.ok) showNotice(`DANFE não imprimiu: ${out.message ?? "erro"}`);
-          }
-        } catch (e) {
-          showNotice(`Falha ao gerar/imprimir a DANFE: ${e instanceof Error ? e.message : String(e)}`);
-        }
+      // `printed_at` da etiqueta é o carimbo de embalagem que o `ship` exige —
+      // só existe pra conta JT (FM não tem linha em `jt_shipping_labels`).
+      if (oficial && documento === "etiqueta" && order.numero) {
+        await markLabelPrinted(order.numero, order.tinyAccount);
       }
 
       setFlow({ kind: "packing", order, lidas, override });
@@ -425,31 +439,17 @@ export function Expedicao({ onBack }: Props) {
     [showNotice],
   );
 
-  // ---- reimpressão a partir do histórico ----
+  /**
+   * Reimpressão — da sidebar da sessão, do histórico do dia ou da tela "já foi
+   * expedido". Mesma escolha por conta da mesa (UM documento, UMA página) e
+   * sem tocar no status: reimprimir não é transição de negócio.
+   */
   const reprint = useCallback(
-    async (order: ExpedicaoOrder) => {
+    async (order: { id: string; numero: string | null; tinyAccount: string }, origem: "historico" | "ja_expedido") => {
       setReprintingId(order.id);
-      const printer = getLabelPrinter();
-      try {
-        const docs = await getDocumentos(order.id);
-        let printed = false;
-        if (docs.etiqueta) {
-          await printEtiqueta(docs.etiqueta.base64, docs.etiqueta.formato, { jobName: `JT ${order.numero ?? order.id}`, printer });
-          printed = true;
-        }
-        if (docs.danfe) {
-          const pdf = gerarDanfeSimplificadaPdf(docs.danfe);
-          if (pdf) {
-            await printEtiqueta(pdf, "pdf", { jobName: `DANFE ${order.numero ?? order.id}`, printer });
-            printed = true;
-          }
-        }
-        showNotice(printed ? `Reimpressão de #${order.numero ?? ""} enviada.` : `Pedido #${order.numero ?? ""} sem documentos pra reimprimir.`);
-      } catch (e) {
-        showNotice(`Falha na reimpressão: ${e instanceof Error ? e.message : String(e)}`);
-      } finally {
-        setReprintingId(null);
-      }
+      const r = await imprimirDocumentoDoPedido(order, origem);
+      setReprintingId(null);
+      showNotice(r.mensagem);
     },
     [showNotice],
   );
@@ -681,6 +681,9 @@ export function Expedicao({ onBack }: Props) {
         </div>
         <h2 style={title}>Expedição</h2>
         <div style={hRight}>
+          <button style={historicoBtn} onClick={() => setHistoryOpen(true)} title="O que a mesa expediu hoje — e reimpressão">
+            🕐 Histórico
+          </button>
           <AutoToggle on={autoPrint} onToggle={() => setAutoPrint((v) => !v)} />
           <ModoBadge modo={modo} />
           <MesaChip connected={rfid.connected} host={rfid.host} onReconnect={() => void rfid.reconnect()} />
@@ -721,10 +724,12 @@ export function Expedicao({ onBack }: Props) {
             onPrint={imprimirManual}
             onSeal={() => void concluirCiclo()}
             onRestart={reiniciar}
+            reprintingId={reprintingId}
+            onReprint={(o) => void reprint(o, "ja_expedido")}
           />
         </main>
 
-        <HistorySidebar session={session} reprintingId={reprintingId} onReprint={(o) => void reprint(o)} />
+        <HistorySidebar session={session} reprintingId={reprintingId} onReprint={(o) => void reprint(o, "historico")} />
       </div>
 
       <footer style={footer}>
@@ -746,6 +751,8 @@ export function Expedicao({ onBack }: Props) {
       {overrideOpen && flow.kind === "identified" && (
         <OverrideModal faltam={flow.faltam.length} onCancel={() => setOverrideOpen(false)} onConfirm={confirmarOverride} />
       )}
+
+      {historyOpen && <ExpedicaoHistoryModal onClose={() => setHistoryOpen(false)} />}
     </div>
   );
 }
@@ -763,6 +770,8 @@ function StageCenter({
   onPrint,
   onSeal,
   onRestart,
+  reprintingId,
+  onReprint,
 }: {
   flow: Flow;
   progress: Map<string, number>;
@@ -773,6 +782,8 @@ function StageCenter({
   onPrint: () => void;
   onSeal: () => void;
   onRestart: () => void;
+  reprintingId: string | null;
+  onReprint: (o: { id: string; numero: string | null; tinyAccount: string }) => void;
 }) {
   if (flow.kind === "idle") {
     return (
@@ -810,12 +821,32 @@ function StageCenter({
     );
   }
   if (flow.kind === "error") {
+    // "Já foi expedido" deixou de ser beco sem saída: se a impressora travou e
+    // o papel não saiu, o embalador reimprime daqui mesmo — sem mandar o
+    // pedido de volta pra separação, e sem mudar status nenhum.
+    const ja = flow.jaExpedido;
+    const doc = ja ? documentoDaConta(ja.tinyAccount) : null;
     return (
       <div style={{ ...centerBlock, padding: "0 24px" }}>
         <div style={{ ...heroDot, background: "var(--danger-text)" }} />
         <h1 style={{ ...heroDisplay, fontSize: 56, color: "var(--danger-text)" }}>OPA</h1>
         <p style={{ ...heroHint, fontSize: 16, maxWidth: 560, color: "var(--text)" }}>{flow.message}</p>
-        <button style={redBtn} onClick={onRestart}>Nova leitura</button>
+        <div style={erroAcoesRow}>
+          {ja && doc && (
+            <button
+              style={reimprimirGrandeBtn}
+              disabled={reprintingId === ja.orderId}
+              onClick={() =>
+                onReprint({ id: ja.orderId, numero: ja.numero, tinyAccount: ja.tinyAccount })
+              }
+            >
+              {reprintingId === ja.orderId
+                ? "Reimprimindo…"
+                : `↻ Reimprimir ${doc === "etiqueta" ? "etiqueta" : "DANFE"}`}
+            </button>
+          )}
+          <button style={redBtn} onClick={onRestart}>Nova leitura</button>
+        </div>
       </div>
     );
   }
@@ -1260,6 +1291,9 @@ const packingFill: CSSProperties = { height: "100%", background: "var(--warning-
 const redBtn: CSSProperties = { padding: "13px 26px", fontSize: 14, fontWeight: 700, border: 0, borderRadius: 10, background: "#dc2626", color: "white", cursor: "pointer", textTransform: "uppercase", letterSpacing: 1 };
 const ghostBtn: CSSProperties = { padding: "12px 18px", fontSize: 13, fontWeight: 600, border: "1px solid var(--border)", borderRadius: 10, background: "transparent", color: "var(--text-secondary)", cursor: "pointer", textTransform: "uppercase", letterSpacing: 1 };
 const forceBtn: CSSProperties = { padding: "12px 20px", background: "transparent", color: "var(--warning-text)", border: "1px solid var(--warning-border)", borderRadius: 10, cursor: "pointer", fontSize: 13, fontWeight: 700 };
+const erroAcoesRow: CSSProperties = { display: "flex", gap: 12, alignItems: "center", flexWrap: "wrap", justifyContent: "center" };
+const reimprimirGrandeBtn: CSSProperties = { padding: "13px 26px", fontSize: 14, fontWeight: 700, border: "1px solid var(--border-strong)", borderRadius: 10, background: "var(--bg-input)", color: "var(--text)", cursor: "pointer", textTransform: "uppercase", letterSpacing: 1 };
+const historicoBtn: CSSProperties = { padding: "8px 14px", fontSize: 12, fontWeight: 700, border: "1px solid var(--border)", borderRadius: 999, background: "var(--bg-card)", color: "var(--text-secondary)", cursor: "pointer" };
 
 // --- Live read panel ---
 const livePanel: CSSProperties = { width: 288, flexShrink: 0, borderRight: "1px solid var(--border)", background: "var(--bg-elevated)", display: "flex", flexDirection: "column", minHeight: 0 };
