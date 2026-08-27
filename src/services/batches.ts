@@ -149,6 +149,13 @@ function toBatch(dto: LoteDto): ProductionBatch {
 
 const LIMITE = "200";
 
+/** Fila de lotes pendentes + o total real no servidor (pode passar do que veio). */
+export type PendingBatchesResult = {
+  batches: ProductionBatch[];
+  /** Total no servidor pro recorte pedido — pode ser maior que `batches.length`. */
+  total: number;
+};
+
 /**
  * Lotes prontos pra aparecer na Produção (não impressos ainda).
  *
@@ -156,12 +163,19 @@ const LIMITE = "200";
  * etiqueta RFID deve ser impressa. O recorte agora é do servidor, que aceita
  * TANTO o status do motor de workflow quanto o espelho do legado: é o que faz
  * a fila continuar cheia no dia em que o lote passar a nascer só no nexus.
+ *
+ * Dedup por `id` como rede de segurança: já houve duplicidade por JOIN no
+ * backend, e um lote duplicado aqui renderiza em dobro e pode disparar dois
+ * `createPrintJob` pro mesmo lote.
  */
-export async function fetchPendingBatches(): Promise<ProductionBatch[]> {
+export async function fetchPendingBatches(): Promise<PendingBatchesResult> {
   const dto = await apiRequest<LotesDto>("/etiquetagem/lotes", {
     query: { status: "pendente", escopo: "fila", limite: LIMITE },
   });
-  return dto.lotes.map(toBatch);
+  const batches = Array.from(
+    new Map(dto.lotes.map((l) => [l.id, toBatch(l)])).values(),
+  );
+  return { batches, total: dto.total };
 }
 
 /** Lotes carimbados como impressos HOJE (o Histórico da tela). */
@@ -176,7 +190,7 @@ export async function fetchTodayHistory(): Promise<PrintedBatchEntry[]> {
       limite: "50",
     },
   });
-  return dto.lotes.map((l) => ({
+  const entries = dto.lotes.map((l) => ({
     id: l.id,
     batch_code: l.codigo,
     design_name: l.estampa,
@@ -185,6 +199,8 @@ export async function fetchTodayHistory(): Promise<PrintedBatchEntry[]> {
     rfid_impresso_at: l.rfidImpressoEm ?? "",
     thumbnail_url: l.thumbnailUrl,
   }));
+  // Mesma rede de segurança de fetchPendingBatches — dedup por id.
+  return Array.from(new Map(entries.map((e) => [e.id, e])).values());
 }
 
 /** Resultado da busca na base toda (sem filtro de etapa/carimbo). */

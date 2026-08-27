@@ -317,8 +317,12 @@ export function SeparacaoRunner({
   // Época da leitura: bump = reset da sessão (zera dedupe + limpa o buffer da
   // mesa, sem desarmar o leitor) — é o "Reiniciar (R)".
   const [sessionEpoch, setSessionEpoch] = useState(0);
-  // Filtros de picking (data + produtos) — por estação, sobrevivem a reload.
-  const [filters, setFilters] = useState<QueueFilters>(() => loadFilters());
+  // Filtros de picking (data + produtos) — por estação E por fila (mode+size),
+  // sobrevivem a reload. Ver comentário em PickingFiltersModal.tsx sobre o
+  // filtro fantasma que a chave global (v1) causava entre filas diferentes.
+  const [filters, setFilters] = useState<QueueFilters>(() =>
+    loadFilters(queue.mode, queue.size),
+  );
   const filtersRef = useRef(filters);
   filtersRef.current = filters;
   /**
@@ -946,13 +950,27 @@ export function SeparacaoRunner({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [phase, order?.id, sessionEpoch]);
 
+  // Declarados aqui (e não perto de onde abrem) porque o guard do atalho
+  // global logo abaixo precisa deles — precisam existir ANTES do useEffect
+  // que os lê no array de deps.
+  const [historyOpen, setHistoryOpen] = useState(false);
+  const [filtersOpen, setFiltersOpen] = useState(false);
+  const [pickingOpen, setPickingOpen] = useState(false);
+  const [faltantesOpen, setFaltantesOpen] = useState(false);
+
   // Atalhos migrados do posvenda (as atendentes já têm decorado):
   //   K = concluir sem todas as peças lidas — pelo PIN do supervisor quando a
   //       trava está ligada, direto (com confirm) quando está desligada;
   //   P = pular o pedido (peça ainda não chegou da dobra) — vai pro fim do lote;
   //   R = reiniciar a leitura (sobressalente/divergência na mesa).
-  // Ignorados digitando em input/textarea/select (e modificadores).
+  // Ignorados digitando em input/textarea/select (e modificadores), e com
+  // QUALQUER modal por cima (supervisor, histórico, picking geral, faltantes
+  // ou filtros) — sem isso a tecla vaza por trás do modal e mexe na mesa por
+  // baixo dele (ex.: "k" com o modal de faltantes aberto podia concluir o
+  // MESMO pedido que estava sendo marcado como ruptura).
   useEffect(() => {
+    const modalAberto =
+      supervisorOpen || historyOpen || pickingOpen || faltantesOpen || filtersOpen;
     const onKeyDown = (e: KeyboardEvent) => {
       if (e.ctrlKey || e.metaKey || e.altKey) return;
       const target = e.target as HTMLElement | null;
@@ -963,19 +981,19 @@ export function SeparacaoRunner({
       }
       const key = e.key.toLowerCase();
       if (key === "k") {
-        if (phase !== "separating" || !orderRef.current || completing || supervisorOpen) return;
+        if (phase !== "separating" || !orderRef.current || completing || modalAberto) return;
         e.preventDefault();
         liberarOuConcluir();
         return;
       }
       if (key === "p") {
-        if (phase !== "separating" || !orderRef.current || completing || supervisorOpen) return;
+        if (phase !== "separating" || !orderRef.current || completing || modalAberto) return;
         e.preventDefault();
         pularAtual();
         return;
       }
       if (key === "r") {
-        if (phase !== "separating" || !orderRef.current || completing || supervisorOpen) return;
+        if (phase !== "separating" || !orderRef.current || completing || modalAberto) return;
         const temLeitura =
           extrasRef.current.size > 0 ||
           Array.from(progressRef.current.values()).some((p) => p.count > 0);
@@ -987,7 +1005,18 @@ export function SeparacaoRunner({
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [phase, completing, supervisorOpen, restartLeitura, liberarOuConcluir, pularAtual]);
+  }, [
+    phase,
+    completing,
+    supervisorOpen,
+    historyOpen,
+    pickingOpen,
+    faltantesOpen,
+    filtersOpen,
+    restartLeitura,
+    liberarOuConcluir,
+    pularAtual,
+  ]);
 
   // Devolve o lote se a tela sair de cena por qualquer caminho.
   useEffect(() => {
@@ -1040,10 +1069,6 @@ export function SeparacaoRunner({
     void devolverTudo().finally(() => onBack());
   };
 
-  const [historyOpen, setHistoryOpen] = useState(false);
-  const [filtersOpen, setFiltersOpen] = useState(false);
-  const [pickingOpen, setPickingOpen] = useState(false);
-  const [faltantesOpen, setFaltantesOpen] = useState(false);
   const extras = Array.from(extrasRef.current.values());
   /**
    * O lote como ela VÊ: ordem local (pulados no fim) + filtros de exibição. É
@@ -1057,15 +1082,18 @@ export function SeparacaoRunner({
   // localStorage da estação) e, quando ficava fora desta conta, a operadora
   // entrava numa fila nova com um recorte de outro dia ativo e sem nenhum
   // sinal no topo — a fila e o Picking Geral vinham vazios "sem motivo".
+  // O chip "Filtros (N)" conta SÓ o que está escondido dentro do modal: os
+  // produtos. A data tem seletor próprio na barra, sempre à vista — contá-la
+  // aqui fazia a mesa procurar um filtro de produto que não existia.
   const filtrosAtivos =
-    (filters.includeProducts?.length ?? 0) +
-    (filters.excludeProducts?.length ?? 0) +
-    (filters.dateFrom || filters.dateTo ? 1 : 0);
+    (filters.includeProducts?.length ?? 0) + (filters.excludeProducts?.length ?? 0);
+  // Já o estado vazio precisa explicar QUALQUER recorte, data inclusive.
+  const temRecorte = filtrosAtivos > 0 || Boolean(filters.dateFrom || filters.dateTo);
 
   const aplicarFiltros = (f: QueueFilters) => {
     setFilters(f);
     filtersRef.current = f;
-    saveFilters(f);
+    saveFilters(queue.mode, queue.size, f);
     // O pedido da mesa saiu do filtro? Se ela ainda não leu nada, a mesa segue
     // pro primeiro VISÍVEL (era isso que ela pediu ao filtrar). Se já tem
     // leitura, o pedido FICA — jogar fora a conferência dela seria pior — e o
@@ -1211,7 +1239,7 @@ export function SeparacaoRunner({
                     ? `Seu lote acabou, mas ainda há ${restantes} na fila — procure de novo.`
                     : emptyHint}
               </p>
-              {filtrosAtivos > 0 && (
+              {temRecorte && (
                 <p style={emptyText}>
                   Filtro ativo (data e/ou produto) — ele recorta o que entra no lote e o que
                   aparece aqui.{" "}
@@ -1634,7 +1662,10 @@ function DataMenu({
 /** YYYY-MM-DD → dd/mm/aaaa (o seletor mostra a data como o posvenda mostrava). */
 /** ISO completo → `YYYY-MM-DD` no fuso local (o dia que a operadora enxerga). */
 function diaDe(iso: string): string {
-  return new Date(iso).toLocaleDateString("en-CA");
+  // Mesmo fuso de `diaDeEmissao`: o dia da operação é sempre o de SP, e este
+  // valor alimenta o mesmo campo que ela usa pra filtrar/agrupar — sem o
+  // timeZone, a data exibida podia divergir do dia usado no filtro.
+  return new Date(iso).toLocaleDateString("en-CA", { timeZone: "America/Sao_Paulo" });
 }
 
 function fmtDataISO(iso: string): string {
@@ -2058,9 +2089,14 @@ function IconShirt(props: SVGProps<SVGSVGElement>) {
 
 function fmtData(iso: string): string {
   const d = new Date(iso);
+  // Mesmo fuso de `diaDeEmissao` — o dia da operação é sempre o de SP.
   return Number.isNaN(d.getTime())
     ? iso
-    : d.toLocaleDateString("pt-BR", { day: "2-digit", month: "2-digit" });
+    : d.toLocaleDateString("pt-BR", {
+        day: "2-digit",
+        month: "2-digit",
+        timeZone: "America/Sao_Paulo",
+      });
 }
 
 function MesaStatus({

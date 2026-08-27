@@ -1,6 +1,7 @@
 import {
   useEffect,
   useMemo,
+  useRef,
   useState,
   type CSSProperties,
   type ReactNode,
@@ -46,6 +47,17 @@ export function PrintConfirmModal({ resolved, onCancel, onConfirm }: Props) {
     return m;
   });
   const [bulkInput, setBulkInput] = useState<number>(stored.perSizeDefault);
+
+  // Trava de duplo clique: `onConfirm` não é aguardado (é fire-and-forget) e
+  // o pai só desmonta este modal no PRÓXIMO render — um duplo clique físico
+  // roda `commit()` duas vezes antes disso e gera dois `createPrintJob` +
+  // duas impressões (EPCs/etiquetas queimados em dobro).
+  // A TRAVA de fato é o ref: `setEnviando` só reflete no `enviando` (state) a
+  // partir do PRÓXIMO render, então duas chamadas de `commit()` no mesmo tick
+  // ainda veriam `enviando === false` — o ref muda de valor na hora. O state
+  // continua existindo só pra desabilitar o botão visualmente.
+  const enviandoRef = useRef(false);
+  const [enviando, setEnviando] = useState(false);
 
   // === MODO TESTE — REMOVER APÓS HOMOLOGAÇÃO ===
   // Quando ativo, ignora margem e imprime só `testCount` etiquetas (1-5)
@@ -111,24 +123,39 @@ export function PrintConfirmModal({ resolved, onCancel, onConfirm }: Props) {
   }, [onCancel]);
 
   function commit() {
-    setMarginConfig({
-      mode,
-      globalPercent,
-      capEnabled,
-      capValue,
-      perSizeDefault: stored.perSizeDefault,
-    });
-    // Prioridade: teste > manual > margem.
-    // MODO TESTE — REMOVER APÓS HOMOLOGAÇÃO
-    if (testMode) {
-      onConfirm(config, { test: { count: testCount } });
-      return;
+    // Checa e trava o REF na mesma linha, antes de qualquer outra coisa: é o
+    // que barra duas chamadas de `commit()` no mesmo tick (o `enviando` state
+    // só atualiza no próximo render, tarde demais pra isto).
+    if (enviandoRef.current) return;
+    enviandoRef.current = true;
+    setEnviando(true); // só pro `disabled` do botão
+    try {
+      setMarginConfig({
+        mode,
+        globalPercent,
+        capEnabled,
+        capValue,
+        perSizeDefault: stored.perSizeDefault,
+      });
+      // Prioridade: teste > manual > margem.
+      // MODO TESTE — REMOVER APÓS HOMOLOGAÇÃO
+      if (testMode) {
+        onConfirm(config, { test: { count: testCount } });
+        return;
+      }
+      if (manualMode) {
+        onConfirm(config, { manualItems });
+        return;
+      }
+      onConfirm(config);
+    } catch (e) {
+      // `onConfirm` é fire-and-forget (falha assíncrona não chega até aqui —
+      // o pai já desmontou o modal antes de qualquer chamada de rede); isto
+      // só cobre uma exceção síncrona, pra não deixar o botão travado.
+      enviandoRef.current = false;
+      setEnviando(false);
+      throw e;
     }
-    if (manualMode) {
-      onConfirm(config, { manualItems });
-      return;
-    }
-    onConfirm(config);
   }
 
   function applyBulkToAll() {
@@ -503,9 +530,11 @@ export function PrintConfirmModal({ resolved, onCancel, onConfirm }: Props) {
           </button>
           <button
             onClick={commit}
-            disabled={effectiveTotal === 0 && !testMode}
+            disabled={enviando || (effectiveTotal === 0 && !testMode)}
             style={
-              effectiveTotal === 0 && !testMode ? confirmBtnDisabled : confirmBtn
+              enviando || (effectiveTotal === 0 && !testMode)
+                ? confirmBtnDisabled
+                : confirmBtn
             }
           >
             Confirmar e imprimir
