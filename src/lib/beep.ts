@@ -35,6 +35,13 @@ function tone(freq: number, startAt: number, durationMs: number, gain = 0.08): v
   g.gain.exponentialRampToValueAtTime(0.0001, t1);
   osc.start(t0);
   osc.stop(t1);
+  // Um turno de separação são milhares de bipes; sem desconectar, cada
+  // oscilador fica pendurado no grafo do AudioContext (que é único e vive
+  // enquanto o app viver) em vez de ser coletado quando o tom acaba.
+  osc.onended = () => {
+    osc.disconnect();
+    g.disconnect();
+  };
 }
 
 /** Bipe de sucesso — leitura bateu com o item esperado. */

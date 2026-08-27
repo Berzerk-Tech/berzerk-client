@@ -5,6 +5,7 @@ import {
   type CSSProperties,
 } from "react";
 import { getStationId } from "../lib/station";
+import { miniatura } from "../lib/imagens";
 import { subscribePrintJobsChanged } from "../lib/realtime";
 import { printJob as itagPrintJob } from "../lib/itag/iprint";
 import { applyMargin, type ApplyMarginInput } from "../lib/settings";
@@ -1074,9 +1075,10 @@ export function BatchBrowser({
                     <div key={h.id} style={historyRow}>
                       {h.thumbnail_url ? (
                         <img
-                          src={h.thumbnail_url}
+                          src={miniatura(h.thumbnail_url) ?? undefined}
                           alt=""
                           loading="lazy"
+                          decoding="async"
                           style={historyThumb}
                         />
                       ) : (
@@ -1391,7 +1393,13 @@ function GlobalResultRow({
   return (
     <div style={globalRow}>
       {b.thumbnail_url ? (
-        <img src={b.thumbnail_url} alt="" loading="lazy" style={historyThumb} />
+        <img
+          src={miniatura(b.thumbnail_url) ?? undefined}
+          alt=""
+          loading="lazy"
+          decoding="async"
+          style={historyThumb}
+        />
       ) : (
         <span style={historyThumbPlaceholder} />
       )}

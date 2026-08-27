@@ -70,6 +70,11 @@ function persistEpcCache(map: Map<string, EpcLookupItem>): void {
 }
 
 const POLL_MS = 400;
+/** Mesa fora do ar: em vez de martelar o iTAG a cada 400 ms (150 chamadas por
+ *  minuto, cada uma com sua Promise, sua string de erro e seu `setLastError`),
+ *  o intervalo dobra até este teto e volta pro normal na primeira leitura boa.
+ *  A operadora não perde nada: assim que a mesa responde, o poll destrava. */
+const POLL_MAX_MS = 5_000;
 const PING_MS = 5000;
 const LINGER_MS = 900;
 /** De quanto em quanto limpa o buffer no modo presença (reflete remoção).
@@ -168,6 +173,8 @@ export function RfidProvider({ children }: { children: ReactNode }) {
   const presenceRef = useRef<Set<PresenceListener>>(new Set());
   const pollTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const pollActiveRef = useRef(false);
+  /** Intervalo corrente do poll — cresce enquanto a mesa não responde. */
+  const pollDelayRef = useRef(POLL_MS);
   const tearTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const presenceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   /** EPC → última vez visto na mesa (modo presença). Peça NOVA na mesa conta
@@ -220,6 +227,7 @@ export function RfidProvider({ children }: { children: ReactNode }) {
     (h: string) => {
       if (pollActiveRef.current) return;
       pollActiveRef.current = true;
+      pollDelayRef.current = POLL_MS;
       const loop = async () => {
         pollTimerRef.current = null;
         if (!anyListeners()) {
@@ -253,11 +261,13 @@ export function RfidProvider({ children }: { children: ReactNode }) {
             for (const p of presenceRef.current) p.cb(all);
           }
           if (activity) touchActivity();
+          pollDelayRef.current = POLL_MS;
         } catch (e) {
           setConnected(false);
           setLastError(e instanceof Error ? e.message : String(e));
+          pollDelayRef.current = Math.min(pollDelayRef.current * 2, POLL_MAX_MS);
         } finally {
-          if (anyListeners()) pollTimerRef.current = setTimeout(loop, POLL_MS);
+          if (anyListeners()) pollTimerRef.current = setTimeout(loop, pollDelayRef.current);
           else pollActiveRef.current = false;
         }
       };

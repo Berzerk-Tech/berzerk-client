@@ -12,6 +12,7 @@ import { AmbientBackground } from "./AmbientBackground";
 import { OperatorChip } from "./OperatorChip";
 import { useRfid, type ReadingSession } from "../contexts/RfidContext";
 import { beepError, beepOk } from "../lib/beep";
+import { LARGURA_CARD, imagemRedimensionada, miniatura } from "../lib/imagens";
 import { subscribeQueueChanged } from "../lib/realtime";
 import { onBeforeForcedLogout } from "../lib/idleSession";
 import { onAntesDeBloquear } from "../lib/updateGate";
@@ -358,6 +359,10 @@ export function SeparacaoRunner({
    * primeiro os que vinham depois dele, depois (dando a volta) os anteriores.
    * É o que faz "concluí o 3º" abrir o 4º, e não o 1º de novo.
    */
+  /** Pedidos que já receberam o `POST /separacao/:id/iniciar` nesta sessão —
+   *  podado a cada `puxarLote` pro Set não virar o histórico do turno. */
+  const iniciadosRef = useRef<Set<string>>(new Set());
+
   const candidatosDepoisDe = useCallback((id: string): string[] => {
     const seq = sequenciaRef.current;
     const i = seq.indexOf(id);
@@ -417,6 +422,11 @@ export function SeparacaoRunner({
         // Pulado que saiu do lote (concluído por ela, devolvido, redistribuído)
         // não pode continuar marcado: se o pedido voltar, volta do zero.
         const idsAgora = new Set(orders.map((o) => o.id));
+        // A marca de "já avisei o servidor que abri este pedido" só interessa
+        // enquanto o pedido é dela. Sem podar, o Set acumulava um id por
+        // pedido separado — o turno inteiro de conclusões nunca saía da
+        // memória, e a informação já não servia pra nada.
+        for (const id of iniciadosRef.current) if (!idsAgora.has(id)) iniciadosRef.current.delete(id);
         setPulados((atuais) => {
           const restantes = new Set([...atuais].filter((id) => idsAgora.has(id)));
           return restantes.size === atuais.size ? atuais : restantes;
@@ -506,7 +516,6 @@ export function SeparacaoRunner({
    * falha de rede não trava a conferência, e o id sai do `Set` pra tentativa
    * acontecer de novo quando a janela voltar ao foco.
    */
-  const iniciadosRef = useRef<Set<string>>(new Set());
   const marcarIniciado = useCallback((orderId: string) => {
     if (iniciadosRef.current.has(orderId)) return;
     iniciadosRef.current.add(orderId);
@@ -987,6 +996,16 @@ export function SeparacaoRunner({
     };
   }, [devolverTudo]);
 
+  // Os avisos (banner de notice/reject) agendam um setTimeout que só era
+  // cancelado pelo aviso SEGUINTE. Sair da tela deixava o timer vivo pra
+  // chamar setState numa árvore que já não existe.
+  useEffect(() => {
+    return () => {
+      if (noticeTimerRef.current) clearTimeout(noticeTimerRef.current);
+      if (rejectTimerRef.current) clearTimeout(rejectTimerRef.current);
+    };
+  }, []);
+
   // Logout forçado (inatividade/nexus): devolve o lote ANTES de perder o
   // token — no desmontar acima já seria tarde (a chamada iria sem Authorization).
   useEffect(() => onBeforeForcedLogout(() => devolverTudo()), [devolverTudo]);
@@ -1316,7 +1335,15 @@ function ReadLogPanel({
           </div>
           {extras.map((x) => (
             <div key={x.epc} style={extrasPinnedItem}>
-              {x.imagemUrl && <img src={x.imagemUrl} alt="" style={extrasPinnedThumb} />}
+              {x.imagemUrl && (
+                <img
+                  src={miniatura(x.imagemUrl) ?? undefined}
+                  alt=""
+                  style={extrasPinnedThumb}
+                  loading="lazy"
+                  decoding="async"
+                />
+              )}
               <div style={extrasPinnedBody}>
                 <span style={extrasPinnedLabel}>{x.label}</span>
                 <span style={extrasPinnedKind}>
@@ -1667,7 +1694,14 @@ function QueueCard({
         {item.clienteNome && <span style={qCliente}>{item.clienteNome}</span>}
         <div style={qThumbRow}>
           {shownThumbs.map((u, i) => (
-            <img key={i} src={u} alt="" style={qThumb} loading="lazy" />
+            <img
+              key={i}
+              src={miniatura(u) ?? undefined}
+              alt=""
+              style={qThumb}
+              loading="lazy"
+              decoding="async"
+            />
           ))}
           {shownThumbs.length === 0 && <span style={qThumbEmpty}>{item.itemCount} itens</span>}
           {shownThumbs.length > 0 && extra > 0 && <span style={qThumbMore}>+{extra}</span>}
@@ -1974,7 +2008,13 @@ function ItemCard({
     >
       <div style={cardImageWrap}>
         {item.imagemUrl ? (
-          <img src={item.imagemUrl} alt="" style={cardImage} loading="lazy" />
+          <img
+            src={imagemRedimensionada(item.imagemUrl, LARGURA_CARD) ?? undefined}
+            alt=""
+            style={cardImage}
+            loading="lazy"
+            decoding="async"
+          />
         ) : (
           <div style={cardImageEmpty}>
             <IconShirt style={dense ? emptyShirtIconDense : emptyShirtIcon} />
