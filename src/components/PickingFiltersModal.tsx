@@ -21,17 +21,31 @@ import {
   type SeparationMode,
 } from "../services/orders";
 
-const STORAGE_KEY = "berzerk_picking_filters_v1";
+// v1 era uma chave ÚNICA e GLOBAL — o filtro escolhido na fila "Único M"
+// continuava ativo ao entrar em "Misto XG", recortando o lote sem a
+// operadora perceber (filtro fantasma). v2 guarda um objeto por fila
+// (mode+size, que já identifica uma das 5 filas fixas) dentro da MESMA
+// chave do localStorage. A v1 antiga fica pra trás sem migração: não dá
+// pra saber de qual fila era aquele filtro salvo, então herdar ele pra
+// qualquer fila nova erraria do mesmo jeito — cada fila começa limpa, e o
+// pior caso é a operadora reaplicar um filtro que já tinha marcado.
+const STORAGE_KEY = "berzerk_picking_filters_v2";
+
+function queueKey(mode: SeparationMode, size: string): string {
+  return `${mode}:${size}`;
+}
 
 export function emptyFilters(): QueueFilters {
   return {};
 }
 
-export function loadFilters(): QueueFilters {
+export function loadFilters(mode: SeparationMode, size: string): QueueFilters {
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
     if (!raw) return {};
-    const f = JSON.parse(raw) as QueueFilters;
+    const all = JSON.parse(raw) as Record<string, QueueFilters | undefined>;
+    const f = all[queueKey(mode, size)];
+    if (!f) return {};
     // Janela de data salva por uma versão anterior (dateFrom ≠ dateTo) é
     // DESCARTADA: o seletor novo é de dia único e não teria como mostrar a
     // janela — ela ficaria filtrando a fila sem aparecer em lugar nenhum.
@@ -48,11 +62,14 @@ export function loadFilters(): QueueFilters {
   }
 }
 
-export function saveFilters(f: QueueFilters): void {
+export function saveFilters(mode: SeparationMode, size: string, f: QueueFilters): void {
   try {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(f));
+    const raw = localStorage.getItem(STORAGE_KEY);
+    const all = raw ? (JSON.parse(raw) as Record<string, QueueFilters | undefined>) : {};
+    all[queueKey(mode, size)] = f;
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(all));
   } catch {
-    /* localStorage indisponível: filtros valem só na sessão */
+    /* localStorage indisponível ou corrompido: filtros valem só na sessão */
   }
 }
 
@@ -60,8 +77,11 @@ type Aba = "exclusao" | "adicao";
 
 type Props = {
   filters: QueueFilters;
-  /** Fila ativa — busca os produtos DELA (mesma visão da sidebar). */
-  queue?: { mode: SeparationMode; size: string };
+  /** Fila ativa — busca os produtos DELA (mesma visão da sidebar).
+   *  `sizes` é o BUCKET real (XG cobre XXG/G1/G2/G3; P cobre PP — ver
+   *  `src/lib/filas.ts` e o comentário em `src/services/orders.ts`); sem ele
+   *  a lista de produtos do filtro fica incompleta em filas P/XG. */
+  queue?: { mode: SeparationMode; size: string; sizes?: string[] };
   onApply: (f: QueueFilters) => void;
   onClear: () => void;
   onClose: () => void;
@@ -95,6 +115,7 @@ export function PickingFiltersModal({ filters, queue, onApply, onClear, onClose 
     getQueueProducts({
       mode: queue.mode,
       size: queue.size,
+      sizes: queue.sizes,
       dateFrom: dataSel,
       dateTo: dataSel,
     })

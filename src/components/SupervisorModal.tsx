@@ -72,8 +72,14 @@ export function SupervisorModal({ faltantes, onCancel, onConfirm }: Props) {
     return () => window.removeEventListener("keydown", onKey);
   }, [busy, onCancel]);
 
+  // Sem estado próprio pra refazer a busca — só incrementa pra reentrar no
+  // efeito abaixo. Antes o único jeito de tentar de novo era fechar e reabrir
+  // o modal (e ele nem tem um "X" óbvio pra isso no meio da liberação).
+  const [retryCarga, setRetryCarga] = useState(0);
+
   useEffect(() => {
     let alive = true;
+    setLoadError(null);
     getSupervisores()
       .then(({ supervisores }) => {
         if (!alive) return;
@@ -84,7 +90,7 @@ export function SupervisorModal({ faltantes, onCancel, onConfirm }: Props) {
     return () => {
       alive = false;
     };
-  }, []);
+  }, [retryCarga]);
 
   const supervisorSel = useMemo(
     () => supervisores?.find((s) => s.id === selected) ?? null,
@@ -168,7 +174,17 @@ export function SupervisorModal({ faltantes, onCancel, onConfirm }: Props) {
           </div>
         )}
 
-        {loadError && <div style={errorBox}>{loadError}</div>}
+        {loadError && (
+          <div style={errorBox}>
+            <div>{loadError}</div>
+            <button
+              style={retryBtn}
+              onClick={() => setRetryCarga((r) => r + 1)}
+            >
+              Tentar de novo
+            </button>
+          </div>
+        )}
         {supervisores && supervisores.length === 0 && (
           <div style={errorBox}>
             Nenhum supervisor cadastrado — o acesso é liberado no nexus (papel
@@ -435,6 +451,21 @@ const errorBox: CSSProperties = {
   background: "var(--danger-bg, rgba(243,139,168,0.12))",
   color: "var(--danger-text, #f38ba8)",
   fontSize: 13,
+  display: "flex",
+  flexDirection: "column",
+  gap: 8,
+  alignItems: "flex-start",
+};
+
+const retryBtn: CSSProperties = {
+  padding: "6px 14px",
+  background: "var(--bg-card)",
+  border: "1px solid var(--border-strong)",
+  borderRadius: 8,
+  color: "var(--text)",
+  fontSize: 12,
+  fontWeight: 600,
+  cursor: "pointer",
 };
 
 const okBox: CSSProperties = {

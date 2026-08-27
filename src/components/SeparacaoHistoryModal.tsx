@@ -48,6 +48,10 @@ export function SeparacaoHistoryModal({ onClose }: { onClose: () => void }) {
   const [manualFrom, setManualFrom] = useState("");
   const [manualTo, setManualTo] = useState("");
   const [page, setPage] = useState(0);
+  // Sem estado próprio pra refazer a busca — só incrementa pra entrar nas
+  // deps do efeito abaixo e disparar o mesmo `getHistory` de novo. Antes o
+  // único jeito de tentar de novo era fechar e reabrir o modal.
+  const [retry, setRetry] = useState(0);
 
   // ESC fecha (padrão do posvenda que as atendentes esperam).
   useEffect(() => {
@@ -99,7 +103,7 @@ export function SeparacaoHistoryModal({ onClose }: { onClose: () => void }) {
     return () => {
       alive = false;
     };
-  }, [q, periodo, manualFrom, manualTo, page]);
+  }, [q, periodo, manualFrom, manualTo, page, retry]);
 
   const totalPaginas = data ? Math.max(1, Math.ceil(data.total / PAGE_SIZE)) : 1;
 
@@ -178,7 +182,14 @@ export function SeparacaoHistoryModal({ onClose }: { onClose: () => void }) {
         </div>
 
         <div style={lista}>
-          {erro && <div style={erroBox}>{erro}</div>}
+          {erro && (
+            <div style={erroBox}>
+              <div>{erro}</div>
+              <button style={retryBtn} onClick={() => setRetry((r) => r + 1)}>
+                Tentar de novo
+              </button>
+            </div>
+          )}
           {!erro && loading && !data && <span style={vazio}>Carregando…</span>}
           {!erro && data && data.items.length === 0 && (
             <span style={vazio}>Nenhum pedido separado no período.</span>
@@ -372,6 +383,21 @@ const erroBox: CSSProperties = {
   borderRadius: 10,
   color: "var(--warning-text)",
   fontSize: 13,
+  display: "flex",
+  flexDirection: "column",
+  gap: 10,
+  alignItems: "flex-start",
+};
+
+const retryBtn: CSSProperties = {
+  padding: "6px 14px",
+  background: "var(--bg-card)",
+  border: "1px solid var(--border-strong)",
+  borderRadius: 8,
+  color: "var(--text)",
+  fontSize: 12,
+  fontWeight: 600,
+  cursor: "pointer",
 };
 
 const pedidoCard: CSSProperties = {

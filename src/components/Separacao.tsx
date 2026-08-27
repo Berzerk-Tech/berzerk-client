@@ -329,12 +329,18 @@ export function Separacao({ onBack }: Props) {
   );
 }
 
-/** ISO → `DD/MM` no fuso local (a data que a operadora enxerga no galpão). */
+/** ISO → `DD/MM` no fuso de SP (o dia da operação é sempre o de SP — mesmo
+ *  fuso de `diaDeEmissao` em SeparacaoRunner.tsx, que usa o MESMO campo pra
+ *  filtrar/agrupar; sem isso a data exibida podia divergir do dia do filtro). */
 function fmtDia(iso: string): string {
   const d = new Date(iso);
   return Number.isNaN(d.getTime())
     ? iso
-    : d.toLocaleDateString("pt-BR", { day: "2-digit", month: "2-digit" });
+    : d.toLocaleDateString("pt-BR", {
+        day: "2-digit",
+        month: "2-digit",
+        timeZone: "America/Sao_Paulo",
+      });
 }
 
 function QueueTile({

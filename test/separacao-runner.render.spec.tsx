@@ -154,9 +154,12 @@ describe("SeparacaoRunner — entrar na fila", () => {
   });
 
   it("com data de ONTEM salva no localStorage: não entra em laço", async () => {
+    // Chave v2, por fila (mode:size) — v1 era global e vazava entre filas.
     localStorage.setItem(
-      "berzerk_picking_filters_v1",
-      JSON.stringify({ dateFrom: "2026-08-26", dateTo: "2026-08-26" }),
+      "berzerk_picking_filters_v2",
+      JSON.stringify({
+        "normal:M": { dateFrom: "2026-08-26", dateTo: "2026-08-26" },
+      }),
     );
     const commits = await montarEContarCommits();
     expect(commits).toBeLessThan(40);
@@ -164,8 +167,8 @@ describe("SeparacaoRunner — entrar na fila", () => {
 
   it("com produto EXCLUÍDO salvo no localStorage: não entra em laço", async () => {
     localStorage.setItem(
-      "berzerk_picking_filters_v1",
-      JSON.stringify({ excludeProducts: ["camiseta"] }),
+      "berzerk_picking_filters_v2",
+      JSON.stringify({ "normal:M": { excludeProducts: ["camiseta"] } }),
     );
     const commits = await montarEContarCommits();
     expect(commits).toBeLessThan(40);

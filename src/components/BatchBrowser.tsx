@@ -1,6 +1,7 @@
 import {
   useCallback,
   useEffect,
+  useRef,
   useState,
   type CSSProperties,
 } from "react";
@@ -79,11 +80,29 @@ function formatError(e: unknown): string {
   return String(e);
 }
 
+/** `ok: false` = resolveBatch falhou (rede etc.) — quem chama NÃO deve cachear
+ *  isto: é um fallback de exibição pro tick atual, não um dado válido do lote. */
+type ResolveOutcome = { resolved: ResolvedBatch; ok: boolean };
+
+function fallbackResolvedBatch(batch: ProductionBatch): ResolvedBatch {
+  return {
+    batch,
+    eans: {},
+    skus: {},
+    sources: {},
+    missingSizes: batch.sizes.map((s) => s.size),
+    isPrintable: false,
+    catalogTitle: batch.design_name,
+    catalogColor: batch.shirt_color,
+    motivo: null,
+  };
+}
+
 async function resolveAllWithConcurrency(
   batches: ProductionBatch[],
   concurrency: number,
-): Promise<ResolvedBatch[]> {
-  const out: ResolvedBatch[] = new Array(batches.length);
+): Promise<ResolveOutcome[]> {
+  const out: ResolveOutcome[] = new Array(batches.length);
   let next = 0;
   const workers = Array.from(
     { length: Math.min(concurrency, batches.length) },
@@ -91,24 +110,14 @@ async function resolveAllWithConcurrency(
       while (next < batches.length) {
         const i = next++;
         try {
-          out[i] = await resolveBatch(batches[i]);
+          out[i] = { resolved: await resolveBatch(batches[i]), ok: true };
         } catch (e) {
           console.warn(
             "[BatchBrowser] resolveBatch failed for",
             batches[i].batch_code,
             e,
           );
-          out[i] = {
-            batch: batches[i],
-            eans: {},
-            skus: {},
-            sources: {},
-            missingSizes: batches[i].sizes.map((s) => s.size),
-            isPrintable: false,
-            catalogTitle: batches[i].design_name,
-            catalogColor: batches[i].shirt_color,
-            motivo: null,
-          };
+          out[i] = { resolved: fallbackResolvedBatch(batches[i]), ok: false };
         }
       }
     },
@@ -146,6 +155,14 @@ export function BatchBrowser({
     null,
   );
   const [query, setQuery] = useState("");
+  // Total real de pendentes no servidor — pode ser maior que o que a fila
+  // mostra (MAX_VISIBLE). Alimenta o aviso "mostrando N de TOTAL".
+  const [pendingTotal, setPendingTotal] = useState(0);
+  // Cache de ResolvedBatch por id — ver comentário em `load()` sobre por que
+  // existe e como é invalidado. `resolvedAt` é o carimbo pro TTL.
+  const resolvedCacheRef = useRef<
+    Map<string, { resolved: ResolvedBatch; resolvedAt: number }>
+  >(new Map());
   // batch_ids que têm impressão de teste pendente — habilita "Descartar teste".
   const [batchesWithTest, setBatchesWithTest] = useState<Set<string>>(
     new Set(),
@@ -175,17 +192,54 @@ export function BatchBrowser({
   const load = useCallback(async (showRefreshing: boolean) => {
     if (showRefreshing) setRefreshing(true);
     try {
-      const [pending, hist] = await Promise.all([
+      const [pendingResult, hist] = await Promise.all([
         fetchPendingBatches(),
         fetchTodayHistory(),
       ]);
-      const visible = pending.slice(0, MAX_VISIBLE);
-      // Resolve tudo de uma vez. Antes havia DOIS passos — um rápido com o
-      // cache local e outro em background chamando a edge `shopify-analytics`
-      // — porque aquele fallback era lento e podia falhar. O catálogo do nexus
-      // responde numa chamada por lote, então o segundo passo (e o cache em
-      // localStorage que o amortizava) deixaram de existir.
-      const resolved = await resolveAllWithConcurrency(visible, CONCURRENCY);
+      const visible = pendingResult.batches.slice(0, MAX_VISIBLE);
+      setPendingTotal(pendingResult.total);
+
+      // Cache por id: o poll de 30s chamava resolveBatch pra CADA lote
+      // visível a cada tick, mesmo sem nada mudar — 2544 chamadas em 3h numa
+      // única estação, em rajadas de 6-10 requisições no mesmo instante. O
+      // DTO do lote não tem versão/carimbo de atualização pra comparar, então
+      // a invalidação é por DOIS gatilhos:
+      //   1) saiu da fila — descarta aqui mesmo (também evita o Map crescer
+      //      sem limite); se o lote voltar depois, resolve do zero;
+      //   2) TTL de 5 min — cobre o lote que FICA na fila mas muda por baixo
+      //      (EAN corrigido no catálogo, tamanho adicionado etc.).
+      // Resolução que FALHOU nunca entra no cache (ver `ok` em
+      // resolveAllWithConcurrency): senão uma falha de rede momentânea
+      // travaria o lote como "não imprimível" até ele sair da fila, em vez
+      // de tentar de novo no próximo tick como sempre foi.
+      const CACHE_TTL_MS = 5 * 60_000;
+      const cache = resolvedCacheRef.current;
+      const visibleIds = new Set(visible.map((b) => b.id));
+      for (const id of cache.keys()) {
+        if (!visibleIds.has(id)) cache.delete(id);
+      }
+      const now = Date.now();
+      const toResolve = visible.filter((b) => {
+        const cached = cache.get(b.id);
+        return !cached || now - cached.resolvedAt > CACHE_TTL_MS;
+      });
+      // Resolvido AGORA (sucesso ou falha) pra este render — só o sucesso
+      // também vai pro cache durável.
+      const fresh = new Map<string, ResolvedBatch>();
+      if (toResolve.length > 0) {
+        const outcomes = await resolveAllWithConcurrency(
+          toResolve,
+          CONCURRENCY,
+        );
+        outcomes.forEach(({ resolved, ok }, i) => {
+          const id = toResolve[i].id;
+          fresh.set(id, resolved);
+          if (ok) cache.set(id, { resolved, resolvedAt: Date.now() });
+        });
+      }
+      const resolved = visible.map(
+        (b) => cache.get(b.id)?.resolved ?? fresh.get(b.id)!,
+      );
       setBatches(resolved);
       setHistory(hist);
       // Quais lotes visíveis têm impressão de teste pra limpar (botão no card).
@@ -958,6 +1012,13 @@ export function BatchBrowser({
             onClick={() => toggleFilter("history")}
           />
         </div>
+
+        {pendingTotal > MAX_VISIBLE && (
+          <div style={sectionHint}>
+            Mostrando {MAX_VISIBLE} de {pendingTotal} lotes pendentes. Use a
+            busca pra achar um lote fora da lista.
+          </div>
+        )}
 
         {loadError && (
           <div style={errorBox}>
