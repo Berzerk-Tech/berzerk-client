@@ -13,6 +13,7 @@
 
 import { useEffect, useMemo, useState, type CSSProperties } from "react";
 import { ApiError } from "../lib/api";
+import { miniatura } from "../lib/imagens";
 import {
   getQueueProducts,
   type QueueFilters,
@@ -223,10 +224,11 @@ export function PickingFiltersModal({ filters, queue, onApply, onClear, onClose 
                 <span style={marcado ? checkOn : checkOff}>{marcado ? "✓" : ""}</span>
                 {p.imagemUrl ? (
                   <img
-                    src={p.imagemUrl}
+                    src={miniatura(p.imagemUrl) ?? undefined}
                     alt=""
                     style={{ ...thumb, ...(marcado ? thumbOff : null) }}
                     loading="lazy"
+                    decoding="async"
                   />
                 ) : (
                   <span style={thumbEmpty}>?</span>

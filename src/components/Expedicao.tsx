@@ -12,6 +12,7 @@ import { AmbientBackground } from "./AmbientBackground";
 import { OperatorChip } from "./OperatorChip";
 import { useRfid } from "../contexts/RfidContext";
 import { beepError, beepOk } from "../lib/beep";
+import { LARGURA_PICKING, imagemRedimensionada, miniatura } from "../lib/imagens";
 import { printEtiqueta, printEngineStatus } from "../lib/printer";
 import { getLabelPrinter } from "../services/printerConfig";
 import { gerarDanfeSimplificadaPdf } from "../lib/danfe";
@@ -942,7 +943,13 @@ function ItemCard({ item, count }: { item: OrderItem; count: number }) {
     <div style={{ ...itemCard, ...(ok ? itemCardDone : null) }}>
       <div style={itemImgWrap}>
         {item.imagemUrl ? (
-          <img src={item.imagemUrl} alt="" style={itemImg} loading="lazy" />
+          <img
+            src={imagemRedimensionada(item.imagemUrl, LARGURA_PICKING) ?? undefined}
+            alt=""
+            style={itemImg}
+            loading="lazy"
+            decoding="async"
+          />
         ) : (
           <div style={itemImgEmpty}><IconShirt style={{ width: 30, height: 30 }} /></div>
         )}
@@ -1023,7 +1030,16 @@ function HistorySidebar({ session, reprintingId, onReprint }: { session: Session
                 </div>
                 {s.order.clienteNome && <span style={histCliente}>{s.order.clienteNome}</span>}
                 <div style={histThumbs}>
-                  {thumbs.map((u, j) => <img key={j} src={u} alt="" style={histThumb} loading="lazy" />)}
+                  {thumbs.map((u, j) => (
+                    <img
+                      key={j}
+                      src={miniatura(u) ?? undefined}
+                      alt=""
+                      style={histThumb}
+                      loading="lazy"
+                      decoding="async"
+                    />
+                  ))}
                   {thumbs.length === 0 && <span style={histThumbEmpty}>{count} {count === 1 ? "item" : "itens"}</span>}
                 </div>
                 <button style={reprintBtn} disabled={reprintingId === s.order.id} onClick={() => onReprint(s.order)}>

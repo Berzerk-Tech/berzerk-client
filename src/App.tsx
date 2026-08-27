@@ -13,6 +13,7 @@ import {
   type Bloqueio,
 } from "./lib/updateGate";
 import { getStationShortId } from "./lib/station";
+import { iniciarWatchdogMemoria, tomarMotivoDeRecarregamento } from "./lib/memoriaWatchdog";
 import { Login } from "./components/Login";
 import { BatchBrowser } from "./components/BatchBrowser";
 import { HomeMenu, type Screen } from "./components/HomeMenu";
@@ -103,12 +104,21 @@ export default function App() {
     // Achou versão nova → bloqueia (não é mais um banner que dá pra ignorar).
     const updateTimer = setTimeout(() => void verificarAtualizacao(), 5000);
 
+    // Vigia de memória do renderer: recarrega a janela antes de o Chromium
+    // trocar o app pela página de "Out of Memory" (incidente de 27/08 no CD).
+    const pararWatchdog = iniciarWatchdogMemoria();
+    // Veio de um recarregamento desses? Diz por quê — senão a tela piscando
+    // sozinha vira "o sistema travou de novo" no boca a boca do galpão.
+    const motivo = tomarMotivoDeRecarregamento();
+    if (motivo) setToast(motivo);
+
     return () => {
       pararSessao();
       stopDeepLink();
       stopNexusHandoff();
       pararBloqueio();
       clearTimeout(updateTimer);
+      pararWatchdog();
     };
   }, []);
 

@@ -6,6 +6,7 @@
 
 import { useEffect, useState, type CSSProperties } from "react";
 import { ApiError } from "../lib/api";
+import { miniatura } from "../lib/imagens";
 import { getHistory, type HistoryResponse } from "../services/orders";
 
 const PAGE_SIZE = 20;
@@ -217,7 +218,13 @@ export function SeparacaoHistoryModal({ onClose }: { onClose: () => void }) {
                   {o.items.map((it) => (
                     <div key={it.id} style={itemRow}>
                       {it.imagemUrl ? (
-                        <img src={it.imagemUrl} alt="" style={itemThumb} loading="lazy" />
+                        <img
+                          src={miniatura(it.imagemUrl) ?? undefined}
+                          alt=""
+                          style={itemThumb}
+                          loading="lazy"
+                          decoding="async"
+                        />
                       ) : (
                         <div style={itemThumbEmpty}>?</div>
                       )}

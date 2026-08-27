@@ -9,6 +9,7 @@
 // falta, que é o que a operadora sabe.
 
 import { useEffect, useMemo, useState, type CSSProperties } from "react";
+import { miniatura } from "../lib/imagens";
 import { criarRuptura, type Order, type OrderItem } from "../services/orders";
 
 type Props = {
@@ -123,7 +124,13 @@ export function ItensFaltantesModal({ order, lidos, onMarcado, onClose }: Props)
                   <span style={marcado ? checkOn : check}>{marcado ? "✓" : ""}</span>
                 </button>
                 {it.imagemUrl ? (
-                  <img src={it.imagemUrl} alt="" style={thumb} />
+                  <img
+                    src={miniatura(it.imagemUrl) ?? undefined}
+                    alt=""
+                    style={thumb}
+                    loading="lazy"
+                    decoding="async"
+                  />
                 ) : (
                   <div style={{ ...thumb, ...thumbVazia }} />
                 )}

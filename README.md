@@ -120,6 +120,9 @@ bun install
 bun run tauri dev
 ```
 
+Testes (vitest + jsdom, sem Tauri): `bun run test` — cobre o helper de imagem
+e o smoke de render da separação.
+
 Primeiro `tauri dev` demora ~5-10min (compila ~430 crates Rust). Próximas execuções são incrementais (<10s).
 
 Linux (Arch / Ubuntu / Fedora) também roda — ver [seção Linux](#desenvolver-em-linux) abaixo.
@@ -279,6 +282,61 @@ no lote e na "fila inteira" —, com o recorte pelo mesmo **bucket** do claim
 XXG/G1/G2/G3, a fila P tira PP. O cabeçalho (tela e etiqueta) mostra
 *"sem GG (bancada)"* e os totais já vêm recalculados. Nas filas de **puros**
 nada muda — ali a lista é a própria bancada.
+
+### "Out of Memory" na bancada (0.9.7)
+
+Incidente de 27/08: a bancada do CD entrava na fila de **puros** e o WebView2
+trocava o app pela página do Chromium *"Esta página está com problemas —
+Código de erro: Out of Memory"*. Uma chamada `POST /separacao/lote` no log do
+API Gateway (72 KB) e nada depois — o app recebeu o lote e morreu desenhando.
+
+**A causa é a imagem, não um laço de render.** As `imagemUrl` que o Nexus manda
+nos itens do lote são o arquivo **original** do CDN da Shopify: medido em campo,
+`RESSURECTED.jpg` tem **2083×2706 px**. O que ocupa memória não é o peso do
+`.jpg`, é o bitmap — `w × h × 4` = **~23 MB por foto**. Um lote de 10 pedidos ×3
+itens põe 33 `<img>` em tela de uma vez (30 miniaturas na sidebar + 3 cards do
+pedido aberto): **~744 MB de bitmap**, antes de qualquer leitura RFID. O legado
+(`minhacontaberzerk`) carregava a original de propósito — "nitidez" —, e foi
+esse hábito que chegou até aqui.
+
+`src/lib/imagens.ts` pede o tamanho de tela ao CDN, com a mesma convenção do
+Nexus (`packages/contracts/src/shopify-thumb.ts`): `width=<px>` na query,
+preservando o `?v=`. Só `cdn.shopify.com` e irmãos são tocados — Tiny/S3 já vem
+em 770×1000 e passa **intacto** —, e URL que já pede tamanho (`width=` ou
+sufixo `_NxN`) volta inalterada.
+
+| Onde | Largura | Bitmap |
+|---|---|---|
+| Miniatura (sidebar do lote, histórico, Filtro Inteligente, etiquetagem) | 400 | ~0,8 MB |
+| Picking / itens da Expedição | 800 | ~3,3 MB |
+| Card do pedido ABERTO na mesa | 1000 | ~5,2 MB |
+
+A foto do card **continua grande** — 1000 px de largura para um card de ~330 px
+CSS cobre HiDPI com folga. As mesmas 33 imagens passam de ~744 MB para **~40 MB**.
+Toda `<img>` da separação, expedição e etiquetagem leva `loading="lazy"` +
+`decoding="async"`.
+
+**Não era um laço de render.** A hipótese foi levantada e testada: o runner foi
+montado num Chrome de verdade (layout real, 1366×768 e mais quatro resoluções,
+1 a 20 itens por pedido, puro e misto, com e sem filtro salvo de outro dia,
+rajadas de 60 `queue.changed`) e estabiliza em 3 a 7 commits em todos os casos.
+`test/separacao-runner.render.spec.tsx` deixou a trava: entra na fila com um
+lote de 10 e falha se o número de commits explodir — ou se alguma `<img>` voltar
+a pedir a original.
+
+**Rede embaixo.** `src/lib/memoriaWatchdog.ts` loga o heap do renderer de 60 em
+60 segundos e, passando de 1,5 GB (ou 70% do teto do motor), **recarrega a
+janela** com um toast explicando. A sessão está no localStorage e os pedidos
+continuam reservados no servidor — ela perde 3 segundos em vez do turno, que é
+estritamente melhor que a página de OOM. O vigia não corrige nada; ele existe
+pra que o próximo vazamento apareça como uma curva no console em vez de uma
+bancada parada.
+
+Junto vieram os tetos que faltavam: o poll do iTAG faz **backoff** de 400 ms até
+5 s enquanto a mesa não responde (eram 150 chamadas por minuto com a mesa
+offline), o `Set` de pedidos já iniciados é podado a cada reposição do lote em
+vez de acumular o turno inteiro, os osciladores do bipe se desconectam ao
+terminar, e os timers dos banners morrem com a tela.
 
 ### Atualização forçada (0.9.2)
 

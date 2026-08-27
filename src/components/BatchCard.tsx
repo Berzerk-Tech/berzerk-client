@@ -1,4 +1,5 @@
 import { useState, type CSSProperties } from "react";
+import { miniatura } from "../lib/imagens";
 import type { RfidPrintJobStatus } from "../services/printJobs";
 import {
   MOTIVO_BLOQUEIO_LABEL,
@@ -207,9 +208,10 @@ function Thumbnail({ src, alt }: { src: string | null; alt: string }) {
   }
   return (
     <img
-      src={src}
+      src={miniatura(src) ?? undefined}
       alt={alt}
       loading="lazy"
+      decoding="async"
       onError={() => setErrored(true)}
       style={thumbImg}
     />
