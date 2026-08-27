@@ -314,7 +314,16 @@ export function BatchBrowser({
       }
     }
     const parar = subscribePrintJobsChanged(
-      () => void loadJobs(),
+      () => {
+        void loadJobs();
+        // A FILA também, não só o painel de jobs (27/08). O nexus passou a
+        // emitir `print-jobs.changed` quando outra mesa carimba/descarimba o
+        // lote como impresso, e é isso que tira (ou devolve) o lote da fila
+        // daqui. Sem esta linha o evento chegava e só o painel de jobs
+        // reagia: o lote continuava na fila desta mesa até o poll de 30s,
+        // que é exatamente a espera que o evento existe pra eliminar.
+        void load(false);
+      },
       (status) => {
         if (alive) setRealtimeStatus(status);
       },
@@ -323,7 +332,7 @@ export function BatchBrowser({
       alive = false;
       parar();
     };
-  }, []);
+  }, [load]);
 
   // Tick por segundo quando há jobs imprimindo (local OU global)
   const hasPrintingJobs =
