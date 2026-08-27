@@ -211,6 +211,23 @@ function liberacaoNecessaria(e: unknown): LiberacaoFaltante[] | null {
     }));
 }
 
+/**
+ * 409 `{ error: "separado_no_legado", message, separadoPor }` do complete → o
+ * nome de quem separou no sistema antigo; null se é outro erro.
+ *
+ * Este é o desfecho do incidente de 27/08: enquanto a operadora conferia o
+ * pedido aqui, alguém o separou no minhacontaberzerk e o espelho derrubou o
+ * claim dela. Antes o servidor devolvia "pedido não está em separação
+ * (status=awaiting_pickup)" e a tela só mostrava esse texto — que convida a
+ * tentar de novo, e tentar de novo é como saem dois pacotes.
+ */
+function separadoNoLegado(e: unknown): string | null {
+  if (!(e instanceof ApiError) || e.status !== 409 || !e.body || typeof e.body !== "object") return null;
+  const body = e.body as { error?: unknown; separadoPor?: unknown };
+  if (body.error !== "separado_no_legado") return null;
+  return typeof body.separadoPor === "string" && body.separadoPor.trim() ? body.separadoPor : "outra pessoa";
+}
+
 /** Progresso de conferência de um item. */
 type ItemProgress = { count: number; epcs: string[] };
 
@@ -605,6 +622,18 @@ export function SeparacaoRunner({
             ? `O servidor não reconheceu a leitura de: ${quais}. Confira a peça na mesa (releia com R) ou libere com supervisor.`
             : "O servidor exige liberação de supervisor pra concluir este pedido.",
         );
+        return;
+      }
+      // 409 `separado_no_legado`: o pedido JÁ SAIU pelo sistema antigo. Não há
+      // o que tentar de novo — o que existe pra fazer é tirar as peças da mesa
+      // e seguir. Por isso a mesa AVANÇA (o pedido some do lote dela) em vez de
+      // ficar mostrando um erro sobre um card que não é mais dela.
+      const quemSeparouLa = separadoNoLegado(e);
+      if (quemSeparouLa) {
+        showNotice(
+          `Este pedido já foi separado no sistema antigo por ${quemSeparouLa}. Tire as peças da mesa e devolva pra arara.`,
+        );
+        await puxarLote({ depoisDe: ord.id });
         return;
       }
       // Banner (não setError): a fase segue "separating" e o setError só
