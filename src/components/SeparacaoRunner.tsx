@@ -27,6 +27,7 @@ import {
   claimLote,
   completeSeparacao,
   devolverLote,
+  getMe,
   getMeusPedidos,
   getQueueDates,
   iniciarSeparacao,
@@ -119,6 +120,78 @@ function gtinCandidates(...vals: Array<string | null | undefined>): string[] {
 }
 
 type Phase = "loading" | "separating" | "empty" | "error";
+
+// ---------------------------------------------------------------------------
+// Ordem local do lote e filtro DE EXIBIÇÃO
+// ---------------------------------------------------------------------------
+//
+// Desde 27/08 (nexus #164) o `POST /separacao/lote` devolve TUDO o que já é
+// dela no modo+tamanho, IGNORANDO os filtros de data/produto — os filtros
+// decidem só o que ENTRA de novo. A mudança consertou um bug feio (a conta de
+// posse zerava a cada troca de data e uma operadora acumulou 81 pedidos), mas
+// levou junto o efeito que a operação usava: excluir "calça" no filtro e ver a
+// sidebar sem calça. Então o RECORTE DE EXIBIÇÃO passa a ser do app: a resposta
+// do servidor continua sendo a posse (ninguém devolve pedido por causa de
+// filtro), e o que ela VÊ e o que o "próximo" percorre é o subconjunto que bate
+// com o filtro. O rodapé conta quantos ficaram ocultos, pra não parecer que
+// sumiram.
+//
+// A regra de casamento é a MESMA do servidor (`produtosNoPedido` em
+// `apps/api/src/modules/separacao/separacao.service.ts`): `ilike %termo%` sobre
+// o NOME do item — case-insensitive, substring, qualquer item do pedido basta.
+// `includes` sobre minúsculas é exatamente isso; `%`/`_` do termo são literais
+// dos dois lados (o servidor escapa antes de montar o LIKE).
+
+/** Dia de emissão do pedido em `YYYY-MM-DD` **no fuso de São Paulo** — o mesmo
+ *  `at time zone 'America/Sao_Paulo'` que o servidor usa. A estação pode estar
+ *  em outro fuso; o dia da operação é sempre o de SP. */
+function diaDeEmissao(o: Order): string | null {
+  if (!o.dataEmissao) return null;
+  const d = new Date(o.dataEmissao);
+  if (Number.isNaN(d.getTime())) return null;
+  return d.toLocaleDateString("en-CA", { timeZone: "America/Sao_Paulo" });
+}
+
+/** Algum item do pedido cujo nome contém algum dos termos (mesmo `ilike %t%`). */
+function pedidoTemProduto(o: Order, termos: string[]): boolean {
+  const alvos = termos.map((t) => t.trim().toLowerCase()).filter((t) => t.length > 0);
+  if (alvos.length === 0) return false;
+  return o.items.some((it) => {
+    const nome = (it.nome ?? "").toLowerCase();
+    return alvos.some((t) => nome.includes(t));
+  });
+}
+
+/** O pedido passa pelos filtros ATIVOS (data de emissão + inclui/exclui produto). */
+function passaNosFiltros(o: Order, f: QueueFilters): boolean {
+  if (f.dateFrom || f.dateTo) {
+    // Pedido sem data de emissão não passa em filtro de data — é o que o SQL
+    // faz (`null::date >= x` é NULL, e NULL não entra no WHERE).
+    const dia = diaDeEmissao(o);
+    if (!dia) return false;
+    if (f.dateFrom && dia < f.dateFrom) return false;
+    if (f.dateTo && dia > f.dateTo) return false;
+  }
+  if (f.includeProducts?.length && !pedidoTemProduto(o, f.includeProducts)) return false;
+  if (f.excludeProducts?.length && pedidoTemProduto(o, f.excludeProducts)) return false;
+  return true;
+}
+
+/**
+ * O lote na ORDEM em que ela ataca: a ordem do servidor (prioritário, depois
+ * FIFO), com os PULADOS no fim — "a peça ainda não chegou da dobra" tira o
+ * pedido da vez sem tirar do lote dela. Pular não fala com o servidor: o pedido
+ * continua reservado, só muda de lugar na fila local.
+ */
+function ordenarLote(lote: Order[], pulados: Set<string>): Order[] {
+  if (pulados.size === 0) return lote;
+  return [...lote.filter((o) => !pulados.has(o.id)), ...lote.filter((o) => pulados.has(o.id))];
+}
+
+/** A lista que a sidebar mostra e que o "próximo" percorre. */
+function loteVisivel(lote: Order[], pulados: Set<string>, filters: QueueFilters): Order[] {
+  return ordenarLote(lote, pulados).filter((o) => passaNosFiltros(o, filters));
+}
 
 /** 422 `{ error: "liberacao_necessaria", faltantes }` do complete → lista de
  *  faltantes do servidor (vazia se o body não trouxe); null se é outro erro. */
@@ -213,6 +286,9 @@ export function SeparacaoRunner({
   /** Pedidos ainda SEM DONO na fila (o "faltam X"). null = servidor não disse. */
   const [restantes, setRestantes] = useState<number | null>(null);
   const loteRef = useRef<Order[]>([]);
+  /** Ids na ordem que a sidebar mostra (ordem local + filtros) — a base do
+   *  "próximo". Preenchido no corpo do render, lido dentro dos callbacks. */
+  const sequenciaRef = useRef<string[]>([]);
   /**
    * Ela entrou RETOMANDO uma lista de picking impressa: o lote não se completa
    * sozinho, porque a folha na mão da coleta tem exatamente aqueles números.
@@ -244,6 +320,23 @@ export function SeparacaoRunner({
   const [filters, setFilters] = useState<QueueFilters>(() => loadFilters());
   const filtersRef = useRef(filters);
   filtersRef.current = filters;
+  /**
+   * Pedidos PULADOS: a peça ainda não chegou da dobra, então o pedido vai pro
+   * FIM da ordem local e ela segue. Continua reservado pra ela (nenhuma
+   * chamada ao servidor) — pular é decisão de ordem, não de posse.
+   */
+  const [pulados, setPulados] = useState<Set<string>>(() => new Set<string>());
+  const puladosRef = useRef(pulados);
+  puladosRef.current = pulados;
+  /**
+   * Trava `separacao_liberacao_supervisor_ativa` do nexus, lida do `/me` ao
+   * entrar na fila. `true` (exigir PIN) é o padrão e o que vale enquanto a
+   * resposta não chega, com nexus antigo ou se o `/me` falhar: afrouxar uma
+   * trava por causa de rede seria o erro caro.
+   */
+  const [exigirSupervisor, setExigirSupervisor] = useState(true);
+  const exigirSupervisorRef = useRef(true);
+  exigirSupervisorRef.current = exigirSupervisor;
   // Aviso não-bloqueante (claim por clique falhou, degradação de endpoint…).
   const [notice, setNotice] = useState<string | null>(null);
   const noticeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -261,6 +354,18 @@ export function SeparacaoRunner({
   }, []);
 
   /**
+   * Ids na ordem de tentativa a PARTIR do pedido que acabou de sair da mesa:
+   * primeiro os que vinham depois dele, depois (dando a volta) os anteriores.
+   * É o que faz "concluí o 3º" abrir o 4º, e não o 1º de novo.
+   */
+  const candidatosDepoisDe = useCallback((id: string): string[] => {
+    const seq = sequenciaRef.current;
+    const i = seq.indexOf(id);
+    if (i < 0) return seq;
+    return [...seq.slice(i + 1), ...seq.slice(0, i)];
+  }, []);
+
+  /**
    * (Re)carrega o lote e coloca um pedido na mesa. É o MESMO caminho pra
    * entrar na fila e pra repor depois de concluir/devolver: o endpoint é
    * idempotente (devolve tudo o que já é dela e completa até o alvo do
@@ -268,14 +373,22 @@ export function SeparacaoRunner({
    *
    * `preservarAtual` mantém na mesa o pedido que a operadora está conferindo
    * (troca de filtro/data no meio do pedido não pode zerar a leitura dela).
+   *
+   * `depoisDe` é o pedido que ACABOU de sair (concluído/devolvido): a mesa
+   * segue SEQUENCIAL a partir dele, e só volta pro começo quando não sobrou
+   * nenhum dos que vinham depois — que é exatamente o caso "a lista acabou, o
+   * servidor repôs, continue do primeiro NOVO". Sem isso a mesa voltava pro
+   * primeiro card a cada conclusão, e as separadoras reconferiam o que já
+   * tinham feito (relato do 1º dia na 0.9.4).
    */
   const puxarLote = useCallback(
-    async (opts?: { preservarAtual?: boolean }) => {
+    async (opts?: { preservarAtual?: boolean; depoisDe?: string }) => {
       // Reposição em background (push do WS, troca de filtro) cede a vez: o
       // caminho do complete já vai repor, e duas chamadas em voo trocariam o
       // pedido da mesa no meio da conferência.
       if (opts?.preservarAtual && (puxandoRef.current || completingRef.current)) return;
       const atual = opts?.preservarAtual ? orderRef.current : null;
+      const filtrosDaVez = filtersRef.current;
       if (!atual) {
         setPhase("loading");
         resetLeitura();
@@ -296,8 +409,18 @@ export function SeparacaoRunner({
               sizes: queue.sizes,
               filters: filtersRef.current,
             });
+        // Ordem de tentativa capturada ANTES de o lote ser substituído — a
+        // sequência nova já não sabe onde o pedido concluído estava.
+        const candidatos = opts?.depoisDe ? candidatosDepoisDe(opts.depoisDe) : [];
         setLote(orders);
         loteRef.current = orders;
+        // Pulado que saiu do lote (concluído por ela, devolvido, redistribuído)
+        // não pode continuar marcado: se o pedido voltar, volta do zero.
+        const idsAgora = new Set(orders.map((o) => o.id));
+        setPulados((atuais) => {
+          const restantes = new Set([...atuais].filter((id) => idsAgora.has(id)));
+          return restantes.size === atuais.size ? atuais : restantes;
+        });
         setRestantes(fila?.restantes ?? null);
         const aindaMeu = atual ? orders.find((o) => o.id === atual.id) : undefined;
         // O pedido da mesa SUMIU da resposta: o servidor o redistribuiu pra
@@ -308,7 +431,14 @@ export function SeparacaoRunner({
         if (atual && !aindaMeu) {
           showNotice("Este pedido foi redistribuído para outra estação. Continue pelo lote.");
         }
-        const proximo = aindaMeu ?? orders[0] ?? null;
+        // O "próximo" percorre a lista VISÍVEL (ordem local + filtros), nunca a
+        // resposta crua: o que está oculto pelo filtro não pode cair na mesa.
+        const visiveisAgora = loteVisivel(orders, puladosRef.current, filtrosDaVez);
+        const proximo =
+          aindaMeu ??
+          candidatos.map((id) => visiveisAgora.find((o) => o.id === id)).find(Boolean) ??
+          visiveisAgora[0] ??
+          null;
         if (proximo?.id !== atual?.id) resetLeitura();
         setOrder(proximo);
         setPhase(proximo ? "separating" : "empty");
@@ -325,13 +455,29 @@ export function SeparacaoRunner({
         puxandoRef.current = false;
       }
     },
-    [queue.mode, queue.sizes, resetLeitura, showNotice],
+    [queue.mode, queue.sizes, resetLeitura, showNotice, candidatosDepoisDe],
   );
 
   // Entrar na fila = puxar o lote.
   useEffect(() => {
     void puxarLote();
   }, [puxarLote]);
+
+  // A trava da liberação por supervisor vem do `/me` ao entrar na fila. Falhou
+  // (rede, nexus antigo sem o campo)? Fica no padrão: EXIGIR.
+  useEffect(() => {
+    let alive = true;
+    getMe()
+      .then((me) => {
+        if (alive) setExigirSupervisor(me.liberacaoSupervisorAtiva ?? true);
+      })
+      .catch(() => {
+        /* padrão seguro já está no state */
+      });
+    return () => {
+      alive = false;
+    };
+  }, []);
 
   // Reposição por push: `queue.changed` (pedido novo do tiny-sync, pedido
   // devolvido por outra estação) completa o lote sem a operadora fazer nada —
@@ -424,8 +570,9 @@ export function SeparacaoRunner({
     try {
       const tags = collectedTags();
       await completeSeparacao(ord.id, tags, undefined, await leiturasPayload(tags));
-      // Reposição: o lote volta a ter 10 (ou o que a fila ainda tiver).
-      await puxarLote();
+      // Reposição: o lote volta a ter 10 (ou o que a fila ainda tiver) e a mesa
+      // abre o pedido SEGUINTE a este, não o primeiro card.
+      await puxarLote({ depoisDe: ord.id });
     } catch (e) {
       // 422 `liberacao_necessaria`: a contagem local fechou mas o servidor NÃO
       // reconheceu todas as peças (EPC fora do inventário do nexus, surpresa
@@ -499,8 +646,36 @@ export function SeparacaoRunner({
     await releaseSeparacao(ord.id).catch(() => {
       /* best-effort: o janitor recupera */
     });
-    await puxarLote();
+    await puxarLote({ depoisDe: ord.id });
   }, [completing, puxarLote]);
+
+  /**
+   * PULAR (27/08): a peça ainda não chegou da dobra. O pedido CONTINUA dela —
+   * nenhuma chamada ao servidor além do `iniciar` que o próximo disparar — só
+   * vai pro fim da ordem local e a mesa segue pro seguinte. Os pulados voltam
+   * depois do último, e a marca cai sozinha quando o pedido sai do lote.
+   */
+  const pularAtual = useCallback(() => {
+    const ord = orderRef.current;
+    if (!ord || completing) return;
+    const candidatos = candidatosDepoisDe(ord.id);
+    const puladosNovos = new Set(puladosRef.current).add(ord.id);
+    const visiveisAgora = loteVisivel(loteRef.current, puladosNovos, filtersRef.current);
+    const proximo =
+      candidatos.map((id) => visiveisAgora.find((o) => o.id === id)).find(Boolean) ??
+      visiveisAgora.find((o) => o.id !== ord.id) ??
+      null;
+    // Sobrou só ele: nem marca como pulado (a marca sem efeito só confundiria).
+    if (!proximo) {
+      showNotice("Este é o único pedido do seu lote agora — não há pra onde pular.");
+      return;
+    }
+    puladosRef.current = puladosNovos;
+    setPulados(puladosNovos);
+    resetLeitura();
+    setOrder(proximo);
+    setPhase("separating");
+  }, [completing, candidatosDepoisDe, resetLeitura, showNotice]);
 
   /**
    * Sair da fila devolve o LOTE INTEIRO. Sem isto os pedidos reservados
@@ -553,6 +728,37 @@ export function SeparacaoRunner({
       .filter((f) => f.faltam > 0);
   }, []);
 
+  /**
+   * O que **K** (e o botão ao lado do Concluir) faz, agora que a exigência do
+   * supervisor é uma configuração:
+   *
+   *  - trava LIGADA → abre o diálogo do PIN, como sempre;
+   *  - trava DESLIGADA → conclui direto, com um confirm dizendo quantas peças
+   *    faltam. Se o servidor ainda assim recusar (a trava mudou depois do
+   *    `/me`, ou o nexus é anterior à flag), o 422 `liberacao_necessaria` do
+   *    `finish` abre o diálogo do PIN — o caminho antigo continua inteiro.
+   */
+  const liberarOuConcluir = useCallback(() => {
+    const ord = orderRef.current;
+    if (!ord || completing) return;
+    if (exigirSupervisorRef.current) {
+      setSupervisorOpen(true);
+      return;
+    }
+    if (extrasRef.current.size > 0) {
+      showNotice("Tire a peça sobressalente da mesa e reinicie a leitura (R) antes de concluir.");
+      return;
+    }
+    const faltam = faltantes().reduce((a, f) => a + f.faltam, 0);
+    if (
+      faltam > 0 &&
+      !window.confirm(`Faltam ${faltam} ${faltam === 1 ? "peça" : "peças"} — concluir mesmo assim?`)
+    ) {
+      return;
+    }
+    void finish();
+  }, [completing, faltantes, finish, showNotice]);
+
   const supervisorConfirm = useCallback(
     async (liberacao: LiberacaoSupervisor) => {
       const ord = orderRef.current;
@@ -562,7 +768,7 @@ export function SeparacaoRunner({
       await completeSeparacao(ord.id, tags, liberacao, await leiturasPayload(tags));
       setSupervisorOpen(false);
       setServerFaltantes(null);
-      await puxarLote();
+      await puxarLote({ depoisDe: ord.id });
     },
     [collectedTags, puxarLote, leiturasPayload],
   );
@@ -732,8 +938,9 @@ export function SeparacaoRunner({
   }, [phase, order?.id, sessionEpoch]);
 
   // Atalhos migrados do posvenda (as atendentes já têm decorado):
-  //   K = liberar com supervisor (era o "Concluir sem RFID (K)" — aqui a
-  //       exceção passa pelo PIN do supervisor);
+  //   K = concluir sem todas as peças lidas — pelo PIN do supervisor quando a
+  //       trava está ligada, direto (com confirm) quando está desligada;
+  //   P = pular o pedido (peça ainda não chegou da dobra) — vai pro fim do lote;
   //   R = reiniciar a leitura (sobressalente/divergência na mesa).
   // Ignorados digitando em input/textarea/select (e modificadores).
   useEffect(() => {
@@ -749,7 +956,13 @@ export function SeparacaoRunner({
       if (key === "k") {
         if (phase !== "separating" || !orderRef.current || completing || supervisorOpen) return;
         e.preventDefault();
-        setSupervisorOpen(true);
+        liberarOuConcluir();
+        return;
+      }
+      if (key === "p") {
+        if (phase !== "separating" || !orderRef.current || completing || supervisorOpen) return;
+        e.preventDefault();
+        pularAtual();
         return;
       }
       if (key === "r") {
@@ -765,7 +978,7 @@ export function SeparacaoRunner({
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [phase, completing, supervisorOpen, restartLeitura]);
+  }, [phase, completing, supervisorOpen, restartLeitura, liberarOuConcluir, pularAtual]);
 
   // Devolve o lote se a tela sair de cena por qualquer caminho.
   useEffect(() => {
@@ -813,14 +1026,43 @@ export function SeparacaoRunner({
   const [pickingOpen, setPickingOpen] = useState(false);
   const [faltantesOpen, setFaltantesOpen] = useState(false);
   const extras = Array.from(extrasRef.current.values());
-  // A data tem controle próprio na sidebar — não conta como "filtro".
+  /**
+   * O lote como ela VÊ: ordem local (pulados no fim) + filtros de exibição. É
+   * esta lista que a sidebar mostra, que o Picking Geral agrega e que o
+   * "próximo" percorre — o servidor devolve a posse inteira (ver `loteVisivel`).
+   */
+  const visiveis = loteVisivel(lote, pulados, filters);
+  const ocultos = lote.length - visiveis.length;
+  sequenciaRef.current = visiveis.map((o) => o.id);
+  // A DATA conta como filtro (27/08): ela sobrevive à troca de fila (fica no
+  // localStorage da estação) e, quando ficava fora desta conta, a operadora
+  // entrava numa fila nova com um recorte de outro dia ativo e sem nenhum
+  // sinal no topo — a fila e o Picking Geral vinham vazios "sem motivo".
   const filtrosAtivos =
-    (filters.includeProducts?.length ?? 0) + (filters.excludeProducts?.length ?? 0);
+    (filters.includeProducts?.length ?? 0) +
+    (filters.excludeProducts?.length ?? 0) +
+    (filters.dateFrom || filters.dateTo ? 1 : 0);
 
   const aplicarFiltros = (f: QueueFilters) => {
     setFilters(f);
     filtersRef.current = f;
     saveFilters(f);
+    // O pedido da mesa saiu do filtro? Se ela ainda não leu nada, a mesa segue
+    // pro primeiro VISÍVEL (era isso que ela pediu ao filtrar). Se já tem
+    // leitura, o pedido FICA — jogar fora a conferência dela seria pior — e o
+    // aviso explica por que ele não está mais na lista.
+    const atual = orderRef.current;
+    if (atual && !passaNosFiltros(atual, f)) {
+      const temLeitura = Array.from(progressRef.current.values()).some((pr) => pr.count > 0);
+      const proximo = loteVisivel(loteRef.current, puladosRef.current, f)[0];
+      if (!temLeitura && proximo) {
+        resetLeitura();
+        setOrder(proximo);
+        setPhase("separating");
+      } else if (temLeitura) {
+        showNotice("O pedido da mesa ficou fora do filtro. Conclua ou devolva antes de seguir.");
+      }
+    }
     void puxarLote({ preservarAtual: true });
   };
 
@@ -857,6 +1099,14 @@ export function SeparacaoRunner({
           <span style={kickerStyle}>― {kicker} ―</span>
           <h1 style={titleStyle}>{title}</h1>
         </div>
+        {/* Segunda porta pro Picking Geral, no lugar em que a operadora já
+            procura (ao lado de Filtros/Histórico). O chip da sidebar continua
+            lá — este existe porque "não achei o Picking" foi relato de campo, e
+            uma porta no topo não depende de largura de sidebar nem de a coluna
+            do lote estar visível. */}
+        <button style={topBarBtn} onClick={() => setPickingOpen(true)}>
+          🖨 Picking Geral
+        </button>
         <button style={topBarBtn} onClick={() => setFiltersOpen(true)}>
           Filtros{filtrosAtivos > 0 ? ` (${filtrosAtivos})` : ""}
         </button>
@@ -911,7 +1161,9 @@ export function SeparacaoRunner({
       <div style={layoutRow}>
         <LoteSidebar
           queue={queue}
-          lote={lote}
+          lote={visiveis}
+          pulados={pulados}
+          ocultos={ocultos}
           restantes={restantes}
           atualId={order?.id ?? null}
           filters={filters}
@@ -932,15 +1184,18 @@ export function SeparacaoRunner({
           )}
           {phase === "empty" && (
             <Centered>
-              <div style={emptyTitle}>Fila vazia</div>
+              <div style={emptyTitle}>{ocultos > 0 ? "Nada visível no filtro" : "Fila vazia"}</div>
               <p style={emptyText}>
-                {restantes && restantes > 0
-                  ? `Seu lote acabou, mas ainda há ${restantes} na fila — procure de novo.`
-                  : emptyHint}
+                {ocultos > 0
+                  ? `Você tem ${lote.length} ${lote.length === 1 ? "pedido" : "pedidos"} no lote, ${ocultos === lote.length ? "todos" : `${ocultos}`} fora do filtro atual.`
+                  : restantes && restantes > 0
+                    ? `Seu lote acabou, mas ainda há ${restantes} na fila — procure de novo.`
+                    : emptyHint}
               </p>
               {filtrosAtivos > 0 && (
                 <p style={emptyText}>
-                  Você tem filtros de picking ativos — eles também valem pro claim.{" "}
+                  Filtro ativo (data e/ou produto) — ele recorta o que entra no lote e o que
+                  aparece aqui.{" "}
                   <button style={inlineReconnect} onClick={() => setFiltersOpen(true)}>
                     revisar filtros
                   </button>
@@ -957,10 +1212,13 @@ export function SeparacaoRunner({
               progress={progressRef.current}
               extras={extras}
               completing={completing}
+              exigirSupervisor={exigirSupervisor}
+              podePular={visiveis.length > 1}
               onComplete={() => void finish()}
               onRestart={restartLeitura}
               onSkip={() => void devolverAtual()}
-              onSupervisor={() => setSupervisorOpen(true)}
+              onPular={pularAtual}
+              onSupervisor={liberarOuConcluir}
               onFaltantes={() => setFaltantesOpen(true)}
             />
           )}
@@ -986,7 +1244,7 @@ export function SeparacaoRunner({
           queue={queue}
           data={dataSel}
           filters={filters}
-          lote={lote}
+          lote={visiveis}
           operadora={operadora}
           onListaImpressa={marcarLotePresoLocalmente}
           onClose={() => setPickingOpen(false)}
@@ -1117,6 +1375,8 @@ function ReadLogPanel({
 function LoteSidebar({
   queue,
   lote,
+  pulados,
+  ocultos,
   restantes,
   atualId,
   filters,
@@ -1126,7 +1386,12 @@ function LoteSidebar({
   onPickingGeral,
 }: {
   queue: { mode: SeparationMode; size: string; sizes: string[] };
+  /** JÁ na ordem local e JÁ filtrado — a sidebar não recorta nada por conta. */
   lote: Order[];
+  /** Ids pulados (mostrados no fim, com marca). */
+  pulados: Set<string>;
+  /** Pedidos do lote escondidos pelo filtro — contados no rodapé. */
+  ocultos: number;
   restantes: number | null;
   atualId: string | null;
   filters: QueueFilters;
@@ -1179,7 +1444,7 @@ function LoteSidebar({
       <span style={sidebarHint}>
         {termo
           ? "Buscando dentro do seu lote."
-          : "Estes pedidos são só seus. Clique pra escolher qual vem agora."}
+          : "Estes pedidos são só seus. Clique pra escolher qual vem agora, ou aperte P pra pular o da mesa."}
       </span>
       <div className="thin-scroll" style={sidebarList}>
         {/* `cardSlot` liga `content-visibility: auto`: com 50 mistos na coluna
@@ -1190,6 +1455,7 @@ function LoteSidebar({
             antes. As fotos já sobem com `loading="lazy"`. */}
         {visiveis.map((o, i) => (
           <div key={o.id} style={cardSlot}>
+            {pulados.has(o.id) && <span style={puladoChip}>pulado</span>}
             <QueueCard
               item={queueItemFromOrder(o, i + 1)}
               pinned={o.id === atualId}
@@ -1203,11 +1469,23 @@ function LoteSidebar({
           </span>
         )}
       </div>
-      {restantes !== null && (
+      {(restantes !== null || ocultos > 0) && (
         <div style={sidebarFooter}>
-          {restantes > 0
-            ? `faltam ${restantes} na fila`
-            : "fila vazia — só o que está no seu lote"}
+          {/* Os OCULTOS são pedidos que continuam reservados pra ela — o filtro
+              só some com eles da vista. Sem esta linha o lote "encolhia" sem
+              explicação e ela achava que tinha perdido pedido. */}
+          {ocultos > 0 && (
+            <div>
+              {ocultos} {ocultos === 1 ? "oculto" : "ocultos"} pelo filtro
+            </div>
+          )}
+          {restantes !== null && (
+            <div>
+              {restantes > 0
+                ? `faltam ${restantes} na fila`
+                : "fila vazia — só o que está no seu lote"}
+            </div>
+          )}
         </div>
       )}
     </aside>
@@ -1488,9 +1766,12 @@ function OrderView({
   progress,
   extras,
   completing,
+  exigirSupervisor,
+  podePular,
   onComplete,
   onRestart,
   onSkip,
+  onPular,
   onSupervisor,
   onFaltantes,
 }: {
@@ -1498,9 +1779,14 @@ function OrderView({
   progress: Map<string, ItemProgress>;
   extras: ExtraTag[];
   completing: boolean;
+  /** Trava do nexus: `false` deixa concluir com faltantes sem PIN. */
+  exigirSupervisor: boolean;
+  /** Há outro pedido visível pra onde pular. */
+  podePular: boolean;
   onComplete: () => void;
   onRestart: () => void;
   onSkip: () => void;
+  onPular: () => void;
   onSupervisor: () => void;
   onFaltantes: () => void;
 }) {
@@ -1609,6 +1895,20 @@ function OrderView({
         <button style={ghostBtn} onClick={onSkip} disabled={completing}>
           Devolver à fila
         </button>
+        {/* PULAR ≠ devolver: a peça ainda não chegou da dobra, o pedido
+            continua reservado pra ela e só vai pro fim do lote. */}
+        <button
+          style={ghostBtn}
+          onClick={onPular}
+          disabled={completing || !podePular}
+          title={
+            podePular
+              ? "Pedido vai pro fim do seu lote — você volta nele depois (P)"
+              : "É o único pedido visível no seu lote"
+          }
+        >
+          Pular (P)
+        </button>
         {/* "ITENS FALTANTES" do pós-venda legado: a peça não está na
             prateleira. Sai da fila e o cliente é avisado — diferente de
             "devolver", que devolve o pedido inteiro pra outra estação pegar e
@@ -1623,7 +1923,7 @@ function OrderView({
         )}
         {!done && (
           <button style={supervisorBtn} onClick={onSupervisor} disabled={completing}>
-            🔓 Liberar com supervisor (K)
+            {exigirSupervisor ? "🔓 Liberar com supervisor (K)" : "✅ Concluir com faltantes (K)"}
           </button>
         )}
         <button
@@ -1852,6 +2152,9 @@ const pickingChip: CSSProperties = {
 
 /** "faltam X na fila" — o que ainda está sem dono, fora do lote dela. */
 const sidebarFooter: CSSProperties = {
+  display: "flex",
+  flexDirection: "column",
+  gap: 2,
   padding: "9px 16px",
   borderTop: "1px solid var(--border)",
   fontFamily: "var(--font-mono)",
@@ -1990,6 +2293,25 @@ const sidebarEmpty: CSSProperties = {
 const cardSlot: CSSProperties = {
   contentVisibility: "auto",
   containIntrinsicSize: "auto 92px",
+  position: "relative",
+};
+
+/** Marca do pedido PULADO (fim do lote) — o card em si não muda de forma. */
+const puladoChip: CSSProperties = {
+  position: "absolute",
+  top: 4,
+  right: 6,
+  zIndex: 1,
+  fontFamily: "var(--font-mono)",
+  fontSize: 9,
+  fontWeight: 800,
+  letterSpacing: 0.4,
+  textTransform: "uppercase",
+  padding: "1px 6px",
+  borderRadius: 999,
+  background: "var(--warning-bg)",
+  color: "var(--warning-text)",
+  pointerEvents: "none",
 };
 
 const listaChip: CSSProperties = {
