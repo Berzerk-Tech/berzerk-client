@@ -3,6 +3,11 @@
 // Usa o SumatraPDF (portátil, ~6 MB) em modo linha de comando:
 //   SumatraPDF.exe -silent -print-to-default <arquivo>
 //   SumatraPDF.exe -silent -print-to "<impressora>" <arquivo>
+//   SumatraPDF.exe -silent -print-to "<impressora>" -print-settings "1,fit" <arquivo>
+//
+// O `-print-settings` importa MUITO na expedição: a máquina de embalagem solta
+// UM SACO POR ETIQUETA IMPRESSA, então cada página a mais é um saco perdido.
+// "1,fit" = imprime SÓ a primeira página, escalada pro papel da impressora.
 // Imprime PDF e PNG. É o caminho robusto e 100% silencioso pro chão de fábrica
 // (mesma abordagem usada em setups de etiqueta/POS).
 //
@@ -121,6 +126,7 @@ fn do_print(
     ext: &str,
     printer: Option<String>,
     _job: Option<String>,
+    settings: Option<String>,
 ) -> PrintOutcome {
     let sumatra = match resolve_sumatra(app) {
         Some(p) => p,
@@ -161,6 +167,15 @@ fn do_print(
             cmd.arg("-print-to-default");
         }
     }
+    // `-print-settings` do SumatraPDF: lista separada por vírgula com faixa de
+    // páginas e escala ("1,fit" = só a página 1, escalada pro papel). É o que
+    // garante UMA etiqueta por pedido mesmo quando a transportadora manda um
+    // PDF de duas páginas ou num tamanho de papel diferente do 100x150.
+    if let Some(st) = settings.as_deref() {
+        if !st.trim().is_empty() {
+            cmd.arg("-print-settings").arg(st.trim());
+        }
+    }
     cmd.arg(&file);
     no_window(&mut cmd);
 
@@ -197,11 +212,14 @@ pub async fn print_pdf_silent(
     base64: String,
     printer: Option<String>,
     job_name: Option<String>,
+    print_settings: Option<String>,
 ) -> Result<PrintOutcome, String> {
     let bytes = decode_b64(&base64)?;
-    tokio::task::spawn_blocking(move || do_print(&app, bytes, "pdf", printer, job_name))
-        .await
-        .map_err(|e| e.to_string())
+    tokio::task::spawn_blocking(move || {
+        do_print(&app, bytes, "pdf", printer, job_name, print_settings)
+    })
+    .await
+    .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -210,11 +228,14 @@ pub async fn print_image_silent(
     base64: String,
     printer: Option<String>,
     job_name: Option<String>,
+    print_settings: Option<String>,
 ) -> Result<PrintOutcome, String> {
     let bytes = decode_b64(&base64)?;
-    tokio::task::spawn_blocking(move || do_print(&app, bytes, "png", printer, job_name))
-        .await
-        .map_err(|e| e.to_string())
+    tokio::task::spawn_blocking(move || {
+        do_print(&app, bytes, "png", printer, job_name, print_settings)
+    })
+    .await
+    .map_err(|e| e.to_string())
 }
 
 #[tauri::command]

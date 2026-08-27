@@ -62,6 +62,8 @@ export type JaExpedido = {
   epc: string;
   orderId: string;
   numero: string | null;
+  /** Conta Tiny — decide QUAL documento reimprimir (JT: etiqueta; FM: DANFE). */
+  tinyAccount: "FM" | "JT";
   shippedAt: string | null;
   shippedBy: string | null;
   shippedByEmail: string | null;
@@ -154,14 +156,27 @@ export type ExpedicaoHistoryOrder = {
   clienteNome: string | null;
   dataEmissao: string | null;
   shippedAt: string;
+  /** `shipped_by` cru (sub do Cognito) — chave, não rótulo. */
+  shippedBy: string | null;
+  /** E-mail (staff) ou nome (operador) de quem expediu; null se não casou. */
+  shippedByNome: string | null;
   trackingNumber: string | null;
   tinyAccount: "FM" | "JT";
   channel: OrderChannel | null;
   status: OrderStatus;
   itemCount: number;
+  /** Dá pra reimprimir a DANFE (tem NF em cache no servidor). */
+  temDanfe: boolean;
+  /** Dá pra reimprimir a etiqueta (base64 em banco ou rastreio pra rebuscar). */
+  temEtiqueta: boolean;
+  /** Última impressão registrada da etiqueta — inclui reimpressões. */
+  labelPrintedAt: string | null;
   rfidTags: string[];
   items: OrderItem[];
 };
+
+/** Documento reimprimível a partir do histórico / da tela "já foi expedido". */
+export type DocumentoReimpressao = "danfe" | "etiqueta";
 
 export type ExpedicaoHistoryResponse = {
   items: ExpedicaoHistoryOrder[];
@@ -316,11 +331,16 @@ export function shipOrder(
   });
 }
 
-/** Pedidos expedidos PELO ATOR logado (busca + período sobre `shipped_at`). */
+/**
+ * Pedidos expedidos (busca + período sobre `shipped_at`). Por padrão só os do
+ * ATOR logado; `todos: true` traz a ESTAÇÃO INTEIRA — o turno troca no meio do
+ * dia e quem está na mesa precisa reimprimir o que o colega expediu.
+ */
 export function getExpedicaoHistory(params: {
   q?: string;
   dateFrom?: string;
   dateTo?: string;
+  todos?: boolean;
   limit?: number;
   offset?: number;
 }): Promise<ExpedicaoHistoryResponse> {
@@ -332,10 +352,34 @@ export function getExpedicaoHistory(params: {
       q: params.q || undefined,
       dateFrom: params.dateFrom || undefined,
       dateTo: params.dateTo || undefined,
+      todos: params.todos ? "true" : undefined,
       limit: params.limit?.toString(),
       offset: params.offset?.toString(),
     },
   });
+}
+
+/**
+ * Avisa o servidor que o documento foi mandado PRA IMPRESSORA de novo — só
+ * trilha (auditoria + `printed_at` da etiqueta). NÃO muda o status do pedido.
+ *
+ * Best-effort de propósito: o papel já saiu quando isto roda, então falhar
+ * aqui não pode virar erro na cara do embalador. Nunca rejeita.
+ */
+export async function registrarReimpressao(
+  orderId: string,
+  documento: DocumentoReimpressao,
+  origem: "historico" | "ja_expedido" | "mesa",
+): Promise<void> {
+  if (isExpedicaoSimulacao()) return;
+  try {
+    await apiRequest<{ ok: true }>(`/expedicao/orders/${orderId}/reimpressao`, {
+      method: "POST",
+      body: { documento, origem },
+    });
+  } catch {
+    /* trilha não trava a mesa */
+  }
 }
 
 /** Permissão exigida pra operar a Expedição (o ator dev com `*` passa). */
