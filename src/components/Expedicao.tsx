@@ -38,6 +38,7 @@ import {
   isExpedicaoSimulacao,
   type ExpedicaoMode,
 } from "../services/expedicaoMode";
+import { conferir, type Conferencia } from "../lib/conferenciaExpedicao";
 import type { EpcLookupItem, OrderItem } from "../services/orders";
 
 type Props = { onBack: () => void };
@@ -62,7 +63,7 @@ type Flow =
   | { kind: "idle" }
   | { kind: "reading" }
   | { kind: "choose"; matches: EpcMatch[] }
-  | { kind: "identified"; order: ExpedicaoOrder; lidas: string[]; faltam: string[] }
+  | { kind: "identified"; order: ExpedicaoOrder }
   | { kind: "printing"; order: ExpedicaoOrder }
   | { kind: "packing"; order: ExpedicaoOrder; lidas: string[]; override?: string }
   | { kind: "done"; order: ExpedicaoOrder; modo: ExpedicaoMode; enfileirado: boolean }
@@ -118,44 +119,17 @@ function saveShipRetry(jobs: ShipRetryJob[]): void {
  */
 const PRESENCE_TTL = 3400;
 
-/** Pedido corrente do fluxo (quando há um). */
-function orderOf(flow: Flow): ExpedicaoOrder | null {
-  switch (flow.kind) {
-    case "identified":
-    case "printing":
-    case "packing":
-    case "done":
-      return flow.order;
-    case "error":
-      return flow.order ?? null;
-    default:
-      return null;
-  }
-}
-
-// ---- matching EPC→item (mesma lógica da Separação/posvenda) ----------------
-function normGtin(v: string | null | undefined): string | null {
-  const d = v?.replace(/\D/g, "").replace(/^0+/, "");
-  return d || null;
-}
-function gtinCandidates(...vals: Array<string | null | undefined>): string[] {
+/**
+ * EPCs que OUTRO pedido `awaiting_pickup` da mesa reivindica. Não podem contar
+ * no pedido escolhido — senão um slot "Surpresa" engoliria a peça do vizinho.
+ */
+function alheiasDe(matches: EpcMatch[], escolhido: EpcMatch): Set<string> {
   const out = new Set<string>();
-  for (const v of vals) {
-    const t = v?.trim();
-    if (t && /^\d{8,14}$/.test(t)) {
-      const n = normGtin(t);
-      if (n) out.add(n);
-    }
+  for (const outro of matches) {
+    if (outro.order.id === escolhido.order.id) continue;
+    for (const t of outro.order.rfidTags ?? []) out.add(t.trim().toUpperCase());
   }
-  return Array.from(out);
-}
-function matchItem(items: OrderItem[], look: EpcLookupItem, used: Map<string, number>): OrderItem | null {
-  const remaining = (it: OrderItem) => it.quantidade - (used.get(it.id) ?? 0);
-  const tagGtins = gtinCandidates(look.ean13, look.sku);
-  const byGtin = items.find((it) => remaining(it) > 0 && gtinCandidates(it.ean, it.sku).some((g) => tagGtins.includes(g)));
-  if (byGtin) return byGtin;
-  const lookSku = look.sku?.trim().toUpperCase();
-  return items.find((it) => lookSku && it.sku?.trim().toUpperCase() === lookSku && remaining(it) > 0) ?? null;
+  return out;
 }
 
 function jaExpedidoMsg(js: JaExpedido[]): string {
@@ -197,7 +171,11 @@ export function Expedicao({ onBack }: Props) {
   const [bufferSize, setBufferSize] = useState(0);
   const [packingProgress, setPackingProgress] = useState(0);
   const [notice, setNotice] = useState<string | null>(null);
-  const [progress, setProgress] = useState<Map<string, number>>(new Map());
+  // Conferência da mesa (peças lidas × grade × tags da separação) — ver
+  // `lib/conferenciaExpedicao.ts`. É o que a grade e o painel mostram.
+  const [conf, setConf] = useState<Conferencia | null>(null);
+  const confRef = useRef<Conferencia | null>(null);
+  confRef.current = conf;
   const [readLog, setReadLog] = useState<ReadEntry[]>([]);
   const [session, setSession] = useState<SessionEntry[]>([]);
   const [overrideOpen, setOverrideOpen] = useState(false);
@@ -255,7 +233,7 @@ export function Expedicao({ onBack }: Props) {
     lastPresentSigRef.current = "";
     lastSigRef.current = "";
     lastFailSigRef.current = "";
-    setProgress(new Map());
+    setConf(null);
     setReadLog([]);
     setBufferSize(0);
     setOverrideOpen(false);
@@ -321,10 +299,12 @@ export function Expedicao({ onBack }: Props) {
       beepOk();
       if (jaExpedidos.length > 0) {
         showNotice(`⚠ Tem peça de pedido já expedido na mesa (#${jaExpedidos[0].numero ?? ""}). Confira.`);
-      } else if (unmatchedEpcs.length > 0) {
-        showNotice(`⚠ ${unmatchedEpcs.length} peça(s) na mesa não são deste pedido — confira antes de fechar.`);
       }
-      await identifica(m);
+      // `unmatchedEpcs` NÃO é mais sinônimo de "peça alheia": num pedido
+      // separado no legado as peças dos slots "Surpresa" não estão em
+      // `rfid_tags` e caem aqui, mas são deste pedido. Quem decide é a
+      // conferência (`conf.fora`), lá embaixo.
+      await identifica(m, alheiasDe(matches, m));
     } catch (e) {
       handleResolveError(e);
       scheduleRetry();
@@ -352,30 +332,33 @@ export function Expedicao({ onBack }: Props) {
     });
   }, []);
 
-  // ---- identifica um match: progresso por item + trava de completude ----
+  // ---- identifica um match: conferência da mesa + trava de completude ----
+  // A conferência olha a MESA INTEIRA, não só `tagsLidas` (a interseção com
+  // `rfid_tags`): pedido separado no legado tem menos tags gravadas do que
+  // peças, e as peças de fora da lista precisam contar pros slots "Surpresa".
   const identifica = useCallback(
-    async (m: EpcMatch) => {
+    async (m: EpcMatch, alheias: Set<string>) => {
       const order = m.order;
+      const naMesa = Array.from(mesaRef.current);
+      let resolved = new Map<string, EpcLookupItem>();
       try {
-        const resolved = await rfid.resolveEpcs(m.tagsLidas);
-        const used = new Map<string, number>();
-        for (const epc of m.tagsLidas) {
-          const look = resolved.get(epc.toUpperCase());
-          const it = look ? matchItem(order.items, look, used) : null;
-          if (it) used.set(it.id, (used.get(it.id) ?? 0) + 1);
-        }
-        setProgress(used);
+        resolved = await rfid.resolveEpcs(naMesa);
       } catch {
-        setProgress(new Map());
+        /* sem lookup a conferência cai nas tags da separação */
       }
-      setFlow({ kind: "identified", order, lidas: m.tagsLidas, faltam: m.tagsFaltantes });
+      const c = conferir({ items: order.items, naMesa, rfidTags: order.rfidTags, resolved, alheias });
+      setConf(c);
+      setFlow({ kind: "identified", order });
+      if (c.fora.length > 0) {
+        showNotice(`⚠ ${c.fora.length} peça(s) na mesa não são deste pedido — tire da mesa antes de fechar.`);
+      }
       // Completo + automação ligada → imprime sozinho. Senão espera o operador.
-      if (m.tagsFaltantes.length === 0 && autoPrintRef.current) {
-        void iniciarImpressao(order, m.tagsLidas);
+      if (c.completo && autoPrintRef.current) {
+        void iniciarImpressao(order, c.contadas);
       }
     },
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [rfid],
+    [rfid, showNotice],
   );
 
   // ---- impressão (J&T → DANFE) → embalagem ----
@@ -483,7 +466,7 @@ export function Expedicao({ onBack }: Props) {
       setSession((s) => [{ order, at: new Date(), modo: modoRef.current }, ...s].slice(0, 12));
       setFlow({ kind: "done", order, modo: modoRef.current, enfileirado });
       window.setTimeout(() => {
-        setProgress(new Map());
+        setConf(null);
         // Reabre a presença: as peças ainda na mesa reaparecem, mas as do pedido
         // despachado já estão em processedRef (não re-identificam).
         lastPresentSigRef.current = "";
@@ -637,21 +620,23 @@ export function Expedicao({ onBack }: Props) {
   };
 
   const escolher = (m: EpcMatch) => {
+    const f = flowRef.current;
+    const alheias = f.kind === "choose" ? alheiasDe(f.matches, m) : new Set<string>();
     setFlow({ kind: "reading" });
-    void identifica(m).catch(handleResolveError);
+    void identifica(m, alheias).catch(handleResolveError);
   };
 
   const confirmarOverride = (motivo: string) => {
     const f = flowRef.current;
     if (f.kind !== "identified") return;
     setOverrideOpen(false);
-    void iniciarImpressao(f.order, f.lidas, motivo);
+    void iniciarImpressao(f.order, confRef.current?.contadas ?? [], motivo);
   };
 
   const imprimirManual = () => {
     const f = flowRef.current;
     if (f.kind !== "identified") return;
-    void iniciarImpressao(f.order, f.lidas);
+    void iniciarImpressao(f.order, confRef.current?.contadas ?? []);
   };
 
   useEffect(() => {
@@ -667,8 +652,6 @@ export function Expedicao({ onBack }: Props) {
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, [reiniciar]);
-
-  const order = orderOf(flow);
 
   return (
     <div style={page}>
@@ -711,12 +694,12 @@ export function Expedicao({ onBack }: Props) {
       <StepIndicator flow={flow} />
 
       <div style={layoutRow}>
-        <LiveReadPanel readLog={readLog} order={order} connected={rfid.connected} />
+        <LiveReadPanel readLog={readLog} conf={conf} connected={rfid.connected} />
 
         <main style={stage}>
           <StageCenter
             flow={flow}
-            progress={progress}
+            conf={conf}
             packingProgress={packingProgress}
             autoPrint={autoPrint}
             onChoose={escolher}
@@ -749,7 +732,11 @@ export function Expedicao({ onBack }: Props) {
       </footer>
 
       {overrideOpen && flow.kind === "identified" && (
-        <OverrideModal faltam={flow.faltam.length} onCancel={() => setOverrideOpen(false)} onConfirm={confirmarOverride} />
+        <OverrideModal
+          faltam={Math.max(conf ? conf.total - conf.lidas : 0, conf?.faltantes.length ?? 0)}
+          onCancel={() => setOverrideOpen(false)}
+          onConfirm={confirmarOverride}
+        />
       )}
 
       {historyOpen && <ExpedicaoHistoryModal onClose={() => setHistoryOpen(false)} />}
@@ -762,7 +749,7 @@ export function Expedicao({ onBack }: Props) {
 // ============================================================
 function StageCenter({
   flow,
-  progress,
+  conf,
   packingProgress,
   autoPrint,
   onChoose,
@@ -774,7 +761,7 @@ function StageCenter({
   onReprint,
 }: {
   flow: Flow;
-  progress: Map<string, number>;
+  conf: Conferencia | null;
   packingProgress: number;
   autoPrint: boolean;
   onChoose: (m: EpcMatch) => void;
@@ -854,10 +841,12 @@ function StageCenter({
   // identified / printing / packing / done — painel verde + grade
   // (idle/reading/choose/error já retornaram acima, então flow tem `order`).
   const order = flow.order;
-  const faltam = flow.kind === "identified" ? flow.faltam.length : 0;
-  const total = order.rfidTags?.length ?? 0;
-  const lidasN = flow.kind === "identified" ? total - flow.faltam.length : total;
-  const completo = faltam === 0;
+  // Progresso = PEÇAS (grade do pedido), não tags gravadas: pedido separado no
+  // legado tem menos `rfid_tags` do que peças. Ver `conferenciaExpedicao.ts`.
+  const total = conf?.total ?? order.items.reduce((a, it) => a + it.quantidade, 0);
+  const lidasN = flow.kind === "identified" ? (conf?.lidas ?? 0) : total;
+  const completo = flow.kind === "identified" ? (conf?.completo ?? false) : true;
+  const faltam = Math.max(total - lidasN, conf?.faltantes.length ?? 0);
   const doneTeste = flow.kind === "done" && flow.modo === "teste";
 
   return (
@@ -877,13 +866,13 @@ function StageCenter({
       />
 
       <div style={itemsScroll} className="thin-scroll">
-        <ItemsGrid items={order.items} progress={progress} />
+        <ItemsGrid items={order.items} progress={conf?.porItem ?? new Map()} />
       </div>
 
       {flow.kind === "identified" && (
         <div style={actionsRow}>
           <button style={ghostBtn} onClick={onRestart}>Cancelar (R)</button>
-          {!completo && <button style={forceBtn} onClick={onForce}>Forçar impressão (faltam {faltam})</button>}
+          {!completo && <button style={forceBtn} onClick={onForce}>Forçar impressão (faltam {faltam} peça{faltam === 1 ? "" : "s"})</button>}
           {completo && !autoPrint && <button style={redBtn} onClick={onPrint}>Imprimir e embalar</button>}
           {completo && autoPrint && <span style={autoHint}>Automação ligada — imprimindo…</span>}
         </div>
@@ -1003,8 +992,10 @@ function ItemCard({ item, count }: { item: OrderItem; count: number }) {
 // ============================================================
 // Leitura ao vivo (esquerda) — transparência do sistema
 // ============================================================
-function LiveReadPanel({ readLog, order, connected }: { readLog: ReadEntry[]; order: ExpedicaoOrder | null; connected: boolean }) {
-  const tags = order?.rfidTags ? new Set(order.rfidTags.map((t) => t.toUpperCase())) : null;
+function LiveReadPanel({ readLog, conf, connected }: { readLog: ReadEntry[]; conf: Conferencia | null; connected: boolean }) {
+  // ✓ = peça que a conferência contou pra ESTE pedido (tag da separação ou peça
+  // real cobrindo um slot "Surpresa"); ! = peça que não é deste pedido.
+  const contadas = conf ? new Set(conf.contadas) : null;
   return (
     <aside style={livePanel}>
       <div style={liveHeader}>
@@ -1017,7 +1008,7 @@ function LiveReadPanel({ readLog, order, connected }: { readLog: ReadEntry[]; or
           <span style={liveEmpty}>Aproxime as peças — cada tag lida aparece aqui.</span>
         ) : (
           readLog.map((e) => {
-            const status = tags ? (tags.has(e.epc) ? "ok" : "fora") : "lendo";
+            const status = contadas ? (contadas.has(e.epc) ? "ok" : "fora") : "lendo";
             return (
               <div key={`${e.epc}-${e.ts}`} style={liveRow}>
                 <span style={{ ...liveRowIcon, color: status === "ok" ? "var(--success-text)" : status === "fora" ? "var(--warning-text)" : "var(--text-muted)" }}>
@@ -1164,7 +1155,7 @@ function OverrideModal({ faltam, onCancel, onConfirm }: { faltam: number; onCanc
       <div style={modalCard} onClick={(e) => e.stopPropagation()}>
         <h3 style={{ margin: 0, fontSize: 18 }}>Forçar impressão</h3>
         <p style={{ fontSize: 13, color: "var(--text-secondary)", margin: 0 }}>
-          Faltam {faltam} tag{faltam === 1 ? "" : "s"} pra completar o pedido. Isso fica registrado (auditável). Descreva o motivo:
+          Faltam {faltam} peça{faltam === 1 ? "" : "s"} pra completar o pedido. Isso fica registrado (auditável). Descreva o motivo:
         </p>
         <textarea autoFocus value={motivo} onChange={(e) => setMotivo(e.target.value)} placeholder="Ex.: peça sem tag, conferido manualmente…" style={modalTextarea} />
         <div style={{ display: "flex", gap: 10, justifyContent: "flex-end" }}>
