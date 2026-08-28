@@ -183,7 +183,12 @@ Pedido das separadoras no cutover: puxar **um pedido por vez** deixava a mesa pa
 
 Sair da fila (voltar ao menu, trocar de fila, logout por inatividade) **devolve o lote em aberto**, mandando os ids — senão os pedidos ficariam reservados e invisíveis pras outras mesas até o janitor expirar o claim. Se o app tiver sido fechado no meio do turno, `GET /separacao/meus-pedidos` faz a tela de filas oferecer **Retomar** (ou devolver).
 
-**Seletor "Data".** A janela de data saiu do Filtro Inteligente e virou o botão **Data** na sidebar, com uma linha por data de emissão presente na fila e a contagem do dia (`GET /separacao/queue-dates`) — o mesmo controle do posvenda. Escolher uma data manda `dateFrom = dateTo` em tudo (lote, produtos, picking). Filtro de data salvo por versão anterior como *janela* (`dateFrom ≠ dateTo`) é descartado no load: o seletor é de dia único e não teria como mostrá-la — ela ficaria filtrando a fila sem aparecer em lugar nenhum.
+**Seletor "Data".** A janela de data saiu do Filtro Inteligente e virou o botão **Data** na sidebar, com uma linha por data de emissão presente na fila e a contagem do dia (`GET /separacao/queue-dates`) — o mesmo controle do posvenda. Escolher uma data manda `dateFrom = dateTo` em tudo (lote, produtos, picking). Filtro de data salvo por versão anterior como *janela* (`dateFrom ≠ dateTo`) é descartado no load: o seletor é de dia único e não teria como mostrá-la — ela ficaria filtrando a fila sem aparecer em lugar nenhum. O `queue-dates` só
+enumera a fila `ready` **sem dono**, então o menu soma a ela as datas do LOTE
+da operadora (já em memória): com um filtro de produto ativo o `claimLote` puxa
+pro lote dela justamente o que casa, a fila que sobra pode não ter mais nenhum
+dia daquele produto, e o menu vinha só com "Todos (0)" — nada pra clicar
+(28/08). Somar não conta duas vezes: o lote dela já saiu da fila.
 
 **Picking Geral.** O botão na sidebar abre o agregado da fila (`GET /separacao/queue-products`, agora com `resumo`): uma seção por tamanho com SKU / Produto / Qtd, e os totais "N produtos • N itens • N pedidos". Serve nas duas filas — no misto os itens vêm de tamanhos variados e as seções aparecem todas. **Imprimir Tudo** e **Imprimir `<tamanho>`** geram o PDF (`src/lib/pickingPdf.ts`, jsPDF) e mandam pelo caminho **silencioso** do app (`src/lib/printer.ts` → SumatraPDF), o mesmo da etiqueta J&T e da DANFE; `window.print()` dentro do WebView abriria um diálogo do Windows, que é justamente o que a mesa não tem como responder. (A folha saía em A4 na impressora padrão até a 0.9.5 — ver abaixo.)
 
@@ -207,13 +212,26 @@ operadora segurando os 10: a segunda a entrar sai com 5. Quem perdeu pedidos
 recebe o `queue.changed` e o app re-busca o lote; como a resposta do
 `POST /separacao/lote` é o retrato inteiro, a sidebar encolhe sozinha.
 
-**`POST /separacao/:id/iniciar`** é o que protege a bancada: ao ABRIR um card
-pra conferir, o app carimba o pedido no servidor e ele deixa de ser realocável.
-A chamada é uma por pedido, best-effort (falha de rede não trava nada, e o app
-tenta de novo quando a janela volta ao foco) e degrada em silêncio num Nexus
-sem a rota. Se ainda assim o pedido da mesa sumir da resposta do lote, a tela
-avisa *"Este pedido foi redistribuído para outra estação"* e volta pro lote —
-ela nunca fica conferindo um pedido que o `complete` recusaria com 409.
+**`POST /separacao/:id/iniciar`** é o que protege a bancada: o pedido carimbado
+deixa de ser realocável. O carimbo sai na **primeira peça lida** do pedido
+(28/08), não ao abrir o card. A chamada é uma por pedido, best-effort (falha de
+rede não trava nada, e o app tenta de novo quando a janela volta ao foco, para
+pedido com leitura) e degrada em silêncio num Nexus sem a rota. Se ainda assim
+o pedido da mesa sumir da resposta do lote, a tela avisa *"Este pedido foi
+redistribuído para outra estação"* e volta pro lote — ela nunca fica conferindo
+um pedido que o `complete` recusaria com 409.
+
+Marcar na ABERTURA prendia pedido que ela só tinha olhado: o mesmo
+`iniciado_em` é o que faz o `POST /separacao/lote` **manter** no lote o que está
+fora do recorte (ele só devolve à fila o que está fora do filtro e não foi
+iniciado nem teve lista impressa). Trocar de filtro/data acumulava na mesa
+pedidos de outro dia ou de outro produto, nunca conferidos e indisponíveis pras
+colegas — e o "Meu lote" do Picking Geral saía maior que o recorte. Com o
+carimbo na leitura, o que não bate com o filtro e não tem leitura volta pra
+fila sozinho. O pedido em conferência que ficar fora do recorte continua à
+vista: marcado na sidebar e numa seção **"Em conferência (fora do filtro)"** da
+folha de picking, nunca misturado com o recorte. Pedido com lista impressa
+(`lista_em`) segue preso, como antes.
 
 ### Sequência do lote, filtros na tela e trava do supervisor (0.9.5)
 
@@ -228,7 +246,8 @@ valendo.
 **Pular (P).** A peça ainda não chegou da dobra: o pedido vai pro FIM da ordem
 local e a mesa segue pro próximo. Ele **continua reservado** pra ela — pular não
 fala com o servidor (só o `iniciar` do pedido que entra na mesa) —, aparece na
-sidebar marcado como *pulado* e volta depois do último.
+sidebar marcado como *pulado* e volta depois do último. (O `iniciar` sai na
+primeira leitura, não ao entrar na mesa — ver acima.)
 
 **O filtro vale sobre o lote.** Desde 27/08 o `POST /separacao/lote` do Nexus
 devolve tudo o que já é dela no modo+tamanho, ignorando data/produto: os filtros

@@ -1,6 +1,7 @@
 import {
   useCallback,
   useEffect,
+  useMemo,
   useRef,
   useState,
   type CSSProperties,
@@ -163,6 +164,13 @@ function pedidoTemProduto(o: Order, termos: string[]): boolean {
   });
 }
 
+/** Só o recorte de PRODUTO — usado onde a DATA é o que está sendo enumerado. */
+function passaNosProdutos(o: Order, f: QueueFilters): boolean {
+  if (f.includeProducts?.length && !pedidoTemProduto(o, f.includeProducts)) return false;
+  if (f.excludeProducts?.length && pedidoTemProduto(o, f.excludeProducts)) return false;
+  return true;
+}
+
 /** O pedido passa pelos filtros ATIVOS (data de emissão + inclui/exclui produto). */
 function passaNosFiltros(o: Order, f: QueueFilters): boolean {
   if (f.dateFrom || f.dateTo) {
@@ -173,9 +181,50 @@ function passaNosFiltros(o: Order, f: QueueFilters): boolean {
     if (f.dateFrom && dia < f.dateFrom) return false;
     if (f.dateTo && dia > f.dateTo) return false;
   }
-  if (f.includeProducts?.length && !pedidoTemProduto(o, f.includeProducts)) return false;
-  if (f.excludeProducts?.length && pedidoTemProduto(o, f.excludeProducts)) return false;
-  return true;
+  return passaNosProdutos(o, f);
+}
+
+/**
+ * Contagem por dia de emissão de uma lista de pedidos, no MESMO shape que o
+ * `/separacao/queue-dates` devolve — é o que deixa o seletor "Data" somar a
+ * fila (servidor) com o lote dela (memória). Só o filtro de PRODUTO entra: a
+ * data é o que está sendo enumerado.
+ */
+function datasDoLote(lote: Order[], f: QueueFilters): QueueDatesResponse {
+  const porDia = new Map<string, number>();
+  let total = 0;
+  let semData = 0;
+  for (const o of lote) {
+    if (!passaNosProdutos(o, f)) continue;
+    total += 1;
+    const dia = diaDeEmissao(o);
+    if (!dia) semData += 1;
+    else porDia.set(dia, (porDia.get(dia) ?? 0) + 1);
+  }
+  return { dates: ordenarDatas(porDia), total, semData };
+}
+
+/**
+ * Fila (servidor) + lote dela (memória), somados por dia. NÃO há dupla
+ * contagem: o `queue-dates` só enxerga pedido `ready` SEM DONO, e o lote dela
+ * já saiu da fila (`claimed_by` preenchido) quando o `claimLote` respondeu.
+ */
+function uniaoDeDatas(fila: QueueDatesResponse | null, lote: QueueDatesResponse): QueueDatesResponse {
+  const porDia = new Map<string, number>();
+  for (const d of fila?.dates ?? []) porDia.set(d.date, (porDia.get(d.date) ?? 0) + d.count);
+  for (const d of lote.dates) porDia.set(d.date, (porDia.get(d.date) ?? 0) + d.count);
+  return {
+    dates: ordenarDatas(porDia),
+    total: (fila?.total ?? 0) + lote.total,
+    semData: (fila?.semData ?? 0) + lote.semData,
+  };
+}
+
+/** Dias ASC — a mesma ordem que o servidor devolve (mais antigo primeiro). */
+function ordenarDatas(porDia: Map<string, number>): { date: string; count: number }[] {
+  return [...porDia.entries()]
+    .map(([date, count]) => ({ date, count }))
+    .sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0));
 }
 
 /**
@@ -528,14 +577,22 @@ export function SeparacaoRunner({
   }, [puxarLote]);
 
   /**
-   * Avisa o servidor que ela ABRIU o pedido pra conferir. É o que impede a
-   * redistribuição de tirar da mesa dela um pedido cujas peças já estão na
-   * bancada: o `POST /separacao/lote` de outra estação só pode levar pedido
-   * SEM `iniciado_em`.
+   * Avisa o servidor que a conferência deste pedido COMEÇOU
+   * (`orders.iniciado_em`). É o que impede a redistribuição de tirar da mesa
+   * dela um pedido cujas peças já estão na bancada: o `POST /separacao/lote`
+   * de outra estação só pode levar pedido SEM `iniciado_em`.
    *
-   * Uma vez por pedido (o `Set` evita repetir a cada render), best-effort —
-   * falha de rede não trava a conferência, e o id sai do `Set` pra tentativa
-   * acontecer de novo quando a janela voltar ao foco.
+   * Chamado na PRIMEIRA LEITURA VÁLIDA do pedido, nunca ao abrir o card
+   * (28/08). Marcar na abertura prendia com ela qualquer pedido em que ela só
+   * passou o olho: o mesmo `iniciado_em` também é o que faz o servidor MANTER
+   * o pedido no lote quando ela troca o filtro/a data (`lote()` só devolve à
+   * fila o que está fora do recorte E não foi iniciado nem teve lista
+   * impressa). Resultado em campo: a mesa acumulava pedidos de outro dia/
+   * produto que ela nunca tinha conferido e que ninguém mais podia pegar.
+   *
+   * Uma vez por pedido (o `Set` evita repetir), best-effort — falha de rede
+   * não trava a conferência, e o id sai do `Set` pra tentativa acontecer de
+   * novo na leitura seguinte ou quando a janela voltar ao foco.
    */
   const marcarIniciado = useCallback((orderId: string) => {
     if (iniciadosRef.current.has(orderId)) return;
@@ -545,21 +602,23 @@ export function SeparacaoRunner({
     });
   }, []);
 
-  useEffect(() => {
-    if (!order) return;
-    marcarIniciado(order.id);
-  }, [order, marcarIniciado]);
+  /** O pedido já tem ao menos uma peça lida nesta sessão de conferência. */
+  const temLeituraDe = useCallback(
+    (ord: Order) => ord.items.some((it) => (progressRef.current.get(it.id)?.count ?? 0) > 0),
+    [],
+  );
 
-  // Retentativa no foco: se a marca não subiu (rede caiu), o pedido da mesa
-  // fica exposto à redistribuição até a próxima chance.
+  // Retentativa no foco: se a marca não subiu (rede caiu), o pedido que ela
+  // ESTÁ conferindo fica exposto à redistribuição até a próxima chance. Só
+  // vale pra pedido com leitura — sem leitura não há nada a proteger.
   useEffect(() => {
     const aoFocar = () => {
       const ord = orderRef.current;
-      if (ord) marcarIniciado(ord.id);
+      if (ord && temLeituraDe(ord)) marcarIniciado(ord.id);
     };
     window.addEventListener("focus", aoFocar);
     return () => window.removeEventListener("focus", aoFocar);
-  }, [marcarIniciado]);
+  }, [marcarIniciado, temLeituraDe]);
 
   const allDone = useCallback((ord: Order): boolean => {
     const prog = progressRef.current;
@@ -893,6 +952,9 @@ export function SeparacaoRunner({
           // Uma tag por unidade lida (o nexus valida rfidTags.length vs grade).
           prog.epcs.push(epcU);
           progressRef.current.set(item.id, prog);
+          // PRIMEIRA leitura válida = a conferência começou de verdade. É aqui
+          // (e só aqui) que o pedido vira `iniciado_em` no servidor.
+          marcarIniciado(ord.id);
           pushLog({
             epc: epcU,
             desc: [look!.name ?? item.nome, look!.size, look!.ean13].filter(Boolean).join(" · "),
@@ -1106,6 +1168,17 @@ export function SeparacaoRunner({
    */
   const visiveis = loteVisivel(lote, pulados, filters);
   const ocultos = lote.length - visiveis.length;
+  /**
+   * O pedido da MESA quando ele ficou FORA do recorte: com leitura começada,
+   * `aplicarFiltros` o mantém na mesa (jogar fora a conferência dela seria
+   * pior) e o servidor o mantém no lote (`iniciado_em`). Ele some da lista
+   * filtrada, mas não pode sumir da vista dela — aparece à parte na sidebar e
+   * numa seção própria da folha de picking, nunca misturado com o recorte.
+   */
+  const emConferenciaForaDoFiltro =
+    order && !passaNosFiltros(order, filters) && lote.some((o) => o.id === order.id)
+      ? order
+      : null;
   sequenciaRef.current = visiveis.map((o) => o.id);
   // A DATA conta como filtro (27/08): ela sobrevive à troca de fila (fica no
   // localStorage da estação) e, quando ficava fora desta conta, a operadora
@@ -1144,6 +1217,23 @@ export function SeparacaoRunner({
 
   /** Data de emissão escolhida no seletor (dia único) — null = todas. */
   const dataSel = filters.dateFrom && filters.dateFrom === filters.dateTo ? filters.dateFrom : null;
+  /**
+   * Datas do LOTE DELA pro seletor "Data" (relato de campo de 28/08: com um
+   * filtro de produto ativo o seletor não deixava escolher a data; na ordem
+   * inversa — data antes do filtro — funcionava).
+   *
+   * O `/separacao/queue-dates` enumera só a fila `ready` SEM DONO. Quando ela
+   * aplica um filtro de produto, o `claimLote` que vem junto puxa pro lote dela
+   * exatamente os pedidos que casam — eles saem da fila, e a fila que sobra
+   * pode não ter mais nenhum dia daquele produto. O menu vinha então só com
+   * "Todos (0)" ou com dias que não são os do lote na frente dela: nada pra
+   * clicar. Sem filtro de produto a fila continua cheia, e por isso a ordem
+   * inversa nunca falhou.
+   *
+   * O lote dela é a outra metade do que ela pode recortar, e já está em
+   * memória — o seletor passa a somar as duas origens.
+   */
+  const datasDoLoteDela = useMemo(() => datasDoLote(lote, filters), [lote, filters]);
   const escolherData = (d: string | null) =>
     aplicarFiltros({ ...filters, dateFrom: d ?? undefined, dateTo: d ?? undefined });
 
@@ -1244,6 +1334,8 @@ export function SeparacaoRunner({
           atualId={order?.id ?? null}
           filters={filters}
           data={dataSel}
+          datasDoLote={datasDoLoteDela}
+          emConferencia={emConferenciaForaDoFiltro}
           onSelecionar={selecionarPedido}
           onEscolherData={escolherData}
           onPickingGeral={() => setPickingOpen(true)}
@@ -1321,6 +1413,7 @@ export function SeparacaoRunner({
           data={dataSel}
           filters={filters}
           lote={visiveis}
+          emConferencia={emConferenciaForaDoFiltro}
           operadora={operadora}
           onListaImpressa={marcarLotePresoLocalmente}
           onClose={() => setPickingOpen(false)}
@@ -1465,6 +1558,8 @@ function LoteSidebar({
   atualId,
   filters,
   data,
+  datasDoLote,
+  emConferencia,
   onSelecionar,
   onEscolherData,
   onPickingGeral,
@@ -1480,6 +1575,10 @@ function LoteSidebar({
   atualId: string | null;
   filters: QueueFilters;
   data: string | null;
+  /** Datas do lote DELA (o `queue-dates` só enxerga a fila sem dono). */
+  datasDoLote: QueueDatesResponse;
+  /** Pedido da mesa que ficou fora do recorte — mostrado à parte, no topo. */
+  emConferencia: Order | null;
   onSelecionar: (o: Order) => void;
   onEscolherData: (d: string | null) => void;
   onPickingGeral: () => void;
@@ -1515,7 +1614,13 @@ function LoteSidebar({
           >
             🖨 Picking Geral
           </button>
-          <DataMenu queue={queue} filters={filters} valor={data} onEscolher={onEscolherData} />
+          <DataMenu
+            queue={queue}
+            filters={filters}
+            doLote={datasDoLote}
+            valor={data}
+            onEscolher={onEscolherData}
+          />
         </div>
       </div>
       <input
@@ -1531,6 +1636,15 @@ function LoteSidebar({
           : "Estes pedidos são só seus. Clique pra escolher qual vem agora, ou aperte P pra pular o da mesa."}
       </span>
       <div className="thin-scroll" style={sidebarList}>
+        {/* O pedido em conferência que saiu do recorte: fica à parte, com o
+            motivo à vista. Antes ele simplesmente sumia da coluna enquanto
+            continuava na mesa — a operadora via um pedido que "não existia". */}
+        {emConferencia && (
+          <div style={cardSlot}>
+            <span style={foraDoFiltroChip}>em conferência · fora do filtro</span>
+            <QueueCard item={queueItemFromOrder(emConferencia, 0)} pinned />
+          </div>
+        )}
         {/* `cardSlot` liga `content-visibility: auto`: com 50 mistos na coluna
             (Black Friday), o navegador pula a renderização do que está fora da
             viewport em vez de montar 50 cards com 150 thumbnails. Sem cálculo
@@ -1597,11 +1711,14 @@ function casaBusca(o: Order, termo: string): boolean {
 function DataMenu({
   queue,
   filters,
+  doLote,
   valor,
   onEscolher,
 }: {
   queue: { mode: SeparationMode; size: string; sizes: string[] };
   filters: QueueFilters;
+  /** Datas do lote DELA — ver `datasDoLoteDela` em `SeparacaoRunner`. */
+  doLote: QueueDatesResponse;
   valor: string | null;
   onEscolher: (d: string | null) => void;
 }) {
@@ -1647,6 +1764,11 @@ function DataMenu({
     setAberto(false);
   };
 
+  // O que a operadora pode recortar = fila sem dono (servidor) + lote dela.
+  // Enquanto o fetch não volta já dá pra clicar nos dias do lote.
+  const datas = useMemo(() => uniaoDeDatas(dados, doLote), [dados, doLote]);
+  const temContagem = dados !== null || doLote.total > 0;
+
   return (
     <div style={dataWrap}>
       <button style={valor ? dataBtnOn : dataBtn} onClick={() => setAberto((v) => !v)}>
@@ -1658,15 +1780,17 @@ function DataMenu({
           <div className="thin-scroll" style={dataMenu}>
             <button style={valor === null ? dataItemOn : dataItem} onClick={() => escolher(null)}>
               <span style={dataItemLabel}>Todos</span>
-              <span style={dataItemCount}>{dados ? `(${dados.total})` : ""}</span>
+              <span style={dataItemCount}>{temContagem ? `(${datas.total})` : ""}</span>
             </button>
-            {dados === null && <span style={dataAviso}>Carregando datas…</span>}
+            {dados === null && datas.dates.length === 0 && (
+              <span style={dataAviso}>Carregando datas…</span>
+            )}
             {indisponivel && (
               <span style={dataAviso}>
                 O servidor ainda não separa a fila por data (aguardando atualização do nexus).
               </span>
             )}
-            {dados?.dates.map((d) => (
+            {datas.dates.map((d) => (
               <button
                 key={d.date}
                 style={valor === d.date ? dataItemOn : dataItem}
@@ -1676,9 +1800,9 @@ function DataMenu({
                 <span style={dataItemCount}>({d.count})</span>
               </button>
             ))}
-            {dados !== null && dados.semData > 0 && (
+            {dados !== null && datas.semData > 0 && (
               <span style={dataAviso}>
-                {dados.semData} sem data de emissão — só aparecem em "Todos".
+                {datas.semData} sem data de emissão — só aparecem em "Todos".
               </span>
             )}
           </div>
@@ -2269,6 +2393,24 @@ const sidebarFooter: CSSProperties = {
 };
 
 // --- Seletor "Data" (dropdown com contagem por dia de emissão) ---
+
+/** Marca do pedido que continua na mesa mesmo fora do recorte. */
+const foraDoFiltroChip: CSSProperties = {
+  position: "absolute",
+  top: 4,
+  left: 6,
+  zIndex: 2,
+  fontFamily: "var(--font-mono)",
+  fontSize: 9,
+  fontWeight: 800,
+  letterSpacing: 0.4,
+  textTransform: "uppercase",
+  padding: "1px 6px",
+  borderRadius: 999,
+  background: "var(--warning-bg)",
+  color: "var(--warning-text)",
+  pointerEvents: "none",
+};
 
 const dataWrap: CSSProperties = { position: "relative", flexShrink: 0 };
 
