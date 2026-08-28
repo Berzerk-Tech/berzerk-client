@@ -35,8 +35,17 @@ O que importa pra Expedição:
   (`Order.rfidTags`, unicidade global — uma tag só num pedido) e move o pedido
   pra **`awaiting_pickup`**.
 - **A Expedição consome isso:** lê EPCs na mesa → acha o pedido `awaiting_pickup`
-  cujo `rfidTags` contém aqueles EPCs → confere que TODAS as tags do pedido
-  foram lidas → imprime → marca `shipped`.
+  cujo `rfidTags` contém aqueles EPCs → confere → imprime → marca `shipped`.
+- **A conferência da mesa não é só `rfidTags`** (`src/lib/conferenciaExpedicao.ts`).
+  Pedido separado no LEGADO chega pelo espelho com o que o legado gravou, que
+  pode ser MENOS de uma tag por peça — o #862169 (28/08) tinha 10 itens
+  "Oversized - Surpresa - <tam>" e UMA tag em `rfid_tags`, e a mesa contava 1
+  peça. O pedido fecha quando (a) todas as `rfidTags` gravadas foram lidas E
+  (b) as peças lidas (EPCs distintos) alcançam `sum(quantidade)` da grade.
+  O casamento tag×item só desenha a grade: produto real por GTIN/SKU e, depois,
+  qualquer peça real cobrindo um slot "Surpresa" (o que a Separação faz em
+  `surpresaAceita`). O `ship` continua mandando as tags lidas — o servidor
+  valida a parte (a) por conta dele.
 
 ---
 
