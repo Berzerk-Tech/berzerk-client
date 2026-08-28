@@ -1,6 +1,6 @@
 [package]
 name = "berzerk-client"
-version = "0.9.11"
+version = "0.9.12"
 description = "Berzerk Client — estação industrial de etiquetagem e expedição"
 authors = ["Berzerk Tech"]
 edition = "2021"
