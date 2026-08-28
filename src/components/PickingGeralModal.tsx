@@ -40,7 +40,12 @@ type Secao = {
   produtos: QueueProduct[];
   itens: number;
   pedidos: number;
+  /** Rótulo quando a seção não é um tamanho (ex.: o pedido em conferência). */
+  rotulo?: string;
 };
+
+/** Seção do pedido que continua na mesa mesmo fora do recorte (ver `Props`). */
+const FORA_DO_FILTRO = "Em conferência (fora do filtro)";
 
 /** De onde sai o agregado: o LOTE dela (padrão) ou a fila inteira. */
 type Escopo = "lote" | "fila";
@@ -51,8 +56,16 @@ type Props = {
   data: string | null;
   /** Filtros de produto ativos — o picking mostra o que a fila mostra. */
   filters: QueueFilters;
-  /** O LOTE da operadora — a folha que ela leva pra prateleira sai DAQUI. */
+  /** O LOTE da operadora — a folha que ela leva pra prateleira sai DAQUI.
+   *  JÁ recortado por produto E por data, igual à sidebar. */
   lote: Order[];
+  /**
+   * Pedido que ela está conferindo e que ficou FORA do recorte (tem leitura,
+   * então não sai da mesa nem do lote no servidor). Sai numa seção própria da
+   * folha: some dela seria esconder peça que está na bancada, e misturá-la com
+   * o recorte faria "Meu lote" contar o que o filtro dizia ter tirado.
+   */
+  emConferencia?: Order | null;
   /** Primeiro nome de quem está operando (título da folha). */
   operadora: string;
   /** Avisa o runner que a lista do lote foi impressa (prende os pedidos). */
@@ -117,6 +130,7 @@ export function PickingGeralModal({
   data,
   filters,
   lote,
+  emConferencia,
   operadora,
   onListaImpressa,
   onClose,
@@ -216,6 +230,22 @@ export function PickingGeralModal({
     });
   }, [products, filters, bancada, queue.sizes]);
 
+  // Seção à parte do pedido em conferência fora do recorte: só no escopo
+  // LOTE (na fila inteira ele nem é dela) e sem passar pelo filtro de produto
+  // — é justamente o que o filtro tirou que precisa aparecer aqui.
+  const secaoEmConferencia = useMemo<Secao | null>(() => {
+    if (escopo !== "lote" || !emConferencia) return null;
+    const produtos = agregarLote([emConferencia], queue.mode);
+    if (produtos.length === 0) return null;
+    return {
+      tamanho: FORA_DO_FILTRO,
+      rotulo: FORA_DO_FILTRO,
+      produtos: [...produtos].sort((a, b) => b.quantidade - a.quantidade),
+      itens: produtos.reduce((a, p) => a + p.quantidade, 0),
+      pedidos: 1,
+    };
+  }, [escopo, emConferencia, queue.mode]);
+
   const secoes = useMemo<Secao[]>(() => {
     const mapa = new Map<string, QueueProduct[]>();
     for (const p of visiveis) {
@@ -242,10 +272,16 @@ export function PickingGeralModal({
       .sort((a, b) => ordemDe(a.tamanho) - ordemDe(b.tamanho) || a.tamanho.localeCompare(b.tamanho));
   }, [visiveis]);
 
+  /** O que a tela lista e o que a impressão manda: recorte + fora do filtro. */
+  const secoesVisiveis = useMemo<Secao[]>(
+    () => (secaoEmConferencia ? [...secoes, secaoEmConferencia] : secoes),
+    [secoes, secaoEmConferencia],
+  );
+
   // Totais: os da API quando vierem (fila inteira), senão recalculados aqui.
   // Filtro de produto ou recorte da bancada ⇒ o resumo da API conta demais.
   const filtrando = (filters.includeProducts?.length ?? 0) + (filters.excludeProducts?.length ?? 0) > 0;
-  const recortando = filtrando || bancada !== null;
+  const recortando = filtrando || bancada !== null || secaoEmConferencia !== null;
   const total = useMemo(() => {
     if (resumoApi && !recortando) return resumoApi;
     const ids = new Set<string>();
@@ -254,8 +290,16 @@ export function PickingGeralModal({
       itens += p.quantidade;
       for (const id of p.orderIds) ids.add(id);
     }
-    return { produtos: visiveis.length, itens, pedidos: ids.size };
-  }, [resumoApi, recortando, visiveis]);
+    if (secaoEmConferencia) {
+      itens += secaoEmConferencia.itens;
+      ids.add("em-conferencia");
+    }
+    return {
+      produtos: visiveis.length + (secaoEmConferencia?.produtos.length ?? 0),
+      itens,
+      pedidos: ids.size,
+    };
+  }, [resumoApi, recortando, visiveis, secaoEmConferencia]);
 
   const dataLabel = data ? `emissão ${fmtData(data)}` : "todas as datas";
   const escopoLabel = escopo === "lote" ? "Meu lote" : "Fila inteira";
@@ -267,7 +311,7 @@ export function PickingGeralModal({
 
   const imprimir = async (apenas?: Secao) => {
     if (imprimindo) return;
-    const alvo = apenas ? [apenas] : secoes;
+    const alvo = apenas ? [apenas] : secoesVisiveis;
     if (alvo.length === 0) {
       setStatus("Nada pra imprimir nesta fila.");
       return;
@@ -354,7 +398,7 @@ export function PickingGeralModal({
 
         <div className="thin-scroll" style={corpo}>
           {products === null && !erro && <span style={vazio}>Carregando produtos da fila…</span>}
-          {products !== null && secoes.length === 0 && !erro && (
+          {products !== null && secoesVisiveis.length === 0 && !erro && (
             // "Vazio" quase nunca é a fila estar vazia: é filtro herdado. Os
             // filtros ficam no localStorage da ESTAÇÃO e sobrevivem à troca de
             // fila, então dá pra entrar na fila M com a data de ontem ainda
@@ -375,10 +419,10 @@ export function PickingGeralModal({
                   : "Nenhum produto nesta fila."}
             </span>
           )}
-          {secoes.map((s) => (
+          {secoesVisiveis.map((s) => (
             <section key={s.tamanho} style={secaoWrap}>
               <div style={secaoHeader}>
-                <span style={tamChip}>{s.tamanho}</span>
+                <span style={s.rotulo ? foraChip : tamChip}>{s.rotulo ?? s.tamanho}</span>
                 <span style={secaoResumo}>
                   {s.produtos.length} produtos • {s.itens} itens • {s.pedidos} pedidos
                 </span>
@@ -388,7 +432,7 @@ export function PickingGeralModal({
                   onClick={() => void imprimir(s)}
                   disabled={imprimindo}
                 >
-                  Imprimir {s.tamanho}
+                  Imprimir {s.rotulo ? "esta seção" : s.tamanho}
                 </button>
               </div>
               <div style={tabela}>
@@ -552,6 +596,16 @@ const tamChip: CSSProperties = {
   background: "var(--info-bg)",
   color: "var(--info-text)",
   border: "1px solid var(--info-border)",
+};
+
+/** Mesma forma do `tamChip`, cor de aviso: a seção não é um tamanho. */
+const foraChip: CSSProperties = {
+  ...tamChip,
+  fontFamily: "inherit",
+  fontSize: 12,
+  background: "var(--warning-bg)",
+  color: "var(--warning-text)",
+  border: "1px solid var(--warning-bg)",
 };
 
 const secaoResumo: CSSProperties = { fontSize: 12, color: "var(--text-secondary)" };
