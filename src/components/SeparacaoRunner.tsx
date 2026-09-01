@@ -26,6 +26,7 @@ import { subscribeQueueChanged } from "../lib/realtime";
 import { onBeforeForcedLogout } from "../lib/idleSession";
 import { onAntesDeBloquear } from "../lib/updateGate";
 import { SupervisorModal } from "./SupervisorModal";
+import { ConfirmDialog } from "./ConfirmDialog";
 import { PickingGeralModal } from "./PickingGeralModal";
 import { ItensFaltantesModal } from "./ItensFaltantesModal";
 import { nomeDaOperadora } from "./OperatorChip";
@@ -858,11 +859,10 @@ export function SeparacaoRunner({
       showNotice("Tire a peça sobressalente da mesa e reinicie a leitura (R) antes de concluir.");
       return;
     }
-    const faltam = faltantes().reduce((a, f) => a + f.faltam, 0);
-    if (
-      faltam > 0 &&
-      !window.confirm(`Faltam ${faltam} ${faltam === 1 ? "peça" : "peças"} — concluir mesmo assim?`)
-    ) {
+    const lista = faltantes();
+    if (lista.length > 0) {
+      // Diálogo in-app (não window.confirm — morre calado no WebView do Tauri).
+      setConfirmFaltam(lista);
       return;
     }
     void finish();
@@ -1056,6 +1056,9 @@ export function SeparacaoRunner({
   const [filtersOpen, setFiltersOpen] = useState(false);
   const [pickingOpen, setPickingOpen] = useState(false);
   const [faltantesOpen, setFaltantesOpen] = useState(false);
+  // Confirmação in-app do "concluir com faltantes" (K / botão) — substitui o
+  // window.confirm, que no WebView do Tauri volta false calado.
+  const [confirmFaltam, setConfirmFaltam] = useState<LiberacaoFaltante[] | null>(null);
 
   // Atalhos migrados do posvenda (as atendentes já têm decorado):
   //   K = concluir sem todas as peças lidas — pelo PIN do supervisor quando a
@@ -1069,7 +1072,12 @@ export function SeparacaoRunner({
   // MESMO pedido que estava sendo marcado como ruptura).
   useEffect(() => {
     const modalAberto =
-      supervisorOpen || historyOpen || pickingOpen || faltantesOpen || filtersOpen;
+      supervisorOpen ||
+      historyOpen ||
+      pickingOpen ||
+      faltantesOpen ||
+      filtersOpen ||
+      confirmFaltam !== null;
     const onKeyDown = (e: KeyboardEvent) => {
       if (e.ctrlKey || e.metaKey || e.altKey) return;
       const target = e.target as HTMLElement | null;
@@ -1112,6 +1120,7 @@ export function SeparacaoRunner({
     pickingOpen,
     faltantesOpen,
     filtersOpen,
+    confirmFaltam,
     restartLeitura,
     liberarOuConcluir,
     pularAtual,
@@ -1412,6 +1421,28 @@ export function SeparacaoRunner({
             setServerFaltantes(null);
           }}
           onConfirm={supervisorConfirm}
+        />
+      )}
+      {confirmFaltam !== null && (
+        <ConfirmDialog
+          tom="warning"
+          titulo={(() => {
+            const n = confirmFaltam.reduce((a, f) => a + f.faltam, 0);
+            return `Faltam ${n} ${n === 1 ? "peça" : "peças"} neste pedido`;
+          })()}
+          mensagem="Concluir a separação mesmo assim? As peças abaixo vão ficar como faltantes."
+          detalhes={confirmFaltam.map((f) => ({
+            label: f.nome ?? "Item",
+            meta: f.tamanho,
+            valor: `falta ${f.faltam}`,
+          }))}
+          confirmarLabel="Concluir com faltantes"
+          cancelarLabel="Voltar"
+          onCancel={() => setConfirmFaltam(null)}
+          onConfirm={() => {
+            setConfirmFaltam(null);
+            void finish();
+          }}
         />
       )}
       {historyOpen && <SeparacaoHistoryModal onClose={() => setHistoryOpen(false)} />}
