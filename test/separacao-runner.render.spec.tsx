@@ -4,7 +4,7 @@
 // "Out of Memory" antes de mostrar o pedido. A causa era um laço de render;
 // um teto de commits pega qualquer regressão do mesmo tipo.
 import { Profiler, StrictMode } from "react";
-import { act, cleanup, render, screen } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Order } from "../src/services/orders";
 
@@ -151,6 +151,49 @@ describe("SeparacaoRunner — entrar na fila", () => {
         expect(img.getAttribute("decoding")).toBe("async");
       }
     });
+  });
+
+  it("sidebar da fila: arrasta a borda, persiste e não colapsa", async () => {
+    await montarEContarCommits();
+    const alca = screen.getByRole("separator", { name: "Redimensionar fila" });
+    const aside = alca.parentElement as HTMLElement;
+    expect(aside.tagName).toBe("ASIDE");
+    expect(aside.style.width).toBe("350px");
+
+    // jsdom não tem PointerEvent nem pointer capture: MouseEvent carrega
+    // `button`/`clientX`, que é o que o hook lê; capture só não pode estourar.
+    if (!("PointerEvent" in window)) (window as any).PointerEvent = MouseEvent;
+    (alca as any).setPointerCapture = () => {};
+    (alca as any).hasPointerCapture = () => false;
+
+    // Puxa 80 px pra direita.
+    await act(async () => {
+      fireEvent.pointerDown(alca, { button: 0, clientX: 350, pointerId: 1 });
+      fireEvent.pointerMove(alca, { clientX: 430, pointerId: 1 });
+      fireEvent.pointerUp(alca, { clientX: 430, pointerId: 1 });
+    });
+    expect(aside.style.width).toBe("430px");
+    expect(localStorage.getItem("berzerk_separacao_sidebar_largura_v1")).toBe("430");
+
+    // Joga tudo pra esquerda: para no mínimo, não some (diferente do VS Code).
+    await act(async () => {
+      fireEvent.pointerDown(alca, { button: 0, clientX: 430, pointerId: 1 });
+      fireEvent.pointerMove(alca, { clientX: -2000, pointerId: 1 });
+      fireEvent.pointerUp(alca, { clientX: -2000, pointerId: 1 });
+    });
+    expect(aside.style.width).toBe("240px");
+
+    // Duplo clique volta ao padrão.
+    await act(async () => { fireEvent.doubleClick(alca); });
+    expect(aside.style.width).toBe("350px");
+    expect(localStorage.getItem("berzerk_separacao_sidebar_largura_v1")).toBe("350");
+  });
+
+  it("sidebar da fila: abre com a largura gravada na estação", async () => {
+    localStorage.setItem("berzerk_separacao_sidebar_largura_v1", "480");
+    await montarEContarCommits();
+    const alca = screen.getByRole("separator", { name: "Redimensionar fila" });
+    expect((alca.parentElement as HTMLElement).style.width).toBe("480px");
   });
 
   it("com data de ONTEM salva no localStorage: não entra em laço", async () => {
