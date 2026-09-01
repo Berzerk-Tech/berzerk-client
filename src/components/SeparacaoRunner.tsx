@@ -5,6 +5,7 @@ import {
   useRef,
   useState,
   type CSSProperties,
+  type PointerEvent as ReactPointerEvent,
   type ReactNode,
   type SVGProps,
 } from "react";
@@ -12,6 +13,12 @@ import { BackButton } from "./BackButton";
 import { AmbientBackground } from "./AmbientBackground";
 import { OperatorChip } from "./OperatorChip";
 import { FotoPeca } from "./FotoPeca";
+import {
+  LARGURA_PADRAO,
+  gravarLarguraSidebar,
+  lerLarguraSidebar,
+  limitarLargura,
+} from "../lib/sidebarLargura";
 import { useRfid, type ReadingSession } from "../contexts/RfidContext";
 import { beepError, beepOk } from "../lib/beep";
 import { LARGURA_CARD, imagemRedimensionada, miniatura } from "../lib/imagens";
@@ -1544,6 +1551,66 @@ function ReadLogPanel({
  * outra estação). O contador da fila (o que ainda não tem dono) abre o
  * Picking Geral, e o seletor "Data" recorta tudo por dia de emissão.
  */
+/**
+ * Sidebar redimensionável: a operadora arrasta a borda direita e a largura
+ * fica gravada na estação. Duplo clique na borda volta ao padrão. O fit dos
+ * cards de itens já observa a própria área (ResizeObserver), então ele se
+ * refaz sozinho enquanto ela arrasta.
+ */
+function useLarguraSidebar() {
+  const [largura, setLargura] = useState<number>(() => lerLarguraSidebar());
+  const [arrastando, setArrastando] = useState(false);
+  const [sobre, setSobre] = useState(false);
+  const arrasto = useRef<{ x0: number; w0: number } | null>(null);
+
+  const onPointerDown = (e: ReactPointerEvent<HTMLDivElement>) => {
+    if (e.button !== 0) return;
+    e.preventDefault();
+    e.currentTarget.setPointerCapture(e.pointerId);
+    arrasto.current = { x0: e.clientX, w0: largura };
+    setArrastando(true);
+  };
+  const onPointerMove = (e: ReactPointerEvent<HTMLDivElement>) => {
+    const a = arrasto.current;
+    if (!a) return;
+    setLargura(limitarLargura(a.w0 + (e.clientX - a.x0)));
+  };
+  const terminar = (e: ReactPointerEvent<HTMLDivElement>) => {
+    if (!arrasto.current) return;
+    arrasto.current = null;
+    setArrastando(false);
+    if (e.currentTarget.hasPointerCapture(e.pointerId)) {
+      e.currentTarget.releasePointerCapture(e.pointerId);
+    }
+    setLargura((w) => {
+      gravarLarguraSidebar(w);
+      return w;
+    });
+  };
+  const resetar = () => {
+    setLargura(LARGURA_PADRAO);
+    gravarLarguraSidebar(LARGURA_PADRAO);
+  };
+
+  const alca = (
+    <div
+      role="separator"
+      aria-orientation="vertical"
+      aria-label="Redimensionar fila"
+      title="Arraste pra redimensionar a fila · duplo clique volta ao padrão"
+      onPointerDown={onPointerDown}
+      onPointerMove={onPointerMove}
+      onPointerUp={terminar}
+      onPointerCancel={terminar}
+      onDoubleClick={resetar}
+      onPointerEnter={() => setSobre(true)}
+      onPointerLeave={() => setSobre(false)}
+      style={{ ...sidebarAlca, ...(arrastando || sobre ? sidebarAlcaAtiva : null) }}
+    />
+  );
+  return { largura, alca };
+}
+
 function LoteSidebar({
   queue,
   lote,
@@ -1584,9 +1651,11 @@ function LoteSidebar({
   // mistos) — ir ao servidor pra filtrar essa lista seria latência à toa.
   const visiveis = termo.length === 0 ? lote : lote.filter((o) => casaBusca(o, termo));
   const comLista = lote.filter((o) => !!o.listaEm).length;
+  const { largura, alca } = useLarguraSidebar();
 
   return (
-    <aside style={sidebar}>
+    <aside style={{ ...sidebar, width: largura }}>
+      {alca}
       <div style={sidebarHeader}>
         <div style={sidebarHeaderTop}>
           <span style={sidebarTitle}>
@@ -2325,14 +2394,33 @@ const main: CSSProperties = {
 // --- Sidebar da fila (réplica do painel esquerdo do posvenda) ---
 
 const sidebar: CSSProperties = {
-  // 300 → 350 (01/09): as separadoras pediram a fila um pouco mais larga.
-  width: 350,
+  // A largura vem do `useLarguraSidebar` (arrastável, gravada na estação).
+  position: "relative",
   flexShrink: 0,
   display: "flex",
   flexDirection: "column",
   borderRight: "1px solid var(--border)",
   background: "var(--bg-elevated)",
   minHeight: 0,
+};
+
+/** Faixa invisível sobre a borda direita da sidebar — a pegada do arrasto.
+ *  Um pouco pra fora da borda pra não roubar o clique do último pixel da lista. */
+const sidebarAlca: CSSProperties = {
+  position: "absolute",
+  top: 0,
+  bottom: 0,
+  right: -4,
+  width: 9,
+  cursor: "col-resize",
+  zIndex: 2,
+  touchAction: "none",
+};
+
+/** Como o VS Code: a linha da borda acende ao passar o mouse e enquanto arrasta. */
+const sidebarAlcaAtiva: CSSProperties = {
+  background: "var(--accent)",
+  opacity: 0.4,
 };
 
 const sidebarHeader: CSSProperties = {
