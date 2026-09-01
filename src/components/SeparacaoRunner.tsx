@@ -11,6 +11,7 @@ import {
 import { BackButton } from "./BackButton";
 import { AmbientBackground } from "./AmbientBackground";
 import { OperatorChip } from "./OperatorChip";
+import { FotoPeca } from "./FotoPeca";
 import { useRfid, type ReadingSession } from "../contexts/RfidContext";
 import { beepError, beepOk } from "../lib/beep";
 import { LARGURA_CARD, imagemRedimensionada, miniatura } from "../lib/imagens";
@@ -1486,13 +1487,7 @@ function ReadLogPanel({
           {extras.map((x) => (
             <div key={x.epc} style={extrasPinnedItem}>
               {x.imagemUrl && (
-                <img
-                  src={miniatura(x.imagemUrl) ?? undefined}
-                  alt=""
-                  style={extrasPinnedThumb}
-                  loading="lazy"
-                  decoding="async"
-                />
+                <FotoPeca src={miniatura(x.imagemUrl) ?? x.imagemUrl} style={extrasPinnedThumb} />
               )}
               <div style={extrasPinnedBody}>
                 <span style={extrasPinnedLabel}>{x.label}</span>
@@ -1878,14 +1873,7 @@ function QueueCard({
         {item.clienteNome && <span style={qCliente}>{item.clienteNome}</span>}
         <div style={qThumbRow}>
           {shownThumbs.map((u, i) => (
-            <img
-              key={i}
-              src={miniatura(u) ?? undefined}
-              alt=""
-              style={qThumb}
-              loading="lazy"
-              decoding="async"
-            />
+            <FotoPeca key={i} src={miniatura(u) ?? u} style={qThumb} />
           ))}
           {shownThumbs.length === 0 && <span style={qThumbEmpty}>{item.itemCount} itens</span>}
           {shownThumbs.length > 0 && extra > 0 && <span style={qThumbMore}>+{extra}</span>}
@@ -2192,12 +2180,9 @@ function ItemCard({
     >
       <div style={cardImageWrap}>
         {item.imagemUrl ? (
-          <img
-            src={imagemRedimensionada(item.imagemUrl, LARGURA_CARD) ?? undefined}
-            alt=""
+          <FotoPeca
+            src={imagemRedimensionada(item.imagemUrl, LARGURA_CARD) ?? item.imagemUrl}
             style={cardImage}
-            loading="lazy"
-            decoding="async"
           />
         ) : (
           <div style={cardImageEmpty}>
@@ -2340,7 +2325,8 @@ const main: CSSProperties = {
 // --- Sidebar da fila (réplica do painel esquerdo do posvenda) ---
 
 const sidebar: CSSProperties = {
-  width: 300,
+  // 300 → 350 (01/09): as separadoras pediram a fila um pouco mais larga.
+  width: 350,
   flexShrink: 0,
   display: "flex",
   flexDirection: "column",
@@ -2644,7 +2630,7 @@ const qThumb: CSSProperties = {
   width: 34,
   height: 34,
   borderRadius: 6,
-  objectFit: "cover",
+  flexShrink: 0,
   background: "var(--bg-input)",
   border: "1px solid var(--border)",
 };
@@ -2899,11 +2885,10 @@ const cardImageWrap: CSSProperties = {
   background: "var(--bg-elevated)",
 };
 
+/** Caixa da foto — o corte (cover / metade da composição) é do `FotoPeca`. */
 const cardImage: CSSProperties = {
   width: "100%",
   height: "100%",
-  objectFit: "cover",
-  display: "block",
 };
 
 const cardImageEmpty: CSSProperties = {
@@ -3272,7 +3257,6 @@ const extrasPinnedItem: CSSProperties = {
 const extrasPinnedThumb: CSSProperties = {
   width: 44,
   height: 44,
-  objectFit: "cover",
   borderRadius: 8,
   flexShrink: 0,
   border: "1px solid var(--danger-border)",
