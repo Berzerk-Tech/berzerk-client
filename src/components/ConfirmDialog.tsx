@@ -16,6 +16,8 @@ export type ConfirmDialogProps = {
   cancelarLabel?: string;
   /** `warning` = ação com consequência (concluir faltando peça): faixa e botão âmbar. */
   tom?: "neutro" | "warning";
+  /** Só um botão ("Entendi"): substitui `window.alert`. Esc e Enter fecham. */
+  apenasAviso?: boolean;
   onConfirm: () => void;
   onCancel: () => void;
 };
@@ -24,12 +26,14 @@ export function ConfirmDialog({
   titulo,
   mensagem,
   detalhes,
-  confirmarLabel = "Confirmar",
+  confirmarLabel,
   cancelarLabel = "Cancelar",
   tom = "neutro",
+  apenasAviso = false,
   onConfirm,
   onCancel,
 }: ConfirmDialogProps) {
+  const rotuloConfirmar = confirmarLabel ?? (apenasAviso ? "Entendi" : "Confirmar");
   const sheetRef = useRef<HTMLDivElement | null>(null);
   const confirmRef = useRef(onConfirm);
   const cancelRef = useRef(onCancel);
@@ -90,16 +94,18 @@ export function ConfirmDialog({
         )}
 
         <div style={row}>
-          <button type="button" style={btnGhost} onClick={onCancel}>
-            {cancelarLabel}
-            <kbd style={kbd}>Esc</kbd>
-          </button>
+          {!apenasAviso && (
+            <button type="button" style={btnGhost} onClick={onCancel}>
+              {cancelarLabel}
+              <kbd style={kbd}>Esc</kbd>
+            </button>
+          )}
           <button
             type="button"
             style={warning ? btnWarning : btnPrimary}
             onClick={onConfirm}
           >
-            {confirmarLabel}
+            {rotuloConfirmar}
             <kbd style={warning ? kbdOnWarning : kbdOnPrimary}>Enter</kbd>
           </button>
         </div>
