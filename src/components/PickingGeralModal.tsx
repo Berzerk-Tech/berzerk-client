@@ -43,6 +43,9 @@ type Secao = {
   pedidos: number;
   /** Rótulo quando a seção não é um tamanho (ex.: o pedido em conferência). */
   rotulo?: string;
+  /** Pedidos que contribuem pra esta seção — o que `marcarListaImpressa`
+   *  carimba quando ela imprime só ESTA seção (`escopo: 'secao'`). */
+  orderIds: string[];
 };
 
 /** Seção do pedido que continua na mesa mesmo fora do recorte (ver `Props`). */
@@ -69,8 +72,10 @@ type Props = {
   emConferencia?: Order | null;
   /** Primeiro nome de quem está operando (título da folha). */
   operadora: string;
-  /** Avisa o runner que a lista do lote foi impressa (prende os pedidos). */
-  onListaImpressa?: (orderIds: string[]) => void;
+  /** Avisa o runner que a lista do lote foi impressa (prende os pedidos).
+   *  `listaId` é o id de `separacao_listas` criado (`null` = nexus antigo,
+   *  sem o carimbo, ou nenhum pedido válido pra carimbar). */
+  onListaImpressa?: (orderIds: string[], listaId: string | null) => void;
   /** Zera data + filtros de produto da estação (o banner "recorte ativo"). */
   onLimparFiltros?: () => void;
   onClose: () => void;
@@ -195,6 +200,7 @@ export function PickingGeralModal({
       produtos: [...produtos].sort((a, b) => b.quantidade - a.quantidade),
       itens: produtos.reduce((a, p) => a + p.quantidade, 0),
       pedidos: 1,
+      orderIds: [emConferencia.id],
     };
   }, [escopo, emConferencia, queue.mode]);
 
@@ -219,6 +225,7 @@ export function PickingGeralModal({
           produtos: [...produtos].sort((a, b) => b.quantidade - a.quantidade),
           itens,
           pedidos: ids.size,
+          orderIds: [...ids],
         };
       })
       .sort((a, b) => ordemDe(a.tamanho) - ordemDe(b.tamanho) || a.tamanho.localeCompare(b.tamanho));
@@ -294,11 +301,28 @@ export function PickingGeralModal({
       // Lista do LOTE impressa ⇒ os pedidos ficam PRESOS na mesa dela: a coleta
       // dos mistos leva o dia e o janitor de 15 min devolveria tudo pra fila no
       // meio do caminho. Best-effort: falhar aqui não desfaz a impressão.
+      //
+      // `apenas` define o RECORTE que vira snapshot em `separacao_listas`:
+      // "Imprimir Tudo" carimba o lote inteiro (`escopo: 'lote'`, ids = todo o
+      // lote); "Imprimir esta seção" carimba só quem contribui pra ela
+      // (`escopo: 'secao'`) — antes disto o botão de seção também prendia o
+      // lote inteiro, presa maior do que a folha impressa na mão dela.
       let presos = 0;
       if (out.ok && escopo === "lote") {
-        const ids = lote.map((o) => o.id);
-        presos = (await marcarListaImpressa(ids).catch(() => ({ presos: 0 }))).presos;
-        if (presos > 0) onListaImpressa?.(ids);
+        const ids = apenas ? apenas.orderIds : lote.map((o) => o.id);
+        if (ids.length > 0) {
+          const resultado = await marcarListaImpressa({
+            orderIds: ids,
+            escopo: apenas ? "secao" : "lote",
+            filtros: filters,
+            secoes: alvo.map((s) => ({
+              tamanho: s.rotulo ?? s.tamanho,
+              linhas: s.produtos.map((p) => ({ produto: p.nome, qtd: p.quantidade })),
+            })),
+          }).catch(() => ({ presos: 0, listaId: null }));
+          presos = resultado.presos;
+          if (presos > 0) onListaImpressa?.(ids, resultado.listaId);
+        }
       }
       setStatus(
         out.ok

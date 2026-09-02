@@ -64,6 +64,10 @@ export type Order = {
   listaEm?: string | null;
   /** A lista é de um dia ANTERIOR — o app oferece Retomar/Devolver. */
   listaDeOutroDia?: boolean;
+  /** Id de `separacao_listas` gerado na última impressão que carimbou este
+   *  pedido. `null`/ausente = pedido preso sem lista associada (nexus antigo,
+   *  ou `marcarListaImpressa` que não devolveu `listaId`). */
+  listaId?: string | null;
 };
 
 export type ClaimResponse = { order: Order | null };
@@ -421,16 +425,30 @@ export function devolverLote(orderIds?: string[]): Promise<{ devolvidos: number 
  * de 15 min não devolve e o rebalanceamento não realoca —, porque a coleta dos
  * mistos leva o dia e a lista já está circulando no galpão.
  *
+ * `escopo`/`filtros`/`secoes` são ADITIVOS (02/09, incidente da lista sem
+ * volta): viram o snapshot em `separacao_listas`, pro pedido que sumir da mesa
+ * antes de embalar poder voltar pela lista impressa (`services/listas.ts`).
+ * Sem eles (ou em nexus antigo) o carimbo continua funcionando — só não fica
+ * lista pra recuperar depois.
+ *
  * Best-effort: nexus antigo (404) simplesmente não tem o carimbo, e o pior caso
  * é o comportamento de antes. Nunca vira erro na cara de quem já imprimiu.
  */
-export function marcarListaImpressa(orderIds: string[]): Promise<{ presos: number }> {
-  if (orderIds.length === 0) return Promise.resolve({ presos: 0 });
-  return apiRequest<{ presos: number }>("/separacao/lote/lista", {
+export function marcarListaImpressa(params: {
+  orderIds: string[];
+  /** O recorte que a operadora estava vendo ao imprimir. */
+  escopo?: "lote" | "secao";
+  /** Filtros ativos no app no momento da impressão. */
+  filtros?: unknown;
+  /** Documento agregado como impresso (picking geral), sem o base64 do PDF. */
+  secoes?: unknown;
+}): Promise<{ presos: number; listaId: string | null }> {
+  if (params.orderIds.length === 0) return Promise.resolve({ presos: 0, listaId: null });
+  return apiRequest<{ presos: number; listaId: string | null }>("/separacao/lote/lista", {
     method: "POST",
-    body: { orderIds },
+    body: params,
   }).catch((e: unknown) => {
-    if (e instanceof ApiError && e.status === 404) return { presos: 0 };
+    if (e instanceof ApiError && e.status === 404) return { presos: 0, listaId: null };
     throw e;
   });
 }
