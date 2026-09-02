@@ -23,6 +23,7 @@ import {
   fetchPendingBatches,
   fetchTodayHistory,
   markBatchRfidPrinted,
+  mensagemBloqueio,
   unmarkBatchRfidPrinted,
   resolveBatch,
   searchBatchesGlobal,
@@ -36,6 +37,7 @@ import { logAction } from "../services/actionLog";
 import { BatchCard, type CardState } from "./BatchCard";
 import { PrintConfirmModal, type PrintOverride } from "./PrintConfirmModal";
 import { BackButton } from "./BackButton";
+import { useDialogo } from "../lib/useDialogo";
 import { AmbientBackground } from "./AmbientBackground";
 
 const MAX_VISIBLE = 50;
@@ -140,6 +142,7 @@ export function BatchBrowser({
   operatorEmail: string;
   onBack: () => void;
 }) {
+  const { confirmar, avisar, dialogo } = useDialogo();
   const [batches, setBatches] = useState<ResolvedBatch[]>([]);
   const [history, setHistory] = useState<PrintedBatchEntry[]>([]);
   const [loading, setLoading] = useState(true);
@@ -353,7 +356,7 @@ export function BatchBrowser({
   // real. Recarrega pra refletir o estado do banco.
   const handleDiscardTest = useCallback(
     async (batchId: string, batchCode: string) => {
-      const ok = window.confirm(
+      const ok = await confirmar(
         `Descartar as etiquetas de TESTE do lote ${batchCode}?\n\n` +
           "Apaga só os EPCs gravados em impressões de teste. O lote continua " +
           "na Produção pra impressão real.",
@@ -373,7 +376,7 @@ export function BatchBrowser({
         });
       } catch (e) {
         console.error("[BatchBrowser] discardTestForBatch failed:", e);
-        window.alert(
+        void avisar(
           `Falha ao descartar teste de ${batchCode}: ${formatError(e)}`,
         );
       } finally {
@@ -546,7 +549,7 @@ export function BatchBrowser({
   // pode falhar depois sem feedback).
   const handleReprint = useCallback(
     async (entry: PrintedBatchEntry) => {
-      const ok = window.confirm(
+      const ok = await confirmar(
         `Voltar o lote ${entry.batch_code} pra fila de impressão?\n\n` +
           "Use quando a impressão física falhou. As etiquetas do job antigo " +
           "continuam no inventário; a movimentação só move o que a iTAG " +
@@ -561,7 +564,7 @@ export function BatchBrowser({
           details: { origem: "historico" },
         });
       } catch (e) {
-        window.alert(
+        void avisar(
           `Falha ao voltar ${entry.batch_code} pra fila: ${formatError(e)}`,
         );
       } finally {
@@ -583,7 +586,7 @@ export function BatchBrowser({
     try {
       setGlobalResults(await searchBatchesGlobal(term));
     } catch (e) {
-      window.alert(`Busca na base toda falhou: ${formatError(e)}`);
+      void avisar(`Busca na base toda falhou: ${formatError(e)}`);
     } finally {
       setSearchingGlobal(false);
     }
@@ -598,7 +601,7 @@ export function BatchBrowser({
       const statusLabel =
         RECEIPT_STATUS_LABEL[entry.batch.receiptStatus] ??
         entry.batch.receiptStatus;
-      const ok = window.confirm(
+      const ok = await confirmar(
         `Voltar o lote ${entry.batch.batch_code} pra fila de impressão?\n\n` +
           (inStage
             ? "Ele volta a aparecer na lista de Prontos pra imprimir."
@@ -625,7 +628,7 @@ export function BatchBrowser({
           ) ?? prev,
         );
       } catch (e) {
-        window.alert(
+        void avisar(
           `Falha ao voltar ${entry.batch.batch_code} pra fila: ${formatError(e)}`,
         );
       } finally {
@@ -645,16 +648,12 @@ export function BatchBrowser({
       try {
         const resolved = await resolveBatch(entry.batch);
         if (!resolved.isPrintable) {
-          window.alert(
-            `Lote ${entry.batch.batch_code} sem cobertura de EAN13 ` +
-              `(faltam: ${resolved.missingSizes.join(", ") || "todos"}). ` +
-              "Coordenador precisa cadastrar no catálogo do industrial.",
-          );
+          void avisar({ ...mensagemBloqueio(resolved), tom: "warning" });
           return;
         }
         setPendingConfirm(resolved);
       } catch (e) {
-        window.alert(`Falha ao preparar impressão: ${formatError(e)}`);
+        void avisar(`Falha ao preparar impressão: ${formatError(e)}`);
       } finally {
         setResolvingGlobal((s) => {
           const next = new Set(s);
@@ -698,10 +697,10 @@ export function BatchBrowser({
       if (movingJobs.has(job.id)) return;
       const config = getIprintConfig();
       if (!config.basicUser || !config.basicPass) {
-        window.alert("Credenciais iTAG não configuradas em Settings.");
+        void avisar("Credenciais iTAG não configuradas em Settings.");
         return;
       }
-      const ok = window.confirm(
+      const ok = await confirmar(
         `Movimentar ${entry.pendingCount} EPC(s) do lote ${job.batch_code} ` +
           `pra situação ${config.situacaoDestino}?\n\n` +
           `Empresa origem ${config.empresaOrigem} → destino ${config.empresaDestino}.`,
@@ -776,7 +775,7 @@ export function BatchBrowser({
         }
 
         if (pendingEpcs.length === 0) {
-          window.alert(
+          void avisar(
             `Nenhum EPC do lote ${job.batch_code} foi confirmado como impresso na iTAG. ` +
               "Verifique a impressão antes de movimentar.",
           );
@@ -821,7 +820,7 @@ export function BatchBrowser({
           jobId: job.id,
           details: { error: msg },
         });
-        window.alert(`Movimentação falhou: ${msg}`);
+        void avisar(`Movimentação falhou: ${msg}`);
       } finally {
         setMovingJobs((m) => {
           const next = new Map(m);
@@ -880,9 +879,9 @@ export function BatchBrowser({
     return "unknown";
   })();
 
-  const handleCancelJob = useCallback((job: RfidPrintJob) => {
+  const handleCancelJob = useCallback(async (job: RfidPrintJob) => {
     if (job.status === "imprimindo") {
-      const ok = window.confirm(
+      const ok = await confirmar(
         `Cancelar impressão de ${job.batch_code}?\n\n` +
           "A impressora RFID pode continuar imprimindo as etiquetas que já foram enviadas pra ela. " +
           "Use isso só pra remover da fila visual.",
@@ -1248,6 +1247,7 @@ export function BatchBrowser({
           onConfirm={confirmAndPrint}
         />
       )}
+      {dialogo}
     </div>
   );
 }

@@ -74,7 +74,41 @@ export type ResolvedBatch = {
   catalogColor: string | null;
   /** `null` quando imprime. */
   motivo: MotivoBloqueio | null;
+  /** A consulta ao Nexus falhou (rede, 5xx, 426): não é falta de EAN, é
+   *  falta de resposta — a mensagem pra operadora precisa dizer isso. */
+  erro?: string | null;
 };
+
+/**
+ * Por que este lote não imprime, em texto pra operadora — com o conserto e o
+ * dono certos (relato de 02/09: a caixa dizia "sem cobertura de EAN13" até
+ * quando o problema era vínculo, ou a API fora do ar).
+ */
+export function mensagemBloqueio(r: ResolvedBatch): { titulo: string; mensagem: string } {
+  const codigo = r.batch.batch_code;
+  if (r.erro) {
+    return {
+      titulo: `Não deu pra consultar o catálogo do lote ${codigo}`,
+      mensagem: `${r.erro}. Tente de novo em instantes; se persistir, avise a tecnologia.`,
+    };
+  }
+  const faltam = r.missingSizes.length ? r.missingSizes.join(", ") : "todos os tamanhos";
+  if (r.motivo === "sem_vinculo") {
+    return {
+      titulo: `Lote ${codigo} sem produto vinculado`,
+      mensagem:
+        "O lote não está ligado a nenhum produto do catálogo do Nexus, então não há EAN pra etiqueta. " +
+        "A coordenação precisa abrir o lote no Nexus e usar \"Vincular produto\".",
+    };
+  }
+  return {
+    titulo: `Lote ${codigo} sem EAN13 (${faltam})`,
+    mensagem:
+      `${r.catalogTitle ? `O produto "${r.catalogTitle}" está vinculado, mas` : "O produto vinculado"} ` +
+      `não tem EAN cadastrado pros tamanhos ${faltam}. ` +
+      "A coordenação precisa cadastrar os EANs no Catálogo do Nexus.",
+  };
+}
 
 export type PrintedBatchEntry = {
   id: string;
@@ -316,7 +350,7 @@ export async function resolveBatch(batch: ProductionBatch): Promise<ResolvedBatc
     };
   } catch (e) {
     console.warn("[batches] resolveBatch falhou para", batch.batch_code, e);
-    return vazio(null);
+    return { ...vazio(null), erro: e instanceof Error ? e.message : String(e) };
   }
 }
 
