@@ -23,6 +23,7 @@ import { useRfid, type ReadingSession } from "../contexts/RfidContext";
 import { beepError, beepOk } from "../lib/beep";
 import { LARGURA_CARD, imagemRedimensionada, miniatura } from "../lib/imagens";
 import { subscribeQueueChanged } from "../lib/realtime";
+import { itemParecidoDoPedido, itemSize } from "../lib/itemParecido";
 import { onBeforeForcedLogout } from "../lib/idleSession";
 import { onAntesDeBloquear } from "../lib/updateGate";
 import { SupervisorModal } from "./SupervisorModal";
@@ -56,29 +57,6 @@ import {
 } from "../services/orders";
 
 const SHADOW = import.meta.env.VITE_SEPARACAO_SHADOW === "true";
-
-/** Tamanhos conhecidos pra extrair do nome quando o item vem sem `tamanho`. */
-const KNOWN_SIZES = new Set([
-  "PP", "P", "M", "G", "GG", "XG", "XXG", "G1", "G2", "G3", "XGG",
-]);
-
-/**
- * Tamanho efetivo do item: o campo `tamanho` (normalizado), ou extraído do nome
- * ("Oversized - Leg Day - XG") — pedidos espelhados do legado chegam com
- * `tamanho` null e sem isso o agrupamento do misto quebra. Varre os segmentos
- * de trás pra frente porque o tamanho costuma ser o último ("… - M - Rosa" é a
- * exceção coberta).
- */
-function itemSize(it: OrderItem): string | null {
-  const direct = it.tamanho?.trim().toUpperCase();
-  if (direct) return direct;
-  if (!it.nome) return null;
-  const tokens = it.nome.split(/\s+[-–]\s+/).map((t) => t.trim().toUpperCase());
-  for (let i = tokens.length - 1; i >= 0; i--) {
-    if (KNOWN_SIZES.has(tokens[i])) return tokens[i];
-  }
-  return null;
-}
 
 /** Mesma normalização de GTIN do nexus: só dígitos, sem zeros à esquerda. */
 function normGtin(v: string | null | undefined): string | null {
@@ -305,6 +283,10 @@ type ExtraTag = {
   itemId?: string;
   /** Foto da peça (quando é excedente de item do pedido) — ajuda a achar na mesa. */
   imagemUrl?: string | null;
+  /** Só pra `kind === "alheia"`: nome do item do pedido mais PARECIDO com a
+   *  peça lida (mesmo tamanho, nome parecido — ver `itemParecidoDoPedido`),
+   *  pra operadora perceber "produto errado" em vez de "bug entre pedidos". */
+  parecidoNome?: string | null;
 };
 
 /** Entrada do console de leitura (o que o leitor viu e como resolvemos). */
@@ -982,14 +964,22 @@ export function SeparacaoRunner({
           if (look) {
             const desc = [look.name, look.size, look.ean13].filter(Boolean).join(" · ");
             // Excedente do próprio pedido (produto certo, unidade a mais) ou
-            // peça de outro pedido? Muda a mensagem E o card que fica vermelho.
+            // peça de outro produto? Muda a mensagem E o card que fica vermelho.
             const excedido = itemDoPedido(ord, look);
+            // Itens do pedido que ainda faltam — base pro diagnóstico de campo
+            // e pra heurística do "parecido" (só faz sentido comparar com o
+            // que falta, não com o que já foi conferido).
+            const faltam = ord.items.filter(
+              (it) => it.quantidade - (progressRef.current.get(it.id)?.count ?? 0) > 0,
+            );
+            const parecido = excedido ? null : itemParecidoDoPedido(faltam, look);
             extrasRef.current.set(epcU, {
               epc: epcU,
               label: desc || epcU,
               kind: excedido ? "excedente" : "alheia",
               itemId: excedido?.id,
               imagemUrl: excedido?.imagemUrl ?? null,
+              parecidoNome: parecido?.nome ?? null,
             });
             pushLog({ epc: epcU, desc: desc || "(sem descrição)", status: "extra" });
             if (excedido) {
@@ -999,8 +989,7 @@ export function SeparacaoRunner({
             } else {
               // Diagnóstico de campo: mostra os códigos que o pedido ainda espera
               // (ean/sku dos itens com saldo) pra divergência aparecer na hora.
-              const esperados = ord.items
-                .filter((it) => it.quantidade - (progressRef.current.get(it.id)?.count ?? 0) > 0)
+              const esperados = faltam
                 .map((it) => it.ean ?? it.sku ?? "?")
                 .slice(0, 5)
                 .join(", ");
@@ -1546,9 +1535,12 @@ function ReadLogPanel({
                   {x.kind === "excedente"
                     ? "unidade a MAIS deste pedido"
                     : x.kind === "alheia"
-                      ? "peça de OUTRO pedido"
+                      ? `Não é deste pedido — ${x.label} não está na lista`
                       : "tag não identificada"}
                 </span>
+                {x.kind === "alheia" && x.parecidoNome && (
+                  <span style={extrasPinnedSimilar}>O pedido pede: {x.parecidoNome}</span>
+                )}
                 <span style={logEpc}>{x.epc}</span>
               </div>
             </div>
@@ -3412,6 +3404,13 @@ const extrasPinnedKind: CSSProperties = {
   fontSize: 11,
   fontWeight: 700,
   color: "var(--danger-text)",
+};
+
+/** Linha "O pedido pede: ..." — pista do item parecido, sem competir com o
+ *  alerta principal acima. */
+const extrasPinnedSimilar: CSSProperties = {
+  fontSize: 11,
+  color: "var(--text-muted)",
 };
 
 const extrasPinnedHint: CSSProperties = {
