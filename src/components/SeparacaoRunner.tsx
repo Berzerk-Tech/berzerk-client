@@ -523,8 +523,15 @@ export function SeparacaoRunner({
         // O "próximo" percorre a lista VISÍVEL (ordem local + filtros), nunca a
         // resposta crua: o que está oculto pelo filtro não pode cair na mesa.
         const visiveisAgora = loteVisivel(orders, puladosRef.current, filtrosDaVez);
+        // Pedido da mesa que o filtro acabou de esconder só fica se JÁ tem
+        // leitura (a régua do "Meu lote honesto", 0.9.12). Sem leitura ele
+        // cede a mesa: o servidor continua devolvendo-o (é dela, só está
+        // oculto), e preservá-lo aqui o trazia de volta — relato de 02/09,
+        // "ao filtrar os pedidos não somem da tela".
+        const temLeitura = Array.from(progressRef.current.values()).some((pr) => pr.count > 0);
+        const mantemAtual = aindaMeu && (passaNosFiltros(aindaMeu, filtrosDaVez) || temLeitura);
         const proximo =
-          aindaMeu ??
+          (mantemAtual ? aindaMeu : undefined) ??
           candidatos.map((id) => visiveisAgora.find((o) => o.id === id)).find(Boolean) ??
           visiveisAgora[0] ??
           null;
@@ -1224,6 +1231,10 @@ export function SeparacaoRunner({
       if (!temLeitura && proximo) {
         resetLeitura();
         setOrder(proximo);
+        // A ref só sincroniza no próximo render; o `puxarLote` logo abaixo lê
+        // a ref AGORA, e com ela ainda no pedido antigo o "preservar atual"
+        // desfazia a troca.
+        orderRef.current = proximo;
         setPhase("separating");
       } else if (temLeitura) {
         showNotice("O pedido da mesa ficou fora do filtro. Conclua ou devolva antes de seguir.");
