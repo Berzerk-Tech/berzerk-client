@@ -14,8 +14,10 @@
 import { useEffect, useMemo, useState, type CSSProperties } from "react";
 import { ApiError } from "../lib/api";
 import { miniatura } from "../lib/imagens";
+import { agregarLote, mesclarProdutos } from "../lib/agregarLote";
 import {
   getQueueProducts,
+  type Order,
   type QueueFilters,
   type QueueProduct,
   type SeparationMode,
@@ -82,18 +84,21 @@ type Props = {
    *  `src/lib/filas.ts` e o comentário em `src/services/orders.ts`); sem ele
    *  a lista de produtos do filtro fica incompleta em filas P/XG. */
   queue?: { mode: SeparationMode; size: string; sizes?: string[] };
+  /** Lote da operadora (memória). O `queue-products` do nexus só enxerga a
+   *  FILA (pedidos sem dono); o que ela já puxou só aparece por aqui. */
+  lote?: Order[];
   onApply: (f: QueueFilters) => void;
   onClear: () => void;
   onClose: () => void;
 };
 
-export function PickingFiltersModal({ filters, queue, onApply, onClear, onClose }: Props) {
+export function PickingFiltersModal({ filters, queue, lote, onApply, onClear, onClose }: Props) {
   const [exclude, setExclude] = useState<string[]>(filters.excludeProducts ?? []);
   const [include, setInclude] = useState<string[]>(filters.includeProducts ?? []);
   const [aba, setAba] = useState<Aba>("exclusao");
   const [search, setSearch] = useState("");
   const [manual, setManual] = useState("");
-  const [products, setProducts] = useState<QueueProduct[] | null>(null);
+  const [daFila, setDaFila] = useState<QueueProduct[] | null>(null);
   const [prodErro, setProdErro] = useState<string | null>(null);
 
   // ESC fecha (as atendentes esperam isso do posvenda).
@@ -119,10 +124,10 @@ export function PickingFiltersModal({ filters, queue, onApply, onClear, onClose 
       dateFrom: dataSel,
       dateTo: dataSel,
     })
-      .then((d) => alive && setProducts(d.products))
+      .then((d) => alive && setDaFila(d.products))
       .catch((e) => {
         if (!alive) return;
-        setProducts([]);
+        setDaFila([]);
         setProdErro(
           e instanceof ApiError && e.status === 404
             ? "O servidor ainda não lista os produtos da fila (aguardando atualização do nexus) — dá pra filtrar digitando o nome abaixo."
@@ -135,6 +140,19 @@ export function PickingFiltersModal({ filters, queue, onApply, onClear, onClose 
       alive = false;
     };
   }, [queue, dataSel]);
+
+  // Fila (servidor) ∪ lote (memória). Enquanto a fila carrega, o lote já
+  // aparece — é o que está na mesa dela, e não depende de rede.
+  const doLote = useMemo(
+    () => (queue && lote?.length ? agregarLote(lote, queue.mode) : []),
+    [queue, lote],
+  );
+  const carregandoFila = !!queue && daFila === null && !prodErro;
+  const products = useMemo(() => {
+    if (!queue) return null;
+    if (daFila === null && doLote.length === 0) return null;
+    return mesclarProdutos(queue.mode, daFila ?? [], doLote);
+  }, [queue, daFila, doLote]);
 
   const selected = aba === "exclusao" ? exclude : include;
   const setSelected = aba === "exclusao" ? setExclude : setInclude;
@@ -234,14 +252,18 @@ export function PickingFiltersModal({ filters, queue, onApply, onClear, onClose 
 
         <div style={lista}>
           {prodErro && <div style={avisoBox}>{prodErro}</div>}
-          {!prodErro && products === null && <span style={vazio}>Carregando produtos da fila…</span>}
-          {!prodErro && products !== null && filtered.length === 0 && (
-            <span style={vazio}>Nenhum produto encontrado nesta fila.</span>
+          {carregandoFila && <span style={vazio}>Carregando produtos da fila…</span>}
+          {!carregandoFila && products !== null && filtered.length === 0 && (
+            <span style={vazio}>Nenhum produto encontrado nesta fila nem no seu lote.</span>
           )}
           {filtered.map((p) => {
             const marcado = selectedLower.has(p.nome.toLowerCase());
             return (
-              <button key={p.nome} style={marcado ? rowOn : row} onClick={() => toggle(p.nome)}>
+              <button
+                key={`${p.nome}|${p.tamanho ?? ""}|${p.ean ?? ""}`}
+                style={marcado ? rowOn : row}
+                onClick={() => toggle(p.nome)}
+              >
                 <span style={marcado ? checkOn : checkOff}>{marcado ? "✓" : ""}</span>
                 {p.imagemUrl ? (
                   <img
@@ -258,6 +280,11 @@ export function PickingFiltersModal({ filters, queue, onApply, onClear, onClose 
                   {p.nome}
                 </span>
                 {p.tamanho && <span style={tamChip}>{p.tamanho}</span>}
+                {p.noLote && (
+                  <span style={loteChip} title="Está num pedido do seu lote">
+                    no lote
+                  </span>
+                )}
                 <span style={qtdChip}>{p.quantidade}x</span>
                 <span style={pedChip}>
                   {p.pedidos} ped{p.pedidos === 1 ? "" : "s"}
@@ -554,6 +581,18 @@ const qtdChip: CSSProperties = {
   fontSize: 11,
   fontWeight: 700,
   color: "var(--text-secondary)",
+  flexShrink: 0,
+};
+
+const loteChip: CSSProperties = {
+  fontFamily: "var(--font-mono)",
+  fontSize: 10,
+  fontWeight: 700,
+  padding: "1px 8px",
+  borderRadius: 999,
+  background: "var(--success-bg)",
+  color: "var(--success-text)",
+  border: "1px solid var(--success-border)",
   flexShrink: 0,
 };
 
