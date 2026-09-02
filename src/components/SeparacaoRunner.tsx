@@ -32,6 +32,7 @@ import { ItensFaltantesModal } from "./ItensFaltantesModal";
 import { nomeDaOperadora } from "./OperatorChip";
 import { getSessaoSync } from "../lib/cognito";
 import { SeparacaoHistoryModal } from "./SeparacaoHistoryModal";
+import { ListasImpressasModal } from "./ListasImpressasModal";
 import { PickingFiltersModal, emptyFilters, loadFilters, saveFilters } from "./PickingFiltersModal";
 import { ApiError } from "../lib/api";
 import {
@@ -1060,6 +1061,7 @@ export function SeparacaoRunner({
   // global logo abaixo precisa deles — precisam existir ANTES do useEffect
   // que os lê no array de deps.
   const [historyOpen, setHistoryOpen] = useState(false);
+  const [listasOpen, setListasOpen] = useState(false);
   const [filtersOpen, setFiltersOpen] = useState(false);
   const [pickingOpen, setPickingOpen] = useState(false);
   const [faltantesOpen, setFaltantesOpen] = useState(false);
@@ -1081,6 +1083,7 @@ export function SeparacaoRunner({
     const modalAberto =
       supervisorOpen ||
       historyOpen ||
+      listasOpen ||
       pickingOpen ||
       faltantesOpen ||
       filtersOpen ||
@@ -1124,6 +1127,7 @@ export function SeparacaoRunner({
     completing,
     supervisorOpen,
     historyOpen,
+    listasOpen,
     pickingOpen,
     faltantesOpen,
     filtersOpen,
@@ -1266,15 +1270,15 @@ export function SeparacaoRunner({
     aplicarFiltros({ ...filters, dateFrom: d ?? undefined, dateTo: d ?? undefined });
 
   /**
-   * Carimba `listaEm` no lote EM MEMÓRIA depois que a folha foi impressa. O
-   * servidor já gravou; isto é só pra sidebar mostrar "lista impressa" na hora,
-   * sem esperar o próximo `puxarLote`.
+   * Carimba `listaEm`/`listaId` no lote EM MEMÓRIA depois que a folha foi
+   * impressa. O servidor já gravou; isto é só pra sidebar mostrar "lista
+   * impressa" na hora, sem esperar o próximo `puxarLote`.
    */
-  const marcarLotePresoLocalmente = useCallback((ids: string[]) => {
+  const marcarLotePresoLocalmente = useCallback((ids: string[], listaId: string | null) => {
     const alvo = new Set(ids);
     const agora = new Date().toISOString();
     setLote((atual) =>
-      atual.map((o) => (alvo.has(o.id) && !o.listaEm ? { ...o, listaEm: agora } : o)),
+      atual.map((o) => (alvo.has(o.id) && !o.listaEm ? { ...o, listaEm: agora, listaId } : o)),
     );
   }, []);
 
@@ -1306,6 +1310,9 @@ export function SeparacaoRunner({
         </button>
         <button style={topBarBtn} onClick={() => setHistoryOpen(true)}>
           🕐 Histórico
+        </button>
+        <button style={topBarBtn} onClick={() => setListasOpen(true)}>
+          📋 Listas impressas
         </button>
         <OperatorChip />
         <MesaStatus
@@ -1457,6 +1464,12 @@ export function SeparacaoRunner({
         />
       )}
       {historyOpen && <SeparacaoHistoryModal onClose={() => setHistoryOpen(false)} />}
+      {listasOpen && (
+        <ListasImpressasModal
+          onClose={() => setListasOpen(false)}
+          onRecuperado={() => void puxarLote()}
+        />
+      )}
       {pickingOpen && (
         <PickingGeralModal
           queue={queue}
