@@ -14,6 +14,7 @@
 import { useEffect, useMemo, useState, type CSSProperties } from "react";
 import { ApiError } from "../lib/api";
 import { SEM_TAMANHO, queueFor } from "../lib/filas";
+import { agregarLote } from "../lib/agregarLote";
 import { gerarPickingPdf, type PickingSecao } from "../lib/pickingPdf";
 import { printPdfBase64 } from "../lib/printer";
 import { getLabelPrinter } from "../services/printerConfig";
@@ -70,60 +71,10 @@ type Props = {
   operadora: string;
   /** Avisa o runner que a lista do lote foi impressa (prende os pedidos). */
   onListaImpressa?: (orderIds: string[]) => void;
+  /** Zera data + filtros de produto da estação (o banner "recorte ativo"). */
+  onLimparFiltros?: () => void;
   onClose: () => void;
 };
-
-/**
- * Agrega os itens do LOTE (já em memória — nenhuma ida à rede) na mesma forma
- * que `GET /separacao/queue-products` devolve: uma linha por (nome, tamanho,
- * ean) nos mistos, por nome nos puros.
- *
- * É este o agregado que a operadora precisa: o Picking Geral vinha somando a
- * FILA INTEIRA (637 pedidos) quando a folha que ela leva pra prateleira é a
- * dos 10 (ou 50) que estão na mesa dela.
- */
-function agregarLote(lote: Order[], mode: SeparationMode): QueueProduct[] {
-  const acc = new Map<
-    string,
-    { nome: string; tamanho: string | null; ean: string | null; imagemUrl: string | null; quantidade: number; orderIds: Set<string> }
-  >();
-  for (const pedido of lote) {
-    for (const it of pedido.items) {
-      const nome = it.nome?.trim();
-      if (!nome) continue;
-      const tamanho = it.tamanho?.trim().toUpperCase() || null;
-      const chave =
-        mode === "total" ? `${nome.toUpperCase()}|${tamanho ?? ""}|${it.ean ?? ""}` : nome.toUpperCase();
-      const linha = acc.get(chave);
-      if (linha) {
-        linha.quantidade += it.quantidade;
-        linha.orderIds.add(pedido.id);
-        if (!linha.ean && it.ean) linha.ean = it.ean;
-        if (!linha.imagemUrl && it.imagemUrl) linha.imagemUrl = it.imagemUrl;
-      } else {
-        acc.set(chave, {
-          nome,
-          tamanho,
-          ean: it.ean,
-          imagemUrl: it.imagemUrl,
-          quantidade: it.quantidade,
-          orderIds: new Set([pedido.id]),
-        });
-      }
-    }
-  }
-  return [...acc.values()]
-    .map((a) => ({
-      nome: a.nome,
-      tamanho: a.tamanho,
-      ean: a.ean,
-      imagemUrl: a.imagemUrl,
-      quantidade: a.quantidade,
-      pedidos: a.orderIds.size,
-      orderIds: [...a.orderIds],
-    }))
-    .sort((a, b) => a.nome.localeCompare(b.nome, "pt-BR") || (a.tamanho ?? "").localeCompare(b.tamanho ?? ""));
-}
 
 export function PickingGeralModal({
   queue,
@@ -133,6 +84,7 @@ export function PickingGeralModal({
   emConferencia,
   operadora,
   onListaImpressa,
+  onLimparFiltros,
   onClose,
 }: Props) {
   // O LOTE é o padrão: é a folha que a operadora leva pra prateleira. "Fila
@@ -395,6 +347,37 @@ export function PickingGeralModal({
 
         {erro && <div style={avisoBox}>{erro}</div>}
         {status && <div style={statusBox}>{status}</div>}
+        {(data || filtrando) && (
+          // Filtro herdado da estação (localStorage) é o motivo nº 1 de "o
+          // Picking não aparece / não tem botão de imprimir" (relatos de
+          // 28/08 e 02/09): a folha vem vazia e a mensagem lá embaixo não
+          // era vista. O recorte agora grita no topo, com o botão de limpar.
+          <div style={filtrosBanner} role="status">
+            <span style={filtrosBannerIcon} aria-hidden="true">
+              !
+            </span>
+            <span style={filtrosBannerTexto}>
+              <strong>Filtros ativos nesta estação:</strong>{" "}
+              {[
+                data ? `só pedidos emitidos em ${fmtData(data)}` : null,
+                (filters.excludeProducts?.length ?? 0) > 0
+                  ? `${filters.excludeProducts!.length} produto${filters.excludeProducts!.length === 1 ? "" : "s"} excluído${filters.excludeProducts!.length === 1 ? "" : "s"}`
+                  : null,
+                (filters.includeProducts?.length ?? 0) > 0
+                  ? `só ${filters.includeProducts!.length} produto${filters.includeProducts!.length === 1 ? "" : "s"}`
+                  : null,
+              ]
+                .filter(Boolean)
+                .join(" · ")}
+              . Produtos fora do recorte não aparecem nem saem na folha.
+            </span>
+            {onLimparFiltros && (
+              <button style={filtrosBannerBtn} onClick={onLimparFiltros}>
+                Limpar filtros
+              </button>
+            )}
+          </div>
+        )}
 
         <div className="thin-scroll" style={corpo}>
           {products === null && !erro && <span style={vazio}>Carregando produtos da fila…</span>}
@@ -561,6 +544,50 @@ const avisoBox: CSSProperties = {
   color: "var(--warning-text)",
   fontSize: 12,
   lineHeight: 1.4,
+};
+
+const filtrosBanner: CSSProperties = {
+  display: "flex",
+  alignItems: "center",
+  gap: 12,
+  padding: "12px 14px",
+  background: "var(--warning-bg)",
+  border: "1px solid var(--warning-border)",
+  boxShadow: "0 0 0 1px var(--warning-border)",
+  borderRadius: 10,
+  color: "var(--text)",
+  fontSize: 14,
+  lineHeight: 1.4,
+};
+
+const filtrosBannerIcon: CSSProperties = {
+  flexShrink: 0,
+  width: 30,
+  height: 30,
+  borderRadius: 9,
+  display: "inline-flex",
+  alignItems: "center",
+  justifyContent: "center",
+  background: "var(--warning-bg)",
+  border: "1px solid var(--warning-border)",
+  color: "var(--warning-text)",
+  fontFamily: "var(--font-display)",
+  fontSize: 18,
+};
+
+const filtrosBannerTexto: CSSProperties = { flex: 1, minWidth: 0 };
+
+const filtrosBannerBtn: CSSProperties = {
+  flexShrink: 0,
+  padding: "10px 16px",
+  borderRadius: 9,
+  border: "1px solid transparent",
+  background: "var(--warning-dot)",
+  color: "#1a1206",
+  fontSize: 13,
+  fontWeight: 700,
+  cursor: "pointer",
+  fontFamily: "inherit",
 };
 
 const statusBox: CSSProperties = {

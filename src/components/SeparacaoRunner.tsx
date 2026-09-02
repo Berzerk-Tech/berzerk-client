@@ -1455,6 +1455,7 @@ export function SeparacaoRunner({
           emConferencia={emConferenciaForaDoFiltro}
           operadora={operadora}
           onListaImpressa={marcarLotePresoLocalmente}
+          onLimparFiltros={() => aplicarFiltros(emptyFilters())}
           onClose={() => setPickingOpen(false)}
         />
       )}
@@ -1477,6 +1478,7 @@ export function SeparacaoRunner({
         <PickingFiltersModal
           filters={filters}
           queue={queue}
+          lote={lote}
           onApply={(f) => {
             aplicarFiltros(f);
             setFiltersOpen(false);
