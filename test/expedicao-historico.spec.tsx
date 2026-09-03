@@ -97,7 +97,7 @@ describe("Histórico da expedição", () => {
     expect(args.todos).toBe(false);
   });
 
-  it("pedido JT oferece reimprimir ETIQUETA; pedido FM oferece a DANFE", async () => {
+  it("pedido JT e pedido FM oferecem reimprimir a ETIQUETA — a DANFE não é mais documento de expedição", async () => {
     getExpedicaoHistory.mockResolvedValue(
       resposta([
         pedido({ id: "ord-jt", numero: "1", tinyAccount: "JT" }),
@@ -107,8 +107,8 @@ describe("Histórico da expedição", () => {
     render(<ExpedicaoHistoryModal onClose={() => {}} />);
 
     await screen.findByText("#1");
-    expect(screen.getByText("↻ Reimprimir etiqueta")).toBeTruthy();
-    expect(screen.getByText("↻ Reimprimir DANFE")).toBeTruthy();
+    expect(screen.getAllByText("↻ Reimprimir etiqueta")).toHaveLength(2);
+    expect(screen.queryByText("↻ Reimprimir DANFE")).toBeNull();
   });
 
   it("sem documento disponível, o botão fica desabilitado", async () => {
@@ -136,9 +136,9 @@ describe("um pedido = UMA página 100×150", () => {
     registrarReimpressao.mockClear();
   });
 
-  it("a conta escolhe o documento — nunca os dois", () => {
+  it("etiqueta J&T em qualquer conta — a FM também sai pela J&T (03/09)", () => {
     expect(documentoDaConta("JT")).toBe("etiqueta");
-    expect(documentoDaConta("FM")).toBe("danfe");
+    expect(documentoDaConta("FM")).toBe("etiqueta");
   });
 
   it("PDF de DUAS páginas da transportadora sai como UMA etiqueta só", async () => {
