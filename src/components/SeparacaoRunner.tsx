@@ -288,6 +288,12 @@ type ExtraTag = {
    *  peça lida (mesmo tamanho, nome parecido — ver `itemParecidoDoPedido`),
    *  pra operadora perceber "produto errado" em vez de "bug entre pedidos". */
   parecidoNome?: string | null;
+  /** Só pra `kind === "alheia"`: o item parecido é um slot SURPRESA e a peça
+   *  lida é do mesmo produto/tamanho, mas de uma COR que a curadoria não
+   *  incluiu (caso real do pedido 869247: Regata Canelada Preta M lida pra
+   *  "Regata Canelada - Surpresa - M", cuja lista tem 14 cores sem a preta).
+   *  Sem isso a operadora lê "não é deste pedido" e abre bug de vínculo. */
+  surpresaCorNaoCurada?: boolean;
 };
 
 /** Entrada do console de leitura (o que o leitor viu e como resolvemos). */
@@ -974,6 +980,9 @@ export function SeparacaoRunner({
               (it) => it.quantidade - (progressRef.current.get(it.id)?.count ?? 0) > 0,
             );
             const parecido = excedido ? null : itemParecidoDoPedido(faltam, look);
+            // Parecido é slot Surpresa: a peça é do produto certo, mas de cor
+            // fora da curadoria — mensagem própria, senão parece bug.
+            const surpresaCorNaoCurada = !!parecido?.surpresaPermitidos;
             extrasRef.current.set(epcU, {
               epc: epcU,
               label: desc || epcU,
@@ -981,11 +990,16 @@ export function SeparacaoRunner({
               itemId: excedido?.id,
               imagemUrl: excedido?.imagemUrl ?? null,
               parecidoNome: parecido?.nome ?? null,
+              surpresaCorNaoCurada,
             });
             pushLog({ epc: epcU, desc: desc || "(sem descrição)", status: "extra" });
             if (excedido) {
               showReject(
                 `Peça SOBRESSALENTE: ${desc} — o pedido já tem as unidades desse produto. Tire a peça da mesa e reinicie (R).`,
+              );
+            } else if (surpresaCorNaoCurada && parecido) {
+              showReject(
+                `Slot SURPRESA: ${desc} não está entre as cores curadas pra "${parecido.nome}". Pegue outra cor do mesmo produto e tamanho. Tire a peça da mesa e reinicie (R).`,
               );
             } else {
               // Diagnóstico de campo: mostra os códigos que o pedido ainda espera
@@ -1548,11 +1562,16 @@ function ReadLogPanel({
                   {x.kind === "excedente"
                     ? "unidade a MAIS deste pedido"
                     : x.kind === "alheia"
-                      ? `Não é deste pedido — ${x.label} não está na lista`
+                      ? x.surpresaCorNaoCurada
+                        ? `Slot Surpresa — ${x.label} não está entre as cores curadas`
+                        : `Não é deste pedido — ${x.label} não está na lista`
                       : "tag não identificada"}
                 </span>
                 {x.kind === "alheia" && x.parecidoNome && (
-                  <span style={extrasPinnedSimilar}>O pedido pede: {x.parecidoNome}</span>
+                  <span style={extrasPinnedSimilar}>
+                    O pedido pede: {x.parecidoNome}
+                    {x.surpresaCorNaoCurada && " (outra cor do mesmo produto e tamanho)"}
+                  </span>
                 )}
                 <span style={logEpc}>{x.epc}</span>
               </div>
