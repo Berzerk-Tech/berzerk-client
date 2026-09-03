@@ -35,9 +35,20 @@ export type ReimpressaoResultado = {
   mensagem: string;
 };
 
-/** Documento de expedição da conta: JT imprime etiqueta, FM imprime DANFE. */
-export function documentoDaConta(tinyAccount: string): DocumentoReimpressao {
-  return tinyAccount === "JT" ? "etiqueta" : "danfe";
+/**
+ * Documento de expedição: SEMPRE a etiqueta da J&T, em qualquer conta.
+ *
+ * A regra antiga (JT → etiqueta, FM → DANFE) vinha do legado, de quando a
+ * conta FM despachava pela FM Transportes e a DANFE simplificada era a
+ * etiqueta desses pacotes. Hoje a conta FM também sai pela J&T (Frenet) e
+ * a etiqueta existe pra ela — em 03/09, 1.030 dos 1.032 pedidos FM do dia
+ * tinham etiqueta no Nexus e a mesa imprimia DANFE em todos. Decisão do
+ * Leonardo (03/09): etiqueta J&T sempre; sem etiqueta, a mesa não expede
+ * (`etiqueta_ausente`), não cai pra DANFE. O parâmetro fica só pra não
+ * mexer nas chamadas.
+ */
+export function documentoDaConta(_tinyAccount: string): DocumentoReimpressao {
+  return "etiqueta";
 }
 
 /** Rótulo do botão/aviso — segue a escolha por conta. */

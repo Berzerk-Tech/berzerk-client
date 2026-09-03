@@ -384,9 +384,9 @@ export function Expedicao({ onBack }: Props) {
         return;
       }
 
-      // UM documento, UMA página, escolhido pela CONTA (regra do legado):
-      // JT → etiqueta da transportadora; FM → DANFE simplificada, que é a
-      // etiqueta desses pedidos. NUNCA os dois — a máquina de embalagem solta
+      // UM documento, UMA página: a etiqueta da J&T, em qualquer conta (ver
+      // `documentoDaConta` — a DANFE deixou de ser a etiqueta da FM quando a
+      // conta passou a sair pela J&T). NUNCA os dois — a máquina de embalagem solta
       // um saco por etiqueta impressa, então a segunda página vira um saco a
       // mais no chão. Era esse o bug de produção: a mesa mandava etiqueta E
       // DANFE como dois jobs pra mesma térmica.
