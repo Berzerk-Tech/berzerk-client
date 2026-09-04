@@ -753,6 +753,10 @@ export function SeparacaoRunner({
   const devolverAtual = useCallback(async () => {
     const ord = orderRef.current;
     if (!ord || completing) return;
+    if (ord.listaEm) {
+      showNotice("Pedido de lista impressa fica com você até o fim do dia — use Pular (P) pra seguir pro próximo.");
+      return;
+    }
     setPhase("loading");
     orderRef.current = null;
     setOrder(null);
@@ -760,7 +764,7 @@ export function SeparacaoRunner({
       /* best-effort: o janitor recupera */
     });
     await puxarLote({ depoisDe: ord.id });
-  }, [completing, puxarLote]);
+  }, [completing, puxarLote, showNotice]);
 
   /**
    * PULAR (27/08): a peça ainda não chegou da dobra. O pedido CONTINUA dela —
@@ -771,6 +775,8 @@ export function SeparacaoRunner({
   const pularAtual = useCallback(() => {
     const ord = orderRef.current;
     if (!ord || completing) return;
+    // Pedido de lista impressa não sai da mesa dela: pular só reordena o lote
+    // (ele vai pro fim), nunca devolve — a lista fica até o fim do dia.
     const candidatos = candidatosDepoisDe(ord.id);
     const puladosNovos = new Set(puladosRef.current).add(ord.id);
     const visiveisAgora = loteVisivel(loteRef.current, puladosNovos, filtersRef.current);
@@ -1171,20 +1177,10 @@ export function SeparacaoRunner({
   // `devolverTudo` já engole a falha (o janitor recupera).
   useEffect(() => onAntesDeBloquear(() => devolverTudo()), [devolverTudo]);
 
-  /**
-   * "devolver à fila" do banner de lista impressa — a ação EXPLÍCITA. Ao
-   * contrário do `devolverTudo` automático, leva os pedidos com `listaEm`
-   * junto e NÃO é uma saída de tela: destrava o `saindoRef` e volta a puxar
-   * lote normalmente (a lista deixou de existir).
-   */
-  const devolverListaImpressa = useCallback(async () => {
-    await devolverTudo({ incluirLista: true });
-    saindoRef.current = false;
-    presaNaListaRef.current = false;
-    loteRef.current = [];
-    setLote([]);
-    await puxarLote();
-  }, [devolverTudo, puxarLote]);
+  // Não existe mais "devolver à fila" pra lista impressa (decisão do Leonardo,
+  // 04/09): uma vez que a operadora pegou a lista, os pedidos ficam com ela
+  // até o fim do dia — o nexus zera à meia-noite. Soltar antes é só pelo
+  // admin no Nexus.
 
   const handleBack = () => {
     // Espera devolver antes de sair: a tela de filas consulta os pedidos em
@@ -1358,10 +1354,7 @@ export function SeparacaoRunner({
           🖨 Lista impressa {listaDeOutroDia ? `de ${fmtDataISO(diaDe(listaDeOutroDia.listaEm!))}` : "de hoje"} —{" "}
           <strong>{comLista.length}</strong>{" "}
           {comLista.length === 1 ? "pedido reservado" : "pedidos reservados"} pra você até concluir
-          ou devolver.{" "}
-          <button style={inlineReconnect} onClick={() => void devolverListaImpressa()}>
-            devolver à fila
-          </button>
+          — ficam com você até o fim do dia.
         </div>
       )}
 
