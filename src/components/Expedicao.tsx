@@ -179,6 +179,12 @@ export function Expedicao({ onBack }: Props) {
   const [readLog, setReadLog] = useState<ReadEntry[]>([]);
   const [session, setSession] = useState<SessionEntry[]>([]);
   const [overrideOpen, setOverrideOpen] = useState(false);
+  // Espelho do modal pro loop de leitura (que roda fora do render): enquanto a
+  // operadora escreve a justificativa, a mesa fica CONGELADA — o leitor oscila
+  // (tag some/volta) e cada oscilação re-identificava o pedido, apitando de
+  // novo a cada segundo e, se a tag sumisse, fechava o modal no meio da frase.
+  const overrideOpenRef = useRef(false);
+  overrideOpenRef.current = overrideOpen;
   const [engineWarn, setEngineWarn] = useState<string | null>(null);
   const [reprintingId, setReprintingId] = useState<string | null>(null);
   const [historyOpen, setHistoryOpen] = useState(false);
@@ -242,6 +248,10 @@ export function Expedicao({ onBack }: Props) {
 
   // ---- resolução do pedido a partir do conjunto atual da mesa ----
   const doResolve = useCallback(async () => {
+    // Modal de justificativa aberto: não re-identifica nem muda de estado.
+    // A mesa é re-lida quando o modal fecha (cancelar → `doResolve`; forçar →
+    // vai pra impressão, que já ignora o leitor).
+    if (overrideOpenRef.current) return;
     const epcs = Array.from(mesaRef.current).filter((e) => !processedRef.current.has(e));
     const k = flowRef.current.kind;
     // Conjunto vazio: se estava mostrando pedido/escolha/erro, volta pra PRONTO.
@@ -734,7 +744,13 @@ export function Expedicao({ onBack }: Props) {
       {overrideOpen && flow.kind === "identified" && (
         <OverrideModal
           faltam={Math.max(conf ? conf.total - conf.lidas : 0, conf?.faltantes.length ?? 0)}
-          onCancel={() => setOverrideOpen(false)}
+          onCancel={() => {
+            setOverrideOpen(false);
+            overrideOpenRef.current = false;
+            // Reprocessa o que mudou na mesa enquanto o modal segurava a leitura.
+            if (resolveTimer.current) clearTimeout(resolveTimer.current);
+            resolveTimer.current = setTimeout(() => void doResolve(), RESOLVE_DEBOUNCE_MS);
+          }}
           onConfirm={confirmarOverride}
         />
       )}
