@@ -173,12 +173,19 @@ export function Separacao({ onBack }: Props) {
   // presa com quem imprimiu (04/09: 73 pedidos da Nicole voltaram pra fila por
   // um devolver e outra mesa levou) — pra soltar a lista é de dentro da fila,
   // pelo "Devolver tudo" explícito.
+  const [avisoLista, setAvisoLista] = useState<string | null>(null);
   const devolverEmAberto = async () => {
     setDevolvendo(true);
     try {
       const semLista = emAberto.filter((o) => !o.listaEm);
       if (semLista.length > 0) await devolverLote(semLista.map((o) => o.id));
-      setEmAberto(emAberto.filter((o) => !!o.listaEm));
+      const ficam = emAberto.filter((o) => !!o.listaEm);
+      setEmAberto(ficam);
+      setAvisoLista(
+        ficam.length > 0
+          ? `${ficam.length} ${ficam.length === 1 ? "pedido é" : "pedidos são"} de lista impressa e ${ficam.length === 1 ? "fica" : "ficam"} com você até o fim do dia — só o supervisor devolve, pelo Nexus.`
+          : null,
+      );
     } catch {
       /* fica o banner: ela pode retomar e devolver de dentro da fila */
     } finally {
@@ -254,6 +261,7 @@ export function Separacao({ onBack }: Props) {
           <button style={devolverBtn} onClick={() => void devolverEmAberto()} disabled={devolvendo}>
             {devolvendo ? "devolvendo…" : "devolver pra fila"}
           </button>
+          {avisoLista && <div style={{ marginTop: 8, fontSize: 13 }}>{avisoLista}</div>}
         </div>
       )}
 

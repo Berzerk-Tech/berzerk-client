@@ -76,6 +76,8 @@ type Props = {
    *  `listaId` é o id de `separacao_listas` criado (`null` = nexus antigo,
    *  sem o carimbo, ou nenhum pedido válido pra carimbar). */
   onListaImpressa?: (orderIds: string[], listaId: string | null) => void;
+  /** Liga/desliga enquanto carimba+imprime: o runner congela o `puxarLote` nesse meio. */
+  onImprimindo?: (v: boolean) => void;
   /** Zera data + filtros de produto da estação (o banner "recorte ativo"). */
   onLimparFiltros?: () => void;
   onClose: () => void;
@@ -89,6 +91,7 @@ export function PickingGeralModal({
   emConferencia,
   operadora,
   onListaImpressa,
+  onImprimindo,
   onLimparFiltros,
   onClose,
 }: Props) {
@@ -276,8 +279,41 @@ export function PickingGeralModal({
       return;
     }
     setImprimindo(true);
-    setStatus("Enviando pra impressora…");
+    onImprimindo?.(true);
+    setStatus("Reservando os pedidos…");
     try {
+      // CARIMBO PRIMEIRO, papel depois (04/09): é o carimbo em `separacao_listas`
+      // que prende os pedidos na mesa dela e permite recuperar; uma folha sem
+      // carimbo é o "mistos sumiram". Se o nexus não carimbar, NÃO imprime.
+      let presos = 0;
+      let listaIdCarimbo: string | null = null;
+      let idsCarimbados: string[] = [];
+      if (escopo === "lote") {
+        idsCarimbados = apenas ? apenas.orderIds : lote.map((o) => o.id);
+        if (idsCarimbados.length > 0) {
+          try {
+            const resultado = await marcarListaImpressa({
+              orderIds: idsCarimbados,
+              escopo: apenas ? "secao" : "lote",
+              filtros: filters,
+              secoes: alvo.map((s) => ({
+                tamanho: s.rotulo ?? s.tamanho,
+                linhas: s.produtos.map((p) => ({ produto: p.nome, qtd: p.quantidade })),
+              })),
+            });
+            presos = resultado.presos;
+            listaIdCarimbo = resultado.listaId;
+          } catch (e) {
+            setStatus(
+              `Os pedidos NÃO ficaram reservados (${e instanceof Error ? e.message : String(e)}). ` +
+                "A folha não foi impressa — tente de novo.",
+            );
+            return;
+          }
+          if (presos > 0) onListaImpressa?.(idsCarimbados, listaIdCarimbo);
+        }
+      }
+      setStatus("Enviando pra impressora…");
       const base64 = gerarPickingPdf({
         operadora,
         fila: filaLabel,
@@ -298,41 +334,21 @@ export function PickingGeralModal({
         printer: getLabelPrinter(),
         jobName: apenas ? `Picking ${apenas.tamanho}` : `Picking Geral ${queue.size}`,
       });
-      // Lista do LOTE impressa ⇒ os pedidos ficam PRESOS na mesa dela: a coleta
-      // dos mistos leva o dia e o janitor de 15 min devolveria tudo pra fila no
-      // meio do caminho. Best-effort: falhar aqui não desfaz a impressão.
-      //
-      // `apenas` define o RECORTE que vira snapshot em `separacao_listas`:
-      // "Imprimir Tudo" carimba o lote inteiro (`escopo: 'lote'`, ids = todo o
-      // lote); "Imprimir esta seção" carimba só quem contribui pra ela
-      // (`escopo: 'secao'`) — antes disto o botão de seção também prendia o
-      // lote inteiro, presa maior do que a folha impressa na mão dela.
-      let presos = 0;
-      if (out.ok && escopo === "lote") {
-        const ids = apenas ? apenas.orderIds : lote.map((o) => o.id);
-        if (ids.length > 0) {
-          const resultado = await marcarListaImpressa({
-            orderIds: ids,
-            escopo: apenas ? "secao" : "lote",
-            filtros: filters,
-            secoes: alvo.map((s) => ({
-              tamanho: s.rotulo ?? s.tamanho,
-              linhas: s.produtos.map((p) => ({ produto: p.nome, qtd: p.quantidade })),
-            })),
-          }).catch(() => ({ presos: 0, listaId: null }));
-          presos = resultado.presos;
-          if (presos > 0) onListaImpressa?.(ids, resultado.listaId);
-        }
-      }
       setStatus(
         out.ok
           ? `Enviado${out.printer ? ` pra ${out.printer}` : " pra impressora padrão"}.` +
-            (presos > 0 ? ` ${presos} pedidos ficam reservados até você concluir ou devolver.` : "")
-          : `Falha ao imprimir: ${out.message ?? "motivo desconhecido"}`,
+            (escopo === "lote"
+              ? presos > 0
+                ? ` ${presos} pedidos ficam reservados com você até o fim do dia.`
+                : ""
+              : " Folha de CONSULTA da fila inteira — NÃO reserva pedidos.")
+          : `Falha ao imprimir: ${out.message ?? "motivo desconhecido"}` +
+            (presos > 0 ? ` (os ${presos} pedidos continuam reservados — imprima de novo)` : ""),
       );
     } catch (e) {
       setStatus(`Falha ao imprimir: ${e instanceof Error ? e.message : String(e)}`);
     } finally {
+      onImprimindo?.(false);
       setImprimindo(false);
     }
   };
