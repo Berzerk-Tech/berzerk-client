@@ -56,6 +56,7 @@ import {
   type QueueListItem,
   type SeparationMode,
 } from "../services/orders";
+import { getListas, recuperarLista, type ListaResumo } from "../services/listas";
 
 const SHADOW = import.meta.env.VITE_SEPARACAO_SHADOW === "true";
 
@@ -1074,6 +1075,36 @@ export function SeparacaoRunner({
   // que os lê no array de deps.
   const [historyOpen, setHistoryOpen] = useState(false);
   const [listasOpen, setListasOpen] = useState(false);
+  /**
+   * VIGIA DAS LISTAS IMPRESSAS (04/09, "os mistos sumiram"): a cada 60 s e a
+   * cada carga do lote, pergunta ao nexus quantos pedidos das listas de HOJE
+   * desta operadora estão na fila sem claim (`pedidosRecuperaveis`). Se algum
+   * escapou — por qualquer caminho, bug ou não — o banner vermelho aparece com
+   * "Recuperar agora" e traz tudo de volta num clique. Não depende de ninguém
+   * lembrar de abrir "Listas impressas".
+   */
+  const [listasEscapadas, setListasEscapadas] = useState<ListaResumo[]>([]);
+  const [recuperandoListas, setRecuperandoListas] = useState(false);
+  const vigiarListas = useCallback(async () => {
+    try {
+      const { listas } = await getListas();
+      const hoje = new Date().toDateString();
+      setListasEscapadas(
+        listas.filter((l) => l.pedidosRecuperaveis > 0 && new Date(l.criadoEm).toDateString() === hoje),
+      );
+    } catch {
+      /* rede: tenta no próximo ciclo */
+    }
+  }, []);
+  useEffect(() => {
+    void vigiarListas();
+    const id = setInterval(() => void vigiarListas(), 60_000);
+    return () => clearInterval(id);
+  }, [vigiarListas]);
+  // E a cada mudança de tamanho do lote (carga/devolução/conclusão).
+  useEffect(() => {
+    void vigiarListas();
+  }, [lote.length, vigiarListas]);
   const [filtersOpen, setFiltersOpen] = useState(false);
   const [pickingOpen, setPickingOpen] = useState(false);
   const [faltantesOpen, setFaltantesOpen] = useState(false);
@@ -1188,6 +1219,32 @@ export function SeparacaoRunner({
     // acabou de ser devolvido.
     setPhase("loading");
     void devolverTudo().finally(() => onBack());
+  };
+
+  const recuperarListasEscapadas = async () => {
+    if (recuperandoListas || listasEscapadas.length === 0) return;
+    setRecuperandoListas(true);
+    let voltaram = 0;
+    let retomados = 0;
+    try {
+      for (const l of listasEscapadas) {
+        const r = await recuperarLista(l.id);
+        voltaram += r.recuperados;
+        retomados += r.retomados ?? 0;
+      }
+      aplicarFiltros(emptyFilters());
+      await puxarLote();
+      showNotice(
+        `${voltaram} ${voltaram === 1 ? "pedido da lista voltou" : "pedidos da lista voltaram"} pra sua mesa` +
+          (retomados > 0 ? ` (+${retomados} retomados de outra mesa)` : "") +
+          ".",
+      );
+    } catch (e) {
+      showNotice(`Não deu pra recuperar a lista: ${e instanceof Error ? e.message : String(e)}`);
+    } finally {
+      setRecuperandoListas(false);
+      void vigiarListas();
+    }
   };
 
   const extras = Array.from(extrasRef.current.values());
@@ -1349,6 +1406,16 @@ export function SeparacaoRunner({
       )}
       {reject && extras.length === 0 && <div style={rejectBanner}>⚠ {reject}</div>}
       {notice && <div style={noticeBanner}>ℹ {notice}</div>}
+      {listasEscapadas.length > 0 && (
+        <div style={listaBannerAlerta}>
+          🚨 <strong>{listasEscapadas.reduce((n, l) => n + l.pedidosRecuperaveis, 0)}</strong>{" "}
+          {listasEscapadas.reduce((n, l) => n + l.pedidosRecuperaveis, 0) === 1 ? "pedido da sua lista impressa está" : "pedidos da sua lista impressa estão"}{" "}
+          na fila sem você — eles são seus até o fim do dia.{" "}
+          <button style={inlineReconnect} disabled={recuperandoListas} onClick={() => void recuperarListasEscapadas()}>
+            {recuperandoListas ? "recuperando…" : "Recuperar agora"}
+          </button>
+        </div>
+      )}
       {comLista.length > 0 && (
         <div style={listaDeOutroDia ? listaBannerAlerta : listaBanner}>
           🖨 Lista impressa {listaDeOutroDia ? `de ${fmtDataISO(diaDe(listaDeOutroDia.listaEm!))}` : "de hoje"} —{" "}
