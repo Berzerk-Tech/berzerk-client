@@ -40,6 +40,10 @@ export function Separacao({ onBack }: Props) {
   /** Pedidos que já são da operadora (lote de outra sessão/estação). */
   const [emAberto, setEmAberto] = useState<Order[]>([]);
   const [devolvendo, setDevolvendo] = useState(false);
+  // Aviso do banner "em aberto" (pedido de lista não devolve). Hook AQUI, antes
+  // do `if (confirmed) return` — na 0.9.33 ficou depois e quebrou a regra dos
+  // hooks: tela branca ao entrar na fila de mistos.
+  const [avisoLista, setAvisoLista] = useState<string | null>(null);
 
   // Contagem das filas: o WS do nexus empurra `queue.changed` (tiny-sync,
   // claim, complete, release) e cada evento refaz o fetch; o intervalo de 60s
@@ -173,7 +177,6 @@ export function Separacao({ onBack }: Props) {
   // presa com quem imprimiu (04/09: 73 pedidos da Nicole voltaram pra fila por
   // um devolver e outra mesa levou) — pra soltar a lista é de dentro da fila,
   // pelo "Devolver tudo" explícito.
-  const [avisoLista, setAvisoLista] = useState<string | null>(null);
   const devolverEmAberto = async () => {
     setDevolvendo(true);
     try {
