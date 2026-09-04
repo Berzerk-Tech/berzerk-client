@@ -226,6 +226,9 @@ export function shipErrorMessage(code: string | null): string {
       return "a etiqueta J&T não consta como impressa.";
     case EXP_ERR.TAGS_INCOMPLETAS:
       return "faltam peças (tags) do pedido.";
+    case "pecas_insuficientes":
+    case "liberacao_necessaria":
+      return "o servidor apontou peça faltando (trava de supervisor ligada).";
     case EXP_ERR.INVALID_STATUS:
       return "o pedido não está num status que permita expedir.";
     case EXP_ERR.ORDER_NOT_FOUND:

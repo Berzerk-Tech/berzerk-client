@@ -40,6 +40,25 @@ const EPC_CACHE_KEY = "berzerk_epc_resolve_cache_v1";
 const EPC_CACHE_MAX = 5000;
 /** Depois de quanto tempo um EPC "não resolvido" pode ser consultado de novo. */
 const UNRESOLVED_RETRY_MS = 5 * 60 * 1000;
+/** Teto por chamada à nuvem iTAG / epc-lookup dentro de `resolveEpcs`: a mesa
+ *  não pode ficar em LENDO por minutos porque a nuvem pendurou (o Rust tenta
+ *  2 bases × 30 s por chunk). Passou disso, segue com o que tem (cache/SGTIN). */
+const RESOLVE_TIMEOUT_MS = 8000;
+function comTimeout<T>(p: Promise<T>, ms: number, rotulo: string): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const id = window.setTimeout(() => reject(new Error(`${rotulo}: sem resposta em ${ms / 1000}s`)), ms);
+    p.then(
+      (v) => {
+        window.clearTimeout(id);
+        resolve(v);
+      },
+      (e) => {
+        window.clearTimeout(id);
+        reject(e);
+      },
+    );
+  });
+}
 
 function loadEpcCache(): Map<string, EpcLookupItem> {
   try {
@@ -344,8 +363,21 @@ export function RfidProvider({ children }: { children: ReactNode }) {
     (onPresent: (currentEpcs: string[]) => void) => {
       const reader = getDeviceConfig().reader;
       if (reader.mode === "keyboard-wedge") {
-        // Wedge não tem presença real — emula tratando cada bipada como atual.
-        return startWedgeSession((epcs) => onPresent(epcs)).stop;
+        // Wedge não tem presença real: cada bipada chega UMA vez. A Expedição
+        // precisa de reemissão contínua (TTL de presença), então acumula o
+        // que foi bipado e reemite o conjunto a cada segundo até o stop.
+        const acumulado = new Set<string>();
+        const sess = startWedgeSession((epcs) => {
+          for (const e of epcs) acumulado.add(e.trim().toUpperCase());
+          onPresent([...acumulado]);
+        });
+        const id = window.setInterval(() => {
+          if (acumulado.size > 0) onPresent([...acumulado]);
+        }, 1000);
+        return () => {
+          window.clearInterval(id);
+          sess.stop();
+        };
       }
       const h = reader.itagHost;
       const listener: PresenceListener = { cb: onPresent };
@@ -441,7 +473,7 @@ export function RfidProvider({ children }: { children: ReactNode }) {
 
       if (misses.length > 0) {
         try {
-          const details = await lookupEpcDetails(misses);
+          const details = await comTimeout(lookupEpcDetails(misses), RESOLVE_TIMEOUT_MS, "nuvem iTAG");
           for (const d of details) {
             if (d.found && d.ean13) {
               commit({ epc: d.epc, ean13: d.ean13, sku: null, size: d.tamanho, batchCode: null, name: d.nome });
@@ -455,7 +487,7 @@ export function RfidProvider({ children }: { children: ReactNode }) {
 
       if (misses.length > 0) {
         try {
-          const { items } = await epcLookup(misses);
+          const { items } = await comTimeout(epcLookup(misses), RESOLVE_TIMEOUT_MS, "epc-lookup");
           for (const item of items) commit(item);
         } catch (e) {
           setLastError(e instanceof Error ? e.message : String(e));
@@ -464,6 +496,7 @@ export function RfidProvider({ children }: { children: ReactNode }) {
       }
 
       for (const e of misses) {
+        if (unresolvedRef.current.size > EPC_CACHE_MAX) unresolvedRef.current.clear();
         unresolvedRef.current.set(e, Date.now());
         const decoded = decodeSgtin96(e);
         if (decoded) result.set(e, { epc: e, ean13: decoded, sku: null, size: null, batchCode: null });

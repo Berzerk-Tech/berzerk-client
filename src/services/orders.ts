@@ -604,10 +604,19 @@ export function releaseSeparacao(orderId: string): Promise<Order> {
   return apiRequest<Order>(`/separacao/${orderId}/release`, { method: "POST", body: {} });
 }
 
-export function epcLookup(epcs: string[]): Promise<{ items: EpcLookupItem[] }> {
-  return apiRequest<{ items: EpcLookupItem[] }>("/separacao/epc-lookup", {
-    query: { epcs: epcs.join(",") },
-  });
+/** GET com query string: acima de ~100 EPCs (25 chars cada) a URL passa dos
+ *  limites do API Gateway e volta 4xx genérico — chunka e junta. */
+const EPC_LOOKUP_CHUNK = 100;
+export async function epcLookup(epcs: string[]): Promise<{ items: EpcLookupItem[] }> {
+  const items: EpcLookupItem[] = [];
+  for (let i = 0; i < epcs.length; i += EPC_LOOKUP_CHUNK) {
+    const chunk = epcs.slice(i, i + EPC_LOOKUP_CHUNK);
+    const r = await apiRequest<{ items: EpcLookupItem[] }>("/separacao/epc-lookup", {
+      query: { epcs: chunk.join(",") },
+    });
+    items.push(...r.items);
+  }
+  return { items };
 }
 
 /** Permissão exigida pra operar a fila (o ator dev com `*` passa). */
