@@ -93,6 +93,8 @@ export type RecuperarListaResponse = {
   recuperados: number;
   /** Já estavam `separating` com o próprio ator que chamou. */
   jaComigo: number;
+  /** Retomados de OUTRA mesa que ainda não tinha começado (nexus #218; ausente em nexus anterior). */
+  retomados?: number;
   ignorados: ListaIgnorado[];
 };
 
