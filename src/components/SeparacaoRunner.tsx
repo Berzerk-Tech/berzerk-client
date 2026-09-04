@@ -1362,6 +1362,7 @@ export function SeparacaoRunner({
         <LoteSidebar
           queue={queue}
           lote={visiveis}
+          todos={lote}
           pulados={pulados}
           ocultos={ocultos}
           restantes={restantes}
@@ -1466,7 +1467,12 @@ export function SeparacaoRunner({
       {listasOpen && (
         <ListasImpressasModal
           onClose={() => setListasOpen(false)}
-          onRecuperado={() => void puxarLote()}
+          onRecuperado={() => {
+            // Recuperar lista = ver a lista: um recorte antigo (data/produto) não
+            // pode esconder o que acabou de voltar pra mesa.
+            aplicarFiltros(emptyFilters());
+            void puxarLote();
+          }}
         />
       )}
       {pickingOpen && (
@@ -1673,6 +1679,7 @@ function useLarguraSidebar() {
 function LoteSidebar({
   queue,
   lote,
+  todos,
   pulados,
   ocultos,
   restantes,
@@ -1688,6 +1695,8 @@ function LoteSidebar({
   queue: { mode: SeparationMode; size: string; sizes: string[] };
   /** JÁ na ordem local e JÁ filtrado — a sidebar não recorta nada por conta. */
   lote: Order[];
+  /** Lote INTEIRO (sem os filtros de exibição): a busca olha aqui, senão pedido recuperado fora do recorte "some". */
+  todos: Order[];
   /** Ids pulados (mostrados no fim, com marca). */
   pulados: Set<string>;
   /** Pedidos do lote escondidos pelo filtro — contados no rodapé. */
@@ -1708,7 +1717,10 @@ function LoteSidebar({
   const termo = busca.trim().toLowerCase();
   // Busca LOCAL: o lote inteiro já está em memória com os itens (até 50 nos
   // mistos) — ir ao servidor pra filtrar essa lista seria latência à toa.
-  const visiveis = termo.length === 0 ? lote : lote.filter((o) => casaBusca(o, termo));
+  // Com termo, busca no lote INTEIRO (ignora data/produto do filtro): a
+  // operadora que recuperou a lista impressa e não achava o pedido estava
+  // com um recorte antigo escondendo (04/09).
+  const visiveis = termo.length === 0 ? lote : todos.filter((o) => casaBusca(o, termo));
   const comLista = lote.filter((o) => !!o.listaEm).length;
   const { largura, alca } = useLarguraSidebar();
 
