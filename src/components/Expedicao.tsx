@@ -257,6 +257,8 @@ export function Expedicao({ onBack }: Props) {
   // criava uma cadeia de 4 s independente (rajada no /documentos e risco de
   // duas etiquetas).
   const rastreioTimer = useRef<number | null>(null);
+  // Guard de reentrada do fechamento do ciclo (timer da embalagem × "Próximo pedido").
+  const concluindoRef = useRef(false);
   const [engineWarn, setEngineWarn] = useState<string | null>(null);
   const [reprintingId, setReprintingId] = useState<string | null>(null);
   const [historyOpen, setHistoryOpen] = useState(false);
@@ -335,6 +337,12 @@ export function Expedicao({ onBack }: Props) {
   }, []);
 
   // ---- resolução do pedido a partir do conjunto atual da mesa ----
+  /** Impressão/embalagem/conclusão em curso: nenhum resultado de leitura pode mexer na tela. */
+  const mesaOcupada = () => {
+    const k = flowRef.current.kind;
+    return k === "printing" || k === "packing" || k === "done";
+  };
+
   const doResolve = useCallback(async () => {
     // Modal de justificativa aberto: não re-identifica nem muda de estado.
     // A mesa é re-lida quando o modal fecha (cancelar → `doResolve`; forçar →
@@ -372,6 +380,7 @@ export function Expedicao({ onBack }: Props) {
     try {
       const { matches, unmatchedEpcs, jaExpedidos } = await epcMatch(epcs);
       if (gen !== resolveGenRef.current) return; // mesa mudou no meio — resultado velho
+      if (mesaOcupada()) return; // impressão/embalagem começou enquanto o epc-match voava
       if (matches.length === 0) {
         if (!retrying) beepError();
         if (jaExpedidos.length > 0) {
@@ -457,6 +466,7 @@ export function Expedicao({ onBack }: Props) {
         /* sem lookup a conferência cai nas tags da separação */
       }
       if (gen !== undefined && gen !== resolveGenRef.current) return; // resolução mais nova em curso
+      if (mesaOcupada()) return;
       const c = conferir({ items: order.items, naMesa, rfidTags: order.rfidTags, resolved, alheias });
       setConf(c);
       setFlow({ kind: "identified", order });
@@ -476,6 +486,9 @@ export function Expedicao({ onBack }: Props) {
   const iniciarImpressao = useCallback(
     async (order: ExpedicaoOrder, lidas: string[], override?: string) => {
       setOverrideOpen(false);
+      // Invalida qualquer resolve/identifica em voo: a etiqueta vai sair, e um
+      // resultado atrasado re-identificando o pedido imprimiria de novo (saco a mais).
+      resolveGenRef.current++;
       setFlow({ kind: "printing", order });
       const oficial = modoRef.current === "oficial";
       let docs: Documentos;
@@ -622,10 +635,16 @@ export function Expedicao({ onBack }: Props) {
   const concluirCiclo = useCallback(async () => {
     const f = flowRef.current;
     if (f.kind !== "packing") return;
+    if (concluindoRef.current) return; // timer da embalagem chegou em cima do "Próximo pedido"
+    concluindoRef.current = true;
     const { order, lidas, override } = f;
-    for (const e of mesaRef.current) processedRef.current.add(e);
+    // Só as peças CONTADAS deste pedido saem de cena. Marcar a mesa inteira
+    // escondia a tag do pedido vizinho pro resto da sessão — ele nunca mais
+    // completava (FALTAM PEÇAS + pecas_insuficientes num pedido inteiro).
+    for (const e of lidas) processedRef.current.add(e.toUpperCase());
 
     const registra = (enfileirado: boolean) => {
+      concluindoRef.current = false;
       setSession((s) => [{ order, at: new Date(), modo: modoRef.current }, ...s].slice(0, 12));
       setFlow({ kind: "done", order, modo: modoRef.current, enfileirado });
       window.setTimeout(() => {
@@ -694,6 +713,8 @@ export function Expedicao({ onBack }: Props) {
   );
   // Pedido embalado que o servidor recusou por conferência: modal de motivo (humano).
   const [liberacao, setLiberacao] = useState<ShipRetryJob | null>(null);
+  const liberacaoRef = useRef<ShipRetryJob | null>(null);
+  liberacaoRef.current = liberacao;
   const pendentesDeMotivo = retryQueue.current.filter((j) => j.precisaMotivo);
   const pendentesAguardando = retryQueue.current.filter((j) => !j.precisaMotivo);
   // Foco no campo de bipagem — NUNCA com um modal aberto: o efeito do filho
@@ -747,9 +768,11 @@ export function Expedicao({ onBack }: Props) {
       // vez com `leituras` preenchidas, se ainda não tinha: pedido que caiu no
       // modal só porque o servidor não achou o EPC na réplica passa sozinho.
       const temLeituras = (j: ShipRetryJob) => (j.leituras?.length ?? 0) > 0;
+      // Job com o modal de motivo aberto é da pessoa, não do loop.
+      const emLiberacao = liberacaoRef.current?.orderId;
       const job =
-        retryQueue.current.find((j) => !j.precisaMotivo) ??
-        retryQueue.current.find((j) => j.precisaMotivo && !j.reapertadoComLeituras);
+        retryQueue.current.find((j) => !j.precisaMotivo && j.orderId !== emLiberacao) ??
+        retryQueue.current.find((j) => j.precisaMotivo && !j.reapertadoComLeituras && j.orderId !== emLiberacao);
       if (!job) {
         retryBusyRef.current = false;
         return;
@@ -762,7 +785,10 @@ export function Expedicao({ onBack }: Props) {
       void tentativa
         .then((j) => expedirEmbalado(j).then((r) => [j, r] as const))
         .then(([j, r]) => {
-          const semEle = retryQueue.current.filter((x) => x !== job);
+          // Reconcilia por orderId: se o supervisor liberou pelo modal nesse
+          // meio tempo, o job já saiu da fila e não pode voltar.
+          if (!retryQueue.current.some((x) => x.orderId === job.orderId)) return;
+          const semEle = retryQueue.current.filter((x) => x.orderId !== job.orderId);
           if (r.ok) {
             setQueue(semEle);
             showNotice(`Expedição de ${rotulo} foi confirmada.`);
@@ -822,6 +848,7 @@ export function Expedicao({ onBack }: Props) {
             const look = map.get(e);
             const d = look ? [look.name, look.size, look.ean13].filter(Boolean).join(" · ") : "";
             if (d) {
+              if (descCacheRef.current.size > 5000) descCacheRef.current.clear();
               descCacheRef.current.set(e, d);
               any = true;
             }
@@ -862,7 +889,8 @@ export function Expedicao({ onBack }: Props) {
     const f = flowRef.current;
     const alheias = f.kind === "choose" ? alheiasDe(f.matches, m) : new Set<string>();
     setFlow({ kind: "reading" });
-    void identifica(m, alheias).catch(handleResolveError);
+    const gen = ++resolveGenRef.current;
+    void identifica(m, alheias, gen).catch(handleResolveError);
   };
 
   const confirmarOverride = (motivo: string) => {

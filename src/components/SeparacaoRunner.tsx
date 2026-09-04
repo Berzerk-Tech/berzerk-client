@@ -375,6 +375,9 @@ export function SeparacaoRunner({
   // Época da leitura: bump = reset da sessão (zera dedupe + limpa o buffer da
   // mesa, sem desarmar o leitor) — é o "Reiniciar (R)".
   const [sessionEpoch, setSessionEpoch] = useState(0);
+  // Espelho síncrono pro handler de tags: uma resposta da nuvem iTAG que chega
+  // depois de "Pular"/"R"/troca de pedido não pode escrever no pedido novo.
+  const sessionEpochRef = useRef(0);
   // Filtros de picking (data + produtos) — por estação E por fila (mode+size),
   // sobrevivem a reload. Ver comentário em PickingFiltersModal.tsx sobre o
   // filtro fantasma que a chave global (v1) causava entre filas diferentes.
@@ -652,7 +655,7 @@ export function SeparacaoRunner({
   const finish = useCallback(async () => {
     const ord = orderRef.current;
     // Sobressalente na mesa TRAVA o complete — senão iria peça a mais.
-    if (!ord || completing || extrasRef.current.size > 0) return;
+    if (!ord || completingRef.current || extrasRef.current.size > 0) return; // ref: duplo clique antes do re-render
     setCompleting(true);
     completingRef.current = true;
     try {
@@ -726,7 +729,8 @@ export function SeparacaoRunner({
   const restartLeitura = useCallback(() => {
     if (completing) return;
     resetLeitura();
-    setSessionEpoch((n) => n + 1);
+    sessionEpochRef.current += 1;
+    setSessionEpoch(sessionEpochRef.current);
     tick();
   }, [completing, resetLeitura]);
 
@@ -947,7 +951,11 @@ export function SeparacaoRunner({
     void (async () => {
       const ord = orderRef.current;
       if (!ord) return;
+      const epoch = sessionEpochRef.current;
       const resolved = await rfid.resolveEpcs(newEpcs);
+      // Pedido/sessão mudou durante a resolução: descarta — senão a tag de A
+      // entrava no progresso (e no complete) de B, ou concluía o pedido errado.
+      if (orderRef.current?.id !== ord.id || sessionEpochRef.current !== epoch) return;
       let changed = false;
       for (const epc of newEpcs) {
         const epcU = epc.toUpperCase();

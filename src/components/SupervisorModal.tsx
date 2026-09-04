@@ -148,7 +148,7 @@ export function SupervisorModal({ faltantes, onCancel, onConfirm }: Props) {
   };
 
   return (
-    <div style={overlay} onClick={onCancel}>
+    <div style={overlay} onClick={() => !busy && onCancel()}>
       <div style={sheet} onClick={(e) => e.stopPropagation()}>
         <h2 style={title}>🔓 Liberação de supervisor</h2>
         <p style={subtitle}>
