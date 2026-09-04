@@ -21,6 +21,7 @@ import {
 } from "../lib/reimpressao";
 import { ExpedicaoHistoryModal } from "./ExpedicaoHistoryModal";
 import {
+  EXP_ERR,
   epcMatch,
   expedicaoErrorCode,
   getDocumentos,
@@ -88,7 +89,57 @@ const BUFFER_WARN = 12;
  * `awaiting_pickup` no nexus e o Tiny sem `enviado`, com a peça já ensacada.
  */
 const SHIP_RETRY_KEY = "berzerk_expedicao_ship_retry_v1";
-type ShipRetryJob = { orderId: string; numero: string | null; lidas: string[]; override?: string };
+type ShipRetryJob = {
+  orderId: string;
+  numero: string | null;
+  lidas: string[];
+  override?: string;
+  /** Conta Tiny — pra reapertar `markLabelPrinted` quando o ship devolve JT_LABEL_REQUIRED. */
+  conta?: "FM" | "JT";
+  /** O servidor apontou peça faltando e a trava de supervisor está ligada: só sai com motivo humano. */
+  precisaMotivo?: boolean;
+};
+
+/** Códigos em que o servidor discorda da conferência da mesa — precisam de motivo HUMANO (trava de supervisor). */
+const CODIGOS_CONFERENCIA = new Set<string>(["tags_incompletas", "pecas_insuficientes", "liberacao_necessaria"]);
+/** Códigos em que repetir não resolve: alguém mexeu no pedido no Nexus. */
+const CODIGOS_DEFINITIVOS = new Set<string>([EXP_ERR.INVALID_STATUS, EXP_ERR.ORDER_NOT_FOUND]);
+
+type ShipTentativa =
+  | { ok: true }
+  | { ok: false; tipo: "rede" | "aguardar" | "conferencia" | "definitivo"; code: string | null };
+
+/**
+ * Depois que o pacote saiu da mesa o ship TEM que passar — um pedido embalado
+ * e não expedido vira pedido "não enviado" no Tiny e cliente sem aviso.
+ * Política por código:
+ * - sem código (rede)            → fila persistente, reenvia sozinho;
+ * - JT_LABEL_REQUIRED            → registra a impressão de novo e repete (é só carimbo);
+ * - TRACKING_REQUIRED / outros   → fila, tenta de novo (o rastreio chega);
+ * - tags_incompletas & cia.      → NUNCA override automático: a trava de supervisor
+ *                                  existe pra um humano decidir — abre o modal de motivo;
+ * - invalid_status / not_found   → desiste e avisa (alguém mexeu no Nexus).
+ */
+async function expedirEmbalado(job: ShipRetryJob, segundaVez = false): Promise<ShipTentativa> {
+  try {
+    await shipOrder(job.orderId, job.lidas, job.override ? { motivo: job.override } : undefined);
+    return { ok: true };
+  } catch (e) {
+    const code = expedicaoErrorCode(e);
+    if (!code) return { ok: false, tipo: "rede", code: null };
+    if (code === EXP_ERR.JT_LABEL_REQUIRED && job.numero && job.conta && !segundaVez) {
+      try {
+        await markLabelPrinted(job.numero, job.conta);
+      } catch {
+        return { ok: false, tipo: "aguardar", code };
+      }
+      return expedirEmbalado(job, true);
+    }
+    if (CODIGOS_CONFERENCIA.has(code)) return { ok: false, tipo: "conferencia", code };
+    if (CODIGOS_DEFINITIVOS.has(code)) return { ok: false, tipo: "definitivo", code };
+    return { ok: false, tipo: "aguardar", code };
+  }
+}
 
 function loadShipRetry(): ShipRetryJob[] {
   try {
@@ -430,6 +481,25 @@ export function Expedicao({ onBack }: Props) {
       // um saco por etiqueta impressa, então a segunda página vira um saco a
       // mais no chão. Era esse o bug de produção: a mesa mandava etiqueta E
       // DANFE como dois jobs pra mesma térmica.
+      // Sem rastreio o ship é recusado (TRACKING_REQUIRED) — então não
+      // imprime: a trava tem que pegar ANTES do saco sair da máquina.
+      // Tenta de novo sozinho; a etiqueta costuma voltar com o AWB em minutos.
+      if (oficial && !docs.trackingNumber) {
+        setFlow({
+          kind: "error",
+          code: "rastreio_ausente",
+          message: `O pedido #${order.numero ?? ""} ainda não tem o rastreio da J&T — a etiqueta não é impressa sem ele. Tentando de novo sozinho…`,
+          order,
+        });
+        window.setTimeout(() => {
+          const f = flowRef.current;
+          if (f.kind === "error" && f.code === "rastreio_ausente" && f.order?.id === order.id) {
+            void iniciarImpressao(order, lidas, override);
+          }
+        }, RESOLVE_RETRY_MS);
+        return;
+      }
+
       const documento = documentoDaConta(order.tinyAccount);
       const rotulo = rotuloDocumento(documento);
       const r = await imprimirDocumentoDoPedido(order, "mesa", docs);
@@ -453,7 +523,11 @@ export function Expedicao({ onBack }: Props) {
       // `printed_at` da etiqueta é o carimbo de embalagem que o `ship` exige —
       // só existe pra conta JT (FM não tem linha em `jt_shipping_labels`).
       if (oficial && documento === "etiqueta" && order.numero) {
-        await markLabelPrinted(order.numero, order.tinyAccount);
+        try {
+          await markLabelPrinted(order.numero, order.tinyAccount);
+        } catch {
+          /* o ship reaperta o carimbo ao devolver JT_LABEL_REQUIRED (ver expedirEmbalado) */
+        }
       }
 
       setFlow({ kind: "packing", order, lidas, override });
@@ -520,32 +594,75 @@ export function Expedicao({ onBack }: Props) {
       return;
     }
 
-    try {
-      await shipOrder(order.id, lidas, override ? { motivo: override } : undefined);
+    const job: ShipRetryJob = { orderId: order.id, numero: order.numero, lidas, override, conta: order.tinyAccount };
+    const r = await expedirEmbalado(job);
+    if (r.ok) {
       registra(false);
-    } catch (e) {
-      const code = expedicaoErrorCode(e);
-      if (!code) {
-        enqueueRetry(order.id, order.numero, lidas, override);
-        showNotice(`Sem confirmar a expedição de #${order.numero ?? ""} (rede). Enfileirado pra reenvio — a mesa segue.`);
-        registra(true);
-      } else {
-        showNotice(`Expedição de #${order.numero ?? ""} recusada: ${shipErrorMessage(code)} Confira no sistema.`);
-        registra(true);
-      }
+      return;
     }
+    const num = `#${order.numero ?? ""}`;
+    switch (r.tipo) {
+      case "rede":
+        enqueueRetry(job);
+        showNotice(`Sem confirmar a expedição de ${num} (rede). Enfileirado pra reenvio — a mesa segue.`);
+        break;
+      case "aguardar":
+        enqueueRetry(job);
+        showNotice(`Expedição de ${num} ainda não passou: ${shipErrorMessage(r.code ?? "")} Vai tentar de novo sozinho.`);
+        break;
+      case "conferencia":
+        enqueueRetry({ ...job, precisaMotivo: true });
+        setLiberacao({ ...job, precisaMotivo: true });
+        break;
+      case "definitivo":
+        showNotice(`Expedição de ${num} recusada: ${shipErrorMessage(r.code ?? "")} Confira no Nexus.`, 15000);
+        break;
+    }
+    registra(true);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [showNotice]);
 
   // ---- fila de retry do ship ----
   // Sobrevive a fechar/reabrir o app (localStorage) — ver SHIP_RETRY_KEY.
   const retryQueue = useRef<ShipRetryJob[]>(loadShipRetry());
-  const enqueueRetry = useCallback((orderId: string, numero: string | null, lidas: string[], override?: string) => {
-    // Mesmo pedido já na fila → substitui (tags/override mais recentes).
-    retryQueue.current = retryQueue.current.filter((j) => j.orderId !== orderId);
-    retryQueue.current.push({ orderId, numero, lidas, override });
-    saveShipRetry(retryQueue.current);
+  // Só pra re-renderizar a barra de pendências quando a fila muda (a fila vive no ref).
+  const [, setQueueVersion] = useState(0);
+  const setQueue = useCallback((jobs: ShipRetryJob[]) => {
+    retryQueue.current = jobs;
+    saveShipRetry(jobs);
+    setQueueVersion((v) => v + 1);
   }, []);
+  const enqueueRetry = useCallback(
+    (job: ShipRetryJob) => setQueue([...retryQueue.current.filter((j) => j.orderId !== job.orderId), job]),
+    [setQueue],
+  );
+  // Pedido embalado que o servidor recusou por conferência: modal de motivo (humano).
+  const [liberacao, setLiberacao] = useState<ShipRetryJob | null>(null);
+  const pendentesDeMotivo = retryQueue.current.filter((j) => j.precisaMotivo);
+  const confirmarLiberacao = useCallback(
+    async (motivo: string) => {
+      const job = liberacao;
+      if (!job) return;
+      setLiberacao(null);
+      const comMotivo: ShipRetryJob = { ...job, override: motivo, precisaMotivo: false };
+      const num = job.numero ? `#${job.numero}` : "o pedido";
+      const r = await expedirEmbalado(comMotivo);
+      if (r.ok) {
+        setQueue(retryQueue.current.filter((j) => j.orderId !== job.orderId));
+        showNotice(`Expedição de ${num} confirmada com liberação: ${motivo}.`);
+        return;
+      }
+      if (r.tipo === "definitivo") {
+        setQueue(retryQueue.current.filter((j) => j.orderId !== job.orderId));
+        showNotice(`Expedição de ${num} recusada: ${shipErrorMessage(r.code ?? "")} Confira no Nexus.`, 15000);
+        return;
+      }
+      // rede/aguardar/conferência de novo: guarda o motivo e deixa a fila reapertar.
+      enqueueRetry({ ...comMotivo, precisaMotivo: r.tipo === "conferencia" });
+      showNotice(`Expedição de ${num} ainda não passou (${shipErrorMessage(r.code ?? "")}). Vai tentar de novo sozinho.`);
+    },
+    [liberacao, setQueue, enqueueRetry, showNotice],
+  );
   const retryBusyRef = useRef(false);
   useEffect(() => {
     const pendentes = retryQueue.current.length;
@@ -556,35 +673,34 @@ export function Expedicao({ onBack }: Props) {
       if (retryQueue.current.length === 0 || modoRef.current !== "oficial") return;
       if (retryBusyRef.current) return; // não empilha requests se a rede está lenta
       retryBusyRef.current = true;
-      const job = retryQueue.current[0];
+      // Quem precisa de motivo humano não é reapertado às cegas.
+      const job = retryQueue.current.find((j) => !j.precisaMotivo);
+      if (!job) {
+        retryBusyRef.current = false;
+        return;
+      }
       const rotulo = job.numero ? `#${job.numero}` : "um pedido pendente";
-      void shipOrder(job.orderId, job.lidas, job.override ? { motivo: job.override } : undefined)
-        .then(() => {
-          retryQueue.current = retryQueue.current.filter((j) => j !== job);
-          saveShipRetry(retryQueue.current);
-          showNotice(`Expedição de ${rotulo} foi confirmada.`);
-        })
-        .catch((e: unknown) => {
-          const code = expedicaoErrorCode(e);
-          if (code) {
-            // Recusa de NEGÓCIO (etiqueta não impressa, status inválido...):
-            // repetir não resolve — sai da fila e avisa pra resolver no sistema.
-            retryQueue.current = retryQueue.current.filter((j) => j !== job);
-            saveShipRetry(retryQueue.current);
-            showNotice(`Expedição de ${rotulo} recusada: ${shipErrorMessage(code)} Confira no sistema.`);
-            return;
+      void expedirEmbalado(job)
+        .then((r) => {
+          const semEle = retryQueue.current.filter((j) => j !== job);
+          if (r.ok) {
+            setQueue(semEle);
+            showNotice(`Expedição de ${rotulo} foi confirmada.`);
+          } else if (r.tipo === "definitivo") {
+            setQueue(semEle);
+            showNotice(`Expedição de ${rotulo} recusada: ${shipErrorMessage(r.code ?? "")} Confira no Nexus.`, 15000);
+          } else if (r.tipo === "conferencia") {
+            setQueue([...semEle, { ...job, precisaMotivo: true }]);
+          } else {
+            setQueue([...semEle, job]);
           }
-          // Rede: rotaciona — um pedido que falha sempre não pode bloquear os
-          // de trás (head-of-line). Ninguém é descartado — só vai pro fim.
-          retryQueue.current = [...retryQueue.current.filter((j) => j !== job), job];
-          saveShipRetry(retryQueue.current);
         })
         .finally(() => {
           retryBusyRef.current = false;
         });
     }, 15000);
     return () => clearInterval(id);
-  }, [showNotice]);
+  }, [showNotice, setQueue]);
 
   // ---- PRESENÇA: recebe o conjunto ATUAL na mesa a cada poll ----
   // Reflete a mesa o tempo todo (Leitura ao vivo sempre mostra o que está lá),
@@ -731,6 +847,28 @@ export function Expedicao({ onBack }: Props) {
         <div style={warnBanner}>Muitas tags na mesa ({bufferSize}). Se tiver peça de outro pedido, tire e aperte <strong>R</strong>.</div>
       )}
       {notice && <div style={noticeBanner}>ℹ {notice}</div>}
+      {pendentesDeMotivo.length > 0 && !liberacao && (
+        <div style={pendBar}>
+          <span>
+            ⚠{" "}
+            {pendentesDeMotivo.length === 1
+              ? `Pedido #${pendentesDeMotivo[0].numero ?? ""} foi embalado mas o servidor apontou peça faltando`
+              : `${pendentesDeMotivo.length} pedidos embalados com peça faltando segundo o servidor`}
+            {" "}— só expede com motivo (trava de supervisor ligada).
+          </span>
+          <button type="button" style={pendBtn} onClick={() => setLiberacao(pendentesDeMotivo[0])}>
+            Informar motivo
+          </button>
+        </div>
+      )}
+      {liberacao && (
+        <OverrideModal
+          faltam={0}
+          intro={`O pedido #${liberacao.numero ?? ""} já foi embalado, mas o servidor apontou peça faltando e a trava de supervisor está ligada. Informe o motivo pra expedir:`}
+          onCancel={() => setLiberacao(null)}
+          onConfirm={(motivo) => void confirmarLiberacao(motivo)}
+        />
+      )}
 
       <StepIndicator flow={flow} />
 
@@ -1259,7 +1397,17 @@ const MOTIVOS_OVERRIDE = [
 ] as const;
 const MOTIVO_MIN = 3;
 
-function OverrideModal({ faltam, onCancel, onConfirm }: { faltam: number; onCancel: () => void; onConfirm: (motivo: string) => void }) {
+function OverrideModal({
+  faltam,
+  intro,
+  onCancel,
+  onConfirm,
+}: {
+  faltam: number;
+  intro?: string;
+  onCancel: () => void;
+  onConfirm: (motivo: string) => void;
+}) {
   const [escolhido, setEscolhido] = useState<number | null>(null);
   const [outro, setOutro] = useState(false);
   const [texto, setTexto] = useState("");
@@ -1308,7 +1456,7 @@ function OverrideModal({ faltam, onCancel, onConfirm }: { faltam: number; onCanc
       <div ref={cardRef} tabIndex={-1} style={{ ...modalCard, outline: "none" }} onClick={(e) => e.stopPropagation()}>
         <h3 style={{ margin: 0, fontSize: 18 }}>Forçar impressão</h3>
         <p style={{ fontSize: 13, color: "var(--text-secondary)", margin: 0 }}>
-          Faltam {faltam} peça{faltam === 1 ? "" : "s"} pra completar o pedido. Fica registrado quem forçou e por quê. Escolha o motivo:
+          {intro ?? `Faltam ${faltam} peça${faltam === 1 ? "" : "s"} pra completar o pedido. Fica registrado quem forçou e por quê. Escolha o motivo:`}
         </p>
         <div style={motivoGrid}>
           {MOTIVOS_OVERRIDE.map((m, i) => {
@@ -1519,6 +1667,8 @@ const restartBtn: CSSProperties = { padding: "13px 16px", fontSize: 13, fontWeig
 const modalOverlay: CSSProperties = { position: "fixed", inset: 0, background: "rgba(0,0,0,.5)", display: "grid", placeItems: "center", zIndex: 50, padding: 24 };
 const modalCard: CSSProperties = { display: "flex", flexDirection: "column", gap: 14, background: "var(--bg-elevated)", border: "1px solid var(--border)", borderRadius: 16, padding: 24, width: 460, maxWidth: "100%" };
 const modalTextarea: CSSProperties = { minHeight: 80, padding: "10px 12px", background: "var(--bg-input)", border: "1px solid var(--border)", borderRadius: 10, color: "var(--text)", fontSize: 14, resize: "vertical", fontFamily: "inherit" };
+const pendBar: CSSProperties = { display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, padding: "10px 14px", background: "var(--danger-bg)", border: "1px solid var(--danger-border)", color: "var(--danger-text)", fontSize: 13, fontWeight: 600 };
+const pendBtn: CSSProperties = { padding: "8px 14px", fontSize: 12, fontWeight: 700, textTransform: "uppercase", letterSpacing: 0.5, border: 0, borderRadius: 8, background: "#dc2626", color: "white", cursor: "pointer", flexShrink: 0 };
 const motivoGrid: CSSProperties = { display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 };
 const motivoBtn: CSSProperties = { display: "flex", alignItems: "center", gap: 10, padding: "14px 12px", fontSize: 15, fontWeight: 600, textAlign: "left", border: "1px solid var(--border)", borderRadius: 10, background: "var(--bg-input)", color: "var(--text)", cursor: "pointer", lineHeight: 1.2 };
 const motivoBtnOn: CSSProperties = { borderColor: "var(--info-text)", background: "var(--info-bg)", color: "var(--info-text)" };
