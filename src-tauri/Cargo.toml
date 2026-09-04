@@ -27,11 +27,11 @@ tiny_http = "0.12"
 # native-tls (não rustls): no Windows usa SChannel — mesmo trust store do
 # Chrome — então certs aceitos no browser passam aqui também. Rustls é
 # mais estrito e rejeitava certs do iTAG (berzerk.itagalert.com.br).
-reqwest = { version = "0.12", default-features = false, features = ["native-tls", "json"] }
+reqwest = { version = "0.13", default-features = false, features = ["native-tls", "json"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 serialport = "4"
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 urlencoding = "2"
 # Decodifica os PDFs/PNGs (base64) que o front manda pra impressão silenciosa.
-base64 = "0.22"
+base64 = "0.23"
