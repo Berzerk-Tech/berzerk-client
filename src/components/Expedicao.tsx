@@ -100,6 +100,8 @@ type ShipRetryJob = {
   precisaMotivo?: boolean;
   /** Resolução EPC→peça das tags lidas (nuvem iTAG) — o nexus casa as peças por ela. */
   leituras?: LeituraResolvida[];
+  /** Job preso no modal já foi reapertado UMA vez com leituras (e ainda assim caiu na conferência). */
+  reapertadoComLeituras?: boolean;
 };
 
 /** Códigos em que o servidor discorda da conferência da mesa — precisam de motivo HUMANO (trava de supervisor). */
@@ -251,6 +253,10 @@ export function Expedicao({ onBack }: Props) {
   // novo a cada segundo e, se a tag sumisse, fechava o modal no meio da frase.
   const overrideOpenRef = useRef(false);
   overrideOpenRef.current = overrideOpen;
+  // Timer ÚNICO do retry de "rastreio ausente" — sem ref, cada entrada no ramo
+  // criava uma cadeia de 4 s independente (rajada no /documentos e risco de
+  // duas etiquetas).
+  const rastreioTimer = useRef<number | null>(null);
   const [engineWarn, setEngineWarn] = useState<string | null>(null);
   const [reprintingId, setReprintingId] = useState<string | null>(null);
   const [historyOpen, setHistoryOpen] = useState(false);
@@ -293,17 +299,28 @@ export function Expedicao({ onBack }: Props) {
     if (msg) window.setTimeout(() => setNotice((n) => (n === msg ? null : n)), ms);
   }, []);
 
+  // O modal de justificativa só renderiza em "identified"; se o flow sair daí
+  // por baixo (falha de rede, mesa esvaziou) ele desmonta sem `onCancel` e o
+  // congelamento da leitura ficaria ligado pra sempre — a mesa parava, calada.
   useEffect(() => {
-    if (flow.kind === "idle" || flow.kind === "identified" || flow.kind === "packing" || flow.kind === "done") {
-      inputRef.current?.focus();
+    if (flow.kind !== "identified" && overrideOpen) {
+      setOverrideOpen(false);
+      overrideOpenRef.current = false;
     }
-  }, [flow.kind]);
+  }, [flow.kind, overrideOpen]);
+  useEffect(
+    () => () => {
+      if (rastreioTimer.current) window.clearTimeout(rastreioTimer.current);
+    },
+    [],
+  );
 
   // ---- limpa tudo pra um novo ciclo / repetição ----
   // Zera o que já foi processado/visto — as peças fisicamente na mesa voltam a
   // contar no próximo poll de presença (sem rearmar o leitor).
   const reiniciar = useCallback(() => {
     if (resolveTimer.current) clearTimeout(resolveTimer.current);
+    if (rastreioTimer.current) window.clearTimeout(rastreioTimer.current);
     mesaRef.current = new Set();
     processedRef.current = new Set();
     presentRef.current = new Map();
@@ -398,6 +415,7 @@ export function Expedicao({ onBack }: Props) {
       // conferência (`conf.fora`), lá embaixo.
       await identifica(m, alheiasDe(matches, m), gen);
     } catch (e) {
+      if (gen !== resolveGenRef.current) return; // resolução mais nova já assumiu a tela
       handleResolveError(e);
       scheduleRetry();
     }
@@ -493,10 +511,13 @@ export function Expedicao({ onBack }: Props) {
           message: `O pedido #${order.numero ?? ""} ainda não tem o rastreio da J&T — a etiqueta não é impressa sem ele. Tentando de novo sozinho…`,
           order,
         });
-        window.setTimeout(() => {
+        if (rastreioTimer.current) window.clearTimeout(rastreioTimer.current);
+        rastreioTimer.current = window.setTimeout(() => {
+          rastreioTimer.current = null;
           const f = flowRef.current;
           if (f.kind === "error" && f.code === "rastreio_ausente" && f.order?.id === order.id) {
-            void iniciarImpressao(order, lidas, override);
+            // `lidas` da conferência ATUAL: a operadora pode ter completado o pedido enquanto esperava.
+            void iniciarImpressao(order, confRef.current?.contadas ?? lidas, override);
           }
         }, RESOLVE_RETRY_MS);
         return;
@@ -593,6 +614,10 @@ export function Expedicao({ onBack }: Props) {
     },
     [rfid],
   );
+  // Ref pro loop da fila: `rfid` (value do RfidContext) muda a cada render do
+  // provider, e o efeito da fila não pode ser reiniciado por isso.
+  const leiturasRef = useRef(leiturasDaMesa);
+  leiturasRef.current = leiturasDaMesa;
 
   const concluirCiclo = useCallback(async () => {
     const f = flowRef.current;
@@ -670,10 +695,24 @@ export function Expedicao({ onBack }: Props) {
   // Pedido embalado que o servidor recusou por conferência: modal de motivo (humano).
   const [liberacao, setLiberacao] = useState<ShipRetryJob | null>(null);
   const pendentesDeMotivo = retryQueue.current.filter((j) => j.precisaMotivo);
+  const pendentesAguardando = retryQueue.current.filter((j) => !j.precisaMotivo);
+  // Foco no campo de bipagem — NUNCA com um modal aberto: o efeito do filho
+  // (foco no modal) roda antes deste, e o input roubava as teclas 1–6/Enter.
+  useEffect(() => {
+    if (overrideOpen || liberacao) return;
+    if (flow.kind === "idle" || flow.kind === "identified" || flow.kind === "packing" || flow.kind === "done") {
+      inputRef.current?.focus();
+    }
+  }, [flow.kind, overrideOpen, liberacao]);
   const confirmarLiberacao = useCallback(
     async (motivo: string) => {
       const job = liberacao;
       if (!job) return;
+      if (modoRef.current !== "oficial") {
+        setLiberacao(null);
+        showNotice("Modo teste: nada é expedido. Volte pro modo oficial pra liberar este pedido.");
+        return;
+      }
       setLiberacao(null);
       const comMotivo: ShipRetryJob = { ...job, override: motivo, precisaMotivo: false };
       const num = job.numero ? `#${job.numero}` : "o pedido";
@@ -707,16 +746,19 @@ export function Expedicao({ onBack }: Props) {
       // Quem precisa de motivo humano não é reapertado às cegas — exceto UMA
       // vez com `leituras` preenchidas, se ainda não tinha: pedido que caiu no
       // modal só porque o servidor não achou o EPC na réplica passa sozinho.
-      const semLeituras = (j: ShipRetryJob) => !j.leituras;
+      const temLeituras = (j: ShipRetryJob) => (j.leituras?.length ?? 0) > 0;
       const job =
         retryQueue.current.find((j) => !j.precisaMotivo) ??
-        retryQueue.current.find((j) => j.precisaMotivo && semLeituras(j));
+        retryQueue.current.find((j) => j.precisaMotivo && !j.reapertadoComLeituras);
       if (!job) {
         retryBusyRef.current = false;
         return;
       }
       const rotulo = job.numero ? `#${job.numero}` : "um pedido pendente";
-      const tentativa = job.leituras ? Promise.resolve(job) : leiturasDaMesa(job.lidas).then((leituras) => ({ ...job, leituras }));
+      // Sem leituras (nuvem iTAG fora na hora): tenta resolver de novo agora.
+      const tentativa = temLeituras(job)
+        ? Promise.resolve(job)
+        : leiturasRef.current(job.lidas).then((leituras) => ({ ...job, leituras }));
       void tentativa
         .then((j) => expedirEmbalado(j).then((r) => [j, r] as const))
         .then(([j, r]) => {
@@ -728,7 +770,9 @@ export function Expedicao({ onBack }: Props) {
             setQueue(semEle);
             showNotice(`Expedição de ${rotulo} recusada: ${shipErrorMessage(r.code ?? "")} Confira no Nexus.`, 15000);
           } else if (r.tipo === "conferencia") {
-            setQueue([...semEle, { ...j, leituras: j.leituras ?? [], precisaMotivo: true }]);
+            // Só marca "já reapertei" se de fato foi com leituras; sem elas
+            // (nuvem fora) fica elegível de novo quando ela voltar.
+            setQueue([...semEle, { ...j, precisaMotivo: true, reapertadoComLeituras: j.reapertadoComLeituras || temLeituras(j) }]);
           } else {
             setQueue([...semEle, j]);
           }
@@ -738,7 +782,7 @@ export function Expedicao({ onBack }: Props) {
         });
     }, 15000);
     return () => clearInterval(id);
-  }, [showNotice, setQueue, leiturasDaMesa]);
+  }, [showNotice, setQueue]);
 
   // ---- PRESENÇA: recebe o conjunto ATUAL na mesa a cada poll ----
   // Reflete a mesa o tempo todo (Leitura ao vivo sempre mostra o que está lá),
@@ -897,6 +941,14 @@ export function Expedicao({ onBack }: Props) {
           <button type="button" style={pendBtn} onClick={() => setLiberacao(pendentesDeMotivo[0])}>
             Informar motivo
           </button>
+        </div>
+      )}
+      {pendentesAguardando.length > 0 && (
+        <div style={pendBarSoft}>
+          ⏳ {pendentesAguardando.length === 1
+            ? `Envio do pedido #${pendentesAguardando[0].numero ?? ""} pendente`
+            : `${pendentesAguardando.length} envios pendentes`}
+          {" "}— reenviando sozinho a cada 15 s (rede ou rastreio). O pacote pode seguir.
         </div>
       )}
       {liberacao && (
@@ -1706,6 +1758,7 @@ const modalOverlay: CSSProperties = { position: "fixed", inset: 0, background: "
 const modalCard: CSSProperties = { display: "flex", flexDirection: "column", gap: 14, background: "var(--bg-elevated)", border: "1px solid var(--border)", borderRadius: 16, padding: 24, width: 460, maxWidth: "100%" };
 const modalTextarea: CSSProperties = { minHeight: 80, padding: "10px 12px", background: "var(--bg-input)", border: "1px solid var(--border)", borderRadius: 10, color: "var(--text)", fontSize: 14, resize: "vertical", fontFamily: "inherit" };
 const pendBar: CSSProperties = { display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, padding: "10px 14px", background: "var(--danger-bg)", border: "1px solid var(--danger-border)", color: "var(--danger-text)", fontSize: 13, fontWeight: 600 };
+const pendBarSoft: CSSProperties = { padding: "8px 14px", background: "var(--info-bg)", border: "1px solid var(--info-border)", color: "var(--info-text)", fontSize: 12, fontWeight: 600 };
 const pendBtn: CSSProperties = { padding: "8px 14px", fontSize: 12, fontWeight: 700, textTransform: "uppercase", letterSpacing: 0.5, border: 0, borderRadius: 8, background: "#dc2626", color: "white", cursor: "pointer", flexShrink: 0 };
 const motivoGrid: CSSProperties = { display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 };
 const motivoBtn: CSSProperties = { display: "flex", alignItems: "center", gap: 10, padding: "14px 12px", fontSize: 15, fontWeight: 600, textAlign: "left", border: "1px solid var(--border)", borderRadius: 10, background: "var(--bg-input)", color: "var(--text)", cursor: "pointer", lineHeight: 1.2 };
