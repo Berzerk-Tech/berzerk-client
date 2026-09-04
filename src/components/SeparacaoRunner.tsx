@@ -701,6 +701,15 @@ export function SeparacaoRunner({
       // operador; "tenta de novo" só confunde nesses casos.
       const negocio = e instanceof ApiError && !!e.body && typeof e.body === "object" && "error" in e.body;
       const msg = e instanceof Error ? e.message : String(e);
+      // Tag presa a outro pedido (peça voltou pra arara com a tag "vinculada"):
+      // o supervisor pode realocar a tag pelo PIN (nexus #213) — abre o PIN
+      // direto em vez de deixar a operadora descobrir o K.
+      if (negocio && (e.body as { error?: unknown }).error === "tag_duplicada") {
+        setServerFaltantes(null);
+        setSupervisorOpen(true);
+        showNotice(`Não dá pra concluir: ${msg} Um supervisor pode liberar com o PIN.`);
+        return;
+      }
       showNotice(negocio ? `Não dá pra concluir: ${msg}` : `Falha ao concluir: ${msg} — tenta de novo ou chama o suporte.`);
     } finally {
       completingRef.current = false;
