@@ -40,7 +40,7 @@ import {
   type ExpedicaoMode,
 } from "../services/expedicaoMode";
 import { conferir, type Conferencia } from "../lib/conferenciaExpedicao";
-import type { EpcLookupItem, OrderItem } from "../services/orders";
+import type { EpcLookupItem, LeituraResolvida, OrderItem } from "../services/orders";
 
 type Props = { onBack: () => void };
 
@@ -98,6 +98,8 @@ type ShipRetryJob = {
   conta?: "FM" | "JT";
   /** O servidor apontou peça faltando e a trava de supervisor está ligada: só sai com motivo humano. */
   precisaMotivo?: boolean;
+  /** Resolução EPC→peça das tags lidas (nuvem iTAG) — o nexus casa as peças por ela. */
+  leituras?: LeituraResolvida[];
 };
 
 /** Códigos em que o servidor discorda da conferência da mesa — precisam de motivo HUMANO (trava de supervisor). */
@@ -122,7 +124,7 @@ type ShipTentativa =
  */
 async function expedirEmbalado(job: ShipRetryJob, segundaVez = false): Promise<ShipTentativa> {
   try {
-    await shipOrder(job.orderId, job.lidas, job.override ? { motivo: job.override } : undefined);
+    await shipOrder(job.orderId, job.lidas, job.override ? { motivo: job.override } : undefined, job.leituras);
     return { ok: true };
   } catch (e) {
     const code = expedicaoErrorCode(e);
@@ -570,6 +572,28 @@ export function Expedicao({ onBack }: Props) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [flow.kind]);
 
+  /**
+   * Resolução EPC→peça das tags contadas, pela nuvem iTAG (cache do
+   * RfidContext — sem ida à rede na prática). Vai no `ship` como `leituras`,
+   * igual ao `complete` da separação: é a MESMA fonte que a mesa usou pra
+   * conferir, então servidor e mesa passam a concordar sobre o que foi lido.
+   */
+  const leiturasDaMesa = useCallback(
+    async (tags: string[]): Promise<LeituraResolvida[]> => {
+      try {
+        const map = await rfid.resolveEpcs(tags);
+        return tags.flatMap((t) => {
+          const epc = t.toUpperCase();
+          const l = map.get(epc);
+          return l ? [{ epc, ean13: l.ean13, sku: l.sku, size: l.size, name: l.name ?? null }] : [];
+        });
+      } catch {
+        return [];
+      }
+    },
+    [rfid],
+  );
+
   const concluirCiclo = useCallback(async () => {
     const f = flowRef.current;
     if (f.kind !== "packing") return;
@@ -594,7 +618,14 @@ export function Expedicao({ onBack }: Props) {
       return;
     }
 
-    const job: ShipRetryJob = { orderId: order.id, numero: order.numero, lidas, override, conta: order.tinyAccount };
+    const job: ShipRetryJob = {
+      orderId: order.id,
+      numero: order.numero,
+      lidas,
+      override,
+      conta: order.tinyAccount,
+      leituras: await leiturasDaMesa(lidas),
+    };
     const r = await expedirEmbalado(job);
     if (r.ok) {
       registra(false);
@@ -673,16 +704,23 @@ export function Expedicao({ onBack }: Props) {
       if (retryQueue.current.length === 0 || modoRef.current !== "oficial") return;
       if (retryBusyRef.current) return; // não empilha requests se a rede está lenta
       retryBusyRef.current = true;
-      // Quem precisa de motivo humano não é reapertado às cegas.
-      const job = retryQueue.current.find((j) => !j.precisaMotivo);
+      // Quem precisa de motivo humano não é reapertado às cegas — exceto UMA
+      // vez com `leituras` preenchidas, se ainda não tinha: pedido que caiu no
+      // modal só porque o servidor não achou o EPC na réplica passa sozinho.
+      const semLeituras = (j: ShipRetryJob) => !j.leituras;
+      const job =
+        retryQueue.current.find((j) => !j.precisaMotivo) ??
+        retryQueue.current.find((j) => j.precisaMotivo && semLeituras(j));
       if (!job) {
         retryBusyRef.current = false;
         return;
       }
       const rotulo = job.numero ? `#${job.numero}` : "um pedido pendente";
-      void expedirEmbalado(job)
-        .then((r) => {
-          const semEle = retryQueue.current.filter((j) => j !== job);
+      const tentativa = job.leituras ? Promise.resolve(job) : leiturasDaMesa(job.lidas).then((leituras) => ({ ...job, leituras }));
+      void tentativa
+        .then((j) => expedirEmbalado(j).then((r) => [j, r] as const))
+        .then(([j, r]) => {
+          const semEle = retryQueue.current.filter((x) => x !== job);
           if (r.ok) {
             setQueue(semEle);
             showNotice(`Expedição de ${rotulo} foi confirmada.`);
@@ -690,9 +728,9 @@ export function Expedicao({ onBack }: Props) {
             setQueue(semEle);
             showNotice(`Expedição de ${rotulo} recusada: ${shipErrorMessage(r.code ?? "")} Confira no Nexus.`, 15000);
           } else if (r.tipo === "conferencia") {
-            setQueue([...semEle, { ...job, precisaMotivo: true }]);
+            setQueue([...semEle, { ...j, leituras: j.leituras ?? [], precisaMotivo: true }]);
           } else {
-            setQueue([...semEle, job]);
+            setQueue([...semEle, j]);
           }
         })
         .finally(() => {
@@ -700,7 +738,7 @@ export function Expedicao({ onBack }: Props) {
         });
     }, 15000);
     return () => clearInterval(id);
-  }, [showNotice, setQueue]);
+  }, [showNotice, setQueue, leiturasDaMesa]);
 
   // ---- PRESENÇA: recebe o conjunto ATUAL na mesa a cada poll ----
   // Reflete a mesa o tempo todo (Leitura ao vivo sempre mostra o que está lá),
