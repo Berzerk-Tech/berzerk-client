@@ -1057,38 +1057,78 @@ function HistorySidebar({ session, reprintingId, onReprint }: { session: Session
         {session.length === 0 ? (
           <span style={liveEmpty}>Os pedidos despachados nesta sessão aparecem aqui.</span>
         ) : (
-          session.map((s, i) => {
-            const thumbs = s.order.items.map((it) => it.imagemUrl).filter((u): u is string => !!u).slice(0, 3);
-            const count = s.order.items.reduce((a, it) => a + it.quantidade, 0);
-            return (
-              <div key={`${s.order.id}-${i}`} style={histCard}>
-                <div style={histCardTop}>
-                  <code style={histNumero}>#{s.order.numero ?? s.order.id.slice(0, 8)}</code>
-                  <span style={{ ...histDot, background: s.modo === "teste" ? "var(--warning-text)" : "var(--success-dot)" }} title={s.modo === "teste" ? "teste" : "expedido"} />
-                </div>
-                {s.order.clienteNome && <span style={histCliente}>{s.order.clienteNome}</span>}
-                <div style={histThumbs}>
-                  {thumbs.map((u, j) => (
-                    <img
-                      key={j}
-                      src={miniatura(u) ?? undefined}
-                      alt=""
-                      style={histThumb}
-                      loading="lazy"
-                      decoding="async"
-                    />
-                  ))}
-                  {thumbs.length === 0 && <span style={histThumbEmpty}>{count} {count === 1 ? "item" : "itens"}</span>}
-                </div>
-                <button style={reprintBtn} disabled={reprintingId === s.order.id} onClick={() => onReprint(s.order)}>
-                  {reprintingId === s.order.id ? "Reimprimindo…" : "↻ Reimprimir"}
-                </button>
+          session.map((s, i) => (
+            <div key={`${s.order.id}-${i}`} style={histCard}>
+              <div style={histCardTop}>
+                <code style={histNumero}>#{s.order.numero ?? s.order.id.slice(0, 8)}</code>
+                <span style={{ ...histDot, background: s.modo === "teste" ? "var(--warning-text)" : "var(--success-dot)" }} title={s.modo === "teste" ? "teste" : "expedido"} />
               </div>
-            );
-          })
+              {s.order.clienteNome && <span style={histCliente}>{s.order.clienteNome}</span>}
+              <HistItens items={s.order.items} />
+              <button style={reprintBtn} disabled={reprintingId === s.order.id} onClick={() => onReprint(s.order)}>
+                {reprintingId === s.order.id ? "Reimprimindo…" : "↻ Reimprimir"}
+              </button>
+            </div>
+          ))
         )}
       </div>
     </aside>
+  );
+}
+
+/** Quantas miniaturas cabem na linha do card antes do "+N" (regra do legado). */
+const HIST_THUMBS_VISIVEIS = 3;
+
+/**
+ * Peças do pedido no card do histórico: até 3 miniaturas e um "+N" que abre o
+ * resto (o legado tinha esse botão e a mesa usa pra conferir o que foi no
+ * pacote). Aberto, lista TODAS as peças, com nome/tamanho e quantidade, inclusive
+ * as sem foto — que no modo compacto não aparecem.
+ */
+function HistItens({ items }: { items: OrderItem[] }) {
+  const [aberto, setAberto] = useState(false);
+  const count = items.reduce((a, it) => a + it.quantidade, 0);
+  const comFoto = items.filter((it) => !!it.imagemUrl);
+  const ocultos = items.length - Math.min(comFoto.length, HIST_THUMBS_VISIVEIS);
+
+  if (aberto) {
+    return (
+      <div style={histItensLista}>
+        {items.map((it) => (
+          <div key={it.id} style={histItemRow}>
+            {it.imagemUrl ? (
+              <img src={miniatura(it.imagemUrl) ?? undefined} alt="" style={histThumb} loading="lazy" decoding="async" />
+            ) : (
+              <span style={{ ...histThumb, ...histThumbPlaceholder }}>—</span>
+            )}
+            <span style={histItemNome}>
+              {it.nome ?? it.sku ?? it.ean ?? "Peça"}
+              {it.tamanho ? ` · ${it.tamanho}` : ""}
+            </span>
+            {it.quantidade > 1 && <code style={histItemQtd}>×{it.quantidade}</code>}
+          </div>
+        ))}
+        <button type="button" style={histMaisBtn} onClick={() => setAberto(false)}>
+          − Recolher
+        </button>
+      </div>
+    );
+  }
+
+  return (
+    <div style={histThumbs}>
+      {comFoto.slice(0, HIST_THUMBS_VISIVEIS).map((it) => (
+        <img key={it.id} src={miniatura(it.imagemUrl!) ?? undefined} alt="" style={histThumb} loading="lazy" decoding="async" />
+      ))}
+      {ocultos > 0 && (
+        <button type="button" style={histMaisTile} onClick={() => setAberto(true)} title={`Ver todas as ${items.length} peças`}>
+          +{ocultos}
+        </button>
+      )}
+      {comFoto.length === 0 && ocultos === 0 && (
+        <span style={histThumbEmpty}>{count} {count === 1 ? "item" : "itens"}</span>
+      )}
+    </div>
   );
 }
 
@@ -1330,6 +1370,13 @@ const histCliente: CSSProperties = { fontSize: 12, color: "var(--text-secondary)
 const histThumbs: CSSProperties = { display: "flex", gap: 6 };
 const histThumb: CSSProperties = { width: 42, height: 42, borderRadius: 6, objectFit: "cover", background: "var(--bg-input)", border: "1px solid var(--border)" };
 const histThumbEmpty: CSSProperties = { fontSize: 11, color: "var(--text-muted)", fontFamily: "var(--font-mono)" };
+const histThumbPlaceholder: CSSProperties = { display: "inline-flex", alignItems: "center", justifyContent: "center", color: "var(--text-faint)", fontSize: 12, flexShrink: 0 };
+const histMaisTile: CSSProperties = { ...histThumb, display: "inline-flex", alignItems: "center", justifyContent: "center", fontSize: 13, fontWeight: 700, fontFamily: "var(--font-mono)", color: "var(--text-secondary)", cursor: "pointer", padding: 0 };
+const histItensLista: CSSProperties = { display: "flex", flexDirection: "column", gap: 6 };
+const histItemRow: CSSProperties = { display: "flex", alignItems: "center", gap: 8, minWidth: 0 };
+const histItemNome: CSSProperties = { flex: 1, minWidth: 0, fontSize: 11, color: "var(--text-secondary)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" };
+const histItemQtd: CSSProperties = { fontSize: 11, color: "var(--text)", fontFamily: "var(--font-mono)", flexShrink: 0 };
+const histMaisBtn: CSSProperties = { alignSelf: "flex-start", padding: "4px 8px", fontSize: 11, border: "1px solid var(--border)", borderRadius: 6, background: "transparent", color: "var(--text-muted)", cursor: "pointer" };
 const reprintBtn: CSSProperties = { padding: "7px 10px", fontSize: 11, fontWeight: 700, letterSpacing: 0.5, textTransform: "uppercase", border: "1px solid var(--border)", borderRadius: 8, background: "transparent", color: "var(--text-secondary)", cursor: "pointer" };
 
 const footer: CSSProperties = { position: "relative", display: "flex", flexDirection: "column", gap: 10, padding: "14px 28px 18px", borderTop: "1px solid var(--border)", background: "var(--bg)" };
