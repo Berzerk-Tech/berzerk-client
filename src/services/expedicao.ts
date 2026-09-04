@@ -9,6 +9,7 @@
 // Erros de negócio vêm como `{ error: 'CODIGO' }` (4xx). Trate por CÓDIGO
 // (ver `expedicaoErrorCode`). 404 dos endpoints = degradar com aviso.
 
+import type { LeituraResolvida } from "./orders";
 import { apiRequest, ApiError } from "../lib/api";
 import { isExpedicaoSimulacao } from "./expedicaoMode";
 import type { Me, OrderChannel, OrderItem, OrderStatus } from "./orders";
@@ -325,11 +326,21 @@ export function shipOrder(
   orderId: string,
   rfidTags: string[],
   override?: ShipOverride,
+  leituras?: LeituraResolvida[],
 ): Promise<ExpedicaoOrder> {
   if (isExpedicaoSimulacao()) return Promise.resolve(mockShip(orderId));
+  // `leituras` = resolução EPC→peça que a mesa fez pela nuvem iTAG (mesmo
+  // shape do `complete` da separação). Sem ela o nexus casa as peças SÓ pela
+  // réplica rfid_epc_inventory e todo EPC fora da réplica vira "peça
+  // faltando" → `pecas_insuficientes` com a trava de supervisor ligada
+  // (04/09: modal de motivo em todo pedido da mesa, mesmo completo).
   return apiRequest<ExpedicaoOrder>(`/expedicao/orders/${orderId}/ship`, {
     method: "POST",
-    body: override ? { rfidTags, override } : { rfidTags },
+    body: {
+      rfidTags,
+      ...(override ? { override } : {}),
+      ...(leituras && leituras.length > 0 ? { leituras } : {}),
+    },
   });
 }
 
