@@ -967,7 +967,7 @@ function OrderPanel({
         </div>
         <div style={orderMeta}>
           {order.clienteNome && <Meta label="Cliente" value={order.clienteNome} />}
-          {order.separatedBy && <Meta label="Separado por" value={order.separatedBy} />}
+          {nomeSeparador(order) && <Meta label="Separado por" value={nomeSeparador(order)!} />}
           {order.trackingNumber && <Meta label="Rastreio" value={order.trackingNumber} mono />}
         </div>
         <div style={orderProgress}>
@@ -991,6 +991,17 @@ function Meta({ label, value, mono }: { label: string; value: string; mono?: boo
 }
 
 // ============================================================
+// "Separado por": o nexus manda o nome em `separatedByNome`; `separatedBy`
+// hoje é o id do ator (UUID) — não mostra id cru pra operadora.
+function nomeSeparador(order: ExpedicaoOrder): string | null {
+  const nome = order.separatedByNome?.trim();
+  if (nome) return nome;
+  const raw = order.separatedBy?.trim();
+  if (!raw) return null;
+  return UUID_RE.test(raw) ? null : raw;
+}
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
 // Grade de peças (imagem + selinho verde) — o coração da UX
 // ============================================================
 function ItemsGrid({ items, progress }: { items: OrderItem[]; progress: Map<string, number> }) {
@@ -1233,24 +1244,110 @@ function StepIndicator({ flow }: { flow: Flow }) {
   );
 }
 
+/**
+ * Motivos prontos pra forçar a impressão. A mesa não tem tempo (nem gente
+ * confortável) pra digitar: escolhe com um clique ou com a tecla do número.
+ * "Outro" abre o texto livre. O texto vai como está pro `override.motivo` do
+ * nexus (mín. 3 caracteres lá).
+ */
+const MOTIVOS_OVERRIDE = [
+  "Supervisor liberou",
+  "Peça sem tag",
+  "Tag não lê",
+  "Conferido na mão",
+  "Peça em falta, cliente avisado",
+] as const;
+const MOTIVO_MIN = 3;
+
 function OverrideModal({ faltam, onCancel, onConfirm }: { faltam: number; onCancel: () => void; onConfirm: (motivo: string) => void }) {
-  const [motivo, setMotivo] = useState("");
+  const [escolhido, setEscolhido] = useState<number | null>(null);
+  const [outro, setOutro] = useState(false);
+  const [texto, setTexto] = useState("");
+  const motivo = outro ? texto.trim() : escolhido !== null ? MOTIVOS_OVERRIDE[escolhido] : "";
+  const pronto = motivo.length >= MOTIVO_MIN;
+  const confirmar = () => pronto && onConfirm(motivo);
+  // Tira o foco do campo de bipagem: senão o número digitado cai lá dentro e o
+  // Enter dispara o form da bipada junto com a confirmação.
+  const cardRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
-    const onKey = (e: KeyboardEvent) => e.key === "Escape" && onCancel();
+    cardRef.current?.focus();
+  }, []);
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        onCancel();
+        return;
+      }
+      const tag = (e.target as HTMLElement | null)?.tagName;
+      if (tag === "INPUT") return; // campo de bipagem com foco: não interpreta
+      const noTexto = tag === "TEXTAREA";
+      if (e.key === "Enter" && !noTexto) {
+        e.preventDefault();
+        confirmar();
+        return;
+      }
+      if (noTexto) return;
+      const n = Number(e.key);
+      if (n >= 1 && n <= MOTIVOS_OVERRIDE.length) {
+        e.preventDefault();
+        setOutro(false);
+        setEscolhido(n - 1);
+      } else if (n === MOTIVOS_OVERRIDE.length + 1) {
+        setEscolhido(null);
+        setOutro(true);
+      }
+    };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [onCancel]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [onCancel, motivo, pronto]);
+
   return (
     <div style={modalOverlay} onClick={onCancel}>
-      <div style={modalCard} onClick={(e) => e.stopPropagation()}>
+      <div ref={cardRef} tabIndex={-1} style={{ ...modalCard, outline: "none" }} onClick={(e) => e.stopPropagation()}>
         <h3 style={{ margin: 0, fontSize: 18 }}>Forçar impressão</h3>
         <p style={{ fontSize: 13, color: "var(--text-secondary)", margin: 0 }}>
-          Faltam {faltam} peça{faltam === 1 ? "" : "s"} pra completar o pedido. Isso fica registrado (auditável). Descreva o motivo:
+          Faltam {faltam} peça{faltam === 1 ? "" : "s"} pra completar o pedido. Fica registrado quem forçou e por quê. Escolha o motivo:
         </p>
-        <textarea autoFocus value={motivo} onChange={(e) => setMotivo(e.target.value)} placeholder="Ex.: peça sem tag, conferido manualmente…" style={modalTextarea} />
+        <div style={motivoGrid}>
+          {MOTIVOS_OVERRIDE.map((m, i) => {
+            const on = !outro && escolhido === i;
+            return (
+              <button
+                key={m}
+                type="button"
+                style={{ ...motivoBtn, ...(on ? motivoBtnOn : null) }}
+                onClick={() => {
+                  setOutro(false);
+                  setEscolhido(i);
+                }}
+              >
+                <span style={motivoNum}>{i + 1}</span>
+                {m}
+              </button>
+            );
+          })}
+          <button
+            type="button"
+            style={{ ...motivoBtn, ...(outro ? motivoBtnOn : null) }}
+            onClick={() => {
+              setEscolhido(null);
+              setOutro(true);
+            }}
+          >
+            <span style={motivoNum}>{MOTIVOS_OVERRIDE.length + 1}</span>
+            Outro motivo…
+          </button>
+        </div>
+        {outro && (
+          <textarea autoFocus value={texto} onChange={(e) => setTexto(e.target.value)} placeholder="Escreva o motivo" style={modalTextarea} />
+        )}
         <div style={{ display: "flex", gap: 10, justifyContent: "flex-end" }}>
           <button style={ghostBtn} onClick={onCancel}>Cancelar</button>
-          <button style={{ ...redBtn, opacity: motivo.trim() ? 1 : 0.5 }} disabled={!motivo.trim()} onClick={() => onConfirm(motivo.trim())}>Forçar e imprimir</button>
+          <button style={{ ...redBtn, opacity: pronto ? 1 : 0.5 }} disabled={!pronto} onClick={confirmar}>
+            Forçar e imprimir
+          </button>
         </div>
       </div>
     </div>
@@ -1422,3 +1519,7 @@ const restartBtn: CSSProperties = { padding: "13px 16px", fontSize: 13, fontWeig
 const modalOverlay: CSSProperties = { position: "fixed", inset: 0, background: "rgba(0,0,0,.5)", display: "grid", placeItems: "center", zIndex: 50, padding: 24 };
 const modalCard: CSSProperties = { display: "flex", flexDirection: "column", gap: 14, background: "var(--bg-elevated)", border: "1px solid var(--border)", borderRadius: 16, padding: 24, width: 460, maxWidth: "100%" };
 const modalTextarea: CSSProperties = { minHeight: 80, padding: "10px 12px", background: "var(--bg-input)", border: "1px solid var(--border)", borderRadius: 10, color: "var(--text)", fontSize: 14, resize: "vertical", fontFamily: "inherit" };
+const motivoGrid: CSSProperties = { display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 };
+const motivoBtn: CSSProperties = { display: "flex", alignItems: "center", gap: 10, padding: "14px 12px", fontSize: 15, fontWeight: 600, textAlign: "left", border: "1px solid var(--border)", borderRadius: 10, background: "var(--bg-input)", color: "var(--text)", cursor: "pointer", lineHeight: 1.2 };
+const motivoBtnOn: CSSProperties = { borderColor: "var(--info-text)", background: "var(--info-bg)", color: "var(--info-text)" };
+const motivoNum: CSSProperties = { display: "inline-flex", alignItems: "center", justifyContent: "center", width: 24, height: 24, borderRadius: 6, border: "1px solid var(--border)", fontFamily: "var(--font-mono)", fontSize: 12, flexShrink: 0, color: "var(--text-muted)" };

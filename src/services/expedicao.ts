@@ -34,6 +34,8 @@ export type ExpedicaoOrder = {
   trackingNumber: string | null;
   rfidTags: string[] | null;
   separatedBy: string | null;
+  /** Nome de quem separou, resolvido pelo nexus (`separatedBy` pode ser só o id). */
+  separatedByNome?: string | null;
   separatedAt: string | null;
   shippedBy: string | null;
   shippedAt: string | null;
