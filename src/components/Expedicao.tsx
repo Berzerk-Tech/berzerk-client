@@ -967,7 +967,7 @@ function OrderPanel({
         </div>
         <div style={orderMeta}>
           {order.clienteNome && <Meta label="Cliente" value={order.clienteNome} />}
-          {order.separatedBy && <Meta label="Separado por" value={order.separatedBy} />}
+          {nomeSeparador(order) && <Meta label="Separado por" value={nomeSeparador(order)!} />}
           {order.trackingNumber && <Meta label="Rastreio" value={order.trackingNumber} mono />}
         </div>
         <div style={orderProgress}>
@@ -991,6 +991,17 @@ function Meta({ label, value, mono }: { label: string; value: string; mono?: boo
 }
 
 // ============================================================
+// "Separado por": o nexus manda o nome em `separatedByNome`; `separatedBy`
+// hoje é o id do ator (UUID) — não mostra id cru pra operadora.
+function nomeSeparador(order: ExpedicaoOrder): string | null {
+  const nome = order.separatedByNome?.trim();
+  if (nome) return nome;
+  const raw = order.separatedBy?.trim();
+  if (!raw) return null;
+  return UUID_RE.test(raw) ? null : raw;
+}
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
 // Grade de peças (imagem + selinho verde) — o coração da UX
 // ============================================================
 function ItemsGrid({ items, progress }: { items: OrderItem[]; progress: Map<string, number> }) {
