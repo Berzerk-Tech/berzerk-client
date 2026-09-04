@@ -12,7 +12,7 @@ import { AmbientBackground } from "./AmbientBackground";
 import { OperatorChip } from "./OperatorChip";
 import { useRfid } from "../contexts/RfidContext";
 import { beepError, beepOk } from "../lib/beep";
-import { LARGURA_PICKING, imagemRedimensionada, miniatura } from "../lib/imagens";
+import { LARGURA_PICKING, imagemLeve, miniaturaLeve } from "../lib/imagens";
 import { printEngineStatus } from "../lib/printer";
 import {
   documentoDaConta,
@@ -118,6 +118,19 @@ function saveShipRetry(jobs: ShipRetryJob[]): void {
  * do conjunto — é assim que a remoção reflete sem desarmar/piscar o leitor.
  */
 const PRESENCE_TTL = 3400;
+/**
+ * Tolerância cresce com a lotação da mesa: com dezenas de tags o leitor demora
+ * mais pra reler cada uma (colisão de inventário) e, com o TTL fixo, tags do
+ * pedido sumiam e voltavam a cada ciclo — a tela alternava "FALTAM PEÇAS" ↔
+ * "PRONTO" sem ninguém tocar na mesa (vídeo 04/09, pedido #865205 em cima de
+ * uma pilha de outro pedido). Até 8 tags é o TTL de sempre; cada tag a mais
+ * soma 250 ms, teto de 10 s.
+ */
+const PRESENCE_TTL_POR_TAG_EXTRA = 250;
+const PRESENCE_TTL_MAX = 10000;
+function presenceTtl(tagsNaMesa: number): number {
+  return Math.min(PRESENCE_TTL_MAX, PRESENCE_TTL + Math.max(0, tagsNaMesa - 8) * PRESENCE_TTL_POR_TAG_EXTRA);
+}
 
 /**
  * EPCs que OUTRO pedido `awaiting_pickup` da mesa reivindica. Não podem contar
@@ -201,6 +214,11 @@ export function Expedicao({ onBack }: Props) {
   const descCacheRef = useRef<Map<string, string>>(new Map());
   const lastPresentSigRef = useRef<string>("");
   const lastSigRef = useRef<string>("");
+  // Geração da resolução em curso: cada `doResolve` incrementa e resultados
+  // de chamadas antigas (mesa mudou no meio do epc-match/lookup) são
+  // descartados — sem isso, respostas fora de ordem faziam a tela alternar
+  // entre estados (pedido grande, 37 tags oscilando: "tela branca voltando").
+  const resolveGenRef = useRef(0);
   // Assinatura do último conjunto que FALHOU no match — os retries desse mesmo
   // conjunto são silenciosos (sem beep/aviso repetido).
   const lastFailSigRef = useRef<string>("");
@@ -269,7 +287,13 @@ export function Expedicao({ onBack }: Props) {
     // nexus (ou a rede voltar), identifica sozinho — sem "Nova leitura".
     const sigNow = epcs.slice().sort().join(",");
     const retrying = sigNow === lastFailSigRef.current;
-    if (!retrying) setFlow({ kind: "reading" });
+    const gen = ++resolveGenRef.current;
+    // Pedido já identificado na tela: re-resolve POR BAIXO, sem voltar pra
+    // "LENDO". Antes, cada tag que oscilava no leitor derrubava a grade das
+    // peças pro hero de leitura e trazia de volta meio segundo depois —
+    // num pedido de 30+ peças isso era contínuo (relato 04/09: "tela branca
+    // do nada e voltando").
+    if (!retrying && k !== "identified") setFlow({ kind: "reading" });
     const scheduleRetry = () => {
       lastFailSigRef.current = sigNow;
       if (resolveTimer.current) clearTimeout(resolveTimer.current);
@@ -277,6 +301,7 @@ export function Expedicao({ onBack }: Props) {
     };
     try {
       const { matches, unmatchedEpcs, jaExpedidos } = await epcMatch(epcs);
+      if (gen !== resolveGenRef.current) return; // mesa mudou no meio — resultado velho
       if (matches.length === 0) {
         if (!retrying) beepError();
         if (jaExpedidos.length > 0) {
@@ -306,15 +331,19 @@ export function Expedicao({ onBack }: Props) {
         return;
       }
       const m = matches[0];
-      beepOk();
-      if (jaExpedidos.length > 0) {
+      // Apita só quando o pedido MUDA (ou é o primeiro); re-identificar o
+      // mesmo pedido a cada tag lida virava apito contínuo.
+      const f = flowRef.current;
+      const mesmoPedido = f.kind === "identified" && f.order.id === m.order.id;
+      if (!mesmoPedido) beepOk();
+      if (jaExpedidos.length > 0 && !mesmoPedido) {
         showNotice(`⚠ Tem peça de pedido já expedido na mesa (#${jaExpedidos[0].numero ?? ""}). Confira.`);
       }
       // `unmatchedEpcs` NÃO é mais sinônimo de "peça alheia": num pedido
       // separado no legado as peças dos slots "Surpresa" não estão em
       // `rfid_tags` e caem aqui, mas são deste pedido. Quem decide é a
       // conferência (`conf.fora`), lá embaixo.
-      await identifica(m, alheiasDe(matches, m));
+      await identifica(m, alheiasDe(matches, m), gen);
     } catch (e) {
       handleResolveError(e);
       scheduleRetry();
@@ -347,7 +376,7 @@ export function Expedicao({ onBack }: Props) {
   // `rfid_tags`): pedido separado no legado tem menos tags gravadas do que
   // peças, e as peças de fora da lista precisam contar pros slots "Surpresa".
   const identifica = useCallback(
-    async (m: EpcMatch, alheias: Set<string>) => {
+    async (m: EpcMatch, alheias: Set<string>, gen?: number) => {
       const order = m.order;
       const naMesa = Array.from(mesaRef.current);
       let resolved = new Map<string, EpcLookupItem>();
@@ -356,6 +385,7 @@ export function Expedicao({ onBack }: Props) {
       } catch {
         /* sem lookup a conferência cai nas tags da separação */
       }
+      if (gen !== undefined && gen !== resolveGenRef.current) return; // resolução mais nova em curso
       const c = conferir({ items: order.items, naMesa, rfidTags: order.rfidTags, resolved, alheias });
       setConf(c);
       setFlow({ kind: "identified", order });
@@ -571,9 +601,10 @@ export function Expedicao({ onBack }: Props) {
     // presença do próximo pedido "vazar" pro ciclo atual).
     if (k === "printing" || k === "packing" || k === "done") return;
 
-    // Poda por TTL (peça que não é relida "sai" da mesa).
+    // Poda por TTL (peça que não é relida "sai" da mesa) — TTL cresce com a lotação.
+    const ttl = presenceTtl(presentRef.current.size);
     for (const [e, ts] of presentRef.current) {
-      if (now - ts > PRESENCE_TTL) presentRef.current.delete(e);
+      if (now - ts > ttl) presentRef.current.delete(e);
     }
     const present = Array.from(presentRef.current.keys());
     const presentSig = present.slice().sort().join(",");
@@ -975,12 +1006,14 @@ function ItemsGrid({ items, progress }: { items: OrderItem[]; progress: Map<stri
 
 function ItemCard({ item, count }: { item: OrderItem; count: number }) {
   const ok = count >= item.quantidade;
+  // Só foto que o CDN entrega pequena; foto do Tiny full-res derrubava o webview.
+  const foto = imagemLeve(item.imagemUrl, LARGURA_PICKING);
   return (
     <div style={{ ...itemCard, ...(ok ? itemCardDone : null) }}>
       <div style={itemImgWrap}>
-        {item.imagemUrl ? (
+        {foto ? (
           <img
-            src={imagemRedimensionada(item.imagemUrl, LARGURA_PICKING) ?? undefined}
+            src={foto}
             alt=""
             style={itemImg}
             loading="lazy"
@@ -1088,7 +1121,8 @@ const HIST_THUMBS_VISIVEIS = 3;
 function HistItens({ items }: { items: OrderItem[] }) {
   const [aberto, setAberto] = useState(false);
   const count = items.reduce((a, it) => a + it.quantidade, 0);
-  const comFoto = items.filter((it) => !!it.imagemUrl);
+  // Foto do Tiny full-res não conta: não é renderizada (ver `imagemLeve`).
+  const comFoto = items.filter((it) => !!miniaturaLeve(it.imagemUrl));
   const ocultos = items.length - Math.min(comFoto.length, HIST_THUMBS_VISIVEIS);
 
   if (aberto) {
@@ -1096,8 +1130,8 @@ function HistItens({ items }: { items: OrderItem[] }) {
       <div style={histItensLista}>
         {items.map((it) => (
           <div key={it.id} style={histItemRow}>
-            {it.imagemUrl ? (
-              <img src={miniatura(it.imagemUrl) ?? undefined} alt="" style={histThumb} loading="lazy" decoding="async" />
+            {miniaturaLeve(it.imagemUrl) ? (
+              <img src={miniaturaLeve(it.imagemUrl) ?? undefined} alt="" style={histThumb} loading="lazy" decoding="async" />
             ) : (
               <span style={{ ...histThumb, ...histThumbPlaceholder }}>—</span>
             )}
@@ -1118,7 +1152,7 @@ function HistItens({ items }: { items: OrderItem[] }) {
   return (
     <div style={histThumbs}>
       {comFoto.slice(0, HIST_THUMBS_VISIVEIS).map((it) => (
-        <img key={it.id} src={miniatura(it.imagemUrl!) ?? undefined} alt="" style={histThumb} loading="lazy" decoding="async" />
+        <img key={it.id} src={miniaturaLeve(it.imagemUrl) ?? undefined} alt="" style={histThumb} loading="lazy" decoding="async" />
       ))}
       {ocultos > 0 && (
         <button type="button" style={histMaisTile} onClick={() => setAberto(true)} title={`Ver todas as ${items.length} peças`}>

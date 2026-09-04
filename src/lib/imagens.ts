@@ -73,3 +73,28 @@ export function imagemRedimensionada(
 export function miniatura(url: string | null | undefined): string | null {
   return imagemRedimensionada(url, LARGURA_MINIATURA);
 }
+
+/**
+ * Versão ESTRITA: só devolve URL quando dá pra pedir a imagem já pequena ao
+ * CDN (host Shopify). Qualquer outro host — em especial o S3 do Tiny
+ * (`tiny-anexos`, fotos de 5–16 MB do backfill) — vira `null`, e a tela mostra
+ * placeholder em vez de decodificar a original inteira. Use em toda grade que
+ * renderiza VÁRIAS fotos de uma vez (mesa de embalagem, histórico): foi um
+ * pedido grande com fotos do Tiny full-res que derrubou o WebView2 na mesa em
+ * 04/09 (tela branca, renderer reiniciando), reprise do incidente da 0.9.7.
+ */
+export function imagemLeve(url: string | null | undefined, largura: number): string | null {
+  if (!url) return null;
+  let u: URL;
+  try {
+    u = new URL(url);
+  } catch {
+    return null;
+  }
+  if (!ehShopify(u.hostname)) return null;
+  return imagemRedimensionada(url, largura);
+}
+
+export function miniaturaLeve(url: string | null | undefined): string | null {
+  return imagemLeve(url, LARGURA_MINIATURA);
+}
