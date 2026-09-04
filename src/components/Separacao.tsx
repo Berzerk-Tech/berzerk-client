@@ -169,13 +169,16 @@ export function Separacao({ onBack }: Props) {
   const comLista = emAberto.filter((o) => !!o.listaEm);
   const listaDeOutroDia = comLista.find((o) => o.listaDeOutroDia);
 
+  // Banner "em aberto": devolve só o que NÃO tem lista impressa. A lista fica
+  // presa com quem imprimiu (04/09: 73 pedidos da Nicole voltaram pra fila por
+  // um devolver e outra mesa levou) — pra soltar a lista é de dentro da fila,
+  // pelo "Devolver tudo" explícito.
   const devolverEmAberto = async () => {
     setDevolvendo(true);
     try {
-      // Manda os ids: é o que permite devolver um a um num nexus que ainda
-      // não tenha o endpoint do lote.
-      await devolverLote(emAberto.map((o) => o.id));
-      setEmAberto([]);
+      const semLista = emAberto.filter((o) => !o.listaEm);
+      if (semLista.length > 0) await devolverLote(semLista.map((o) => o.id));
+      setEmAberto(emAberto.filter((o) => !!o.listaEm));
     } catch {
       /* fica o banner: ela pode retomar e devolver de dentro da fila */
     } finally {

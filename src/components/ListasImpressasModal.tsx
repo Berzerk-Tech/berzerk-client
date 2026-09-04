@@ -44,6 +44,7 @@ function resumoTexto(r: RecuperarListaResponse): string {
   const base =
     `${r.recuperados} ${plural(r.recuperados, "pedido voltou", "pedidos voltaram")} pra sua mesa` +
     ` · ${r.jaComigo} já ${plural(r.jaComigo, "estava", "estavam")} com você` +
+    (r.retomados ? ` · ${r.retomados} ${plural(r.retomados, "retomado", "retomados")} de outra mesa` : "") +
     ` · ${r.ignorados.length} ${plural(r.ignorados.length, "ignorado", "ignorados")}`;
   if (r.ignorados.length === 0) return base;
   const motivos = r.ignorados

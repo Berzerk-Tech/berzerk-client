@@ -405,10 +405,19 @@ export function getMeusPedidos(): Promise<{ orders: Order[] }> {
  * Devolve pedidos do lote pra fila. Sem `orderIds` = todos os em aberto — é o
  * que roda ao sair da fila (voltar ao menu, trocar de fila, logout).
  */
-export function devolverLote(orderIds?: string[]): Promise<{ devolvidos: number }> {
+/**
+ * Devolve pedidos da mesa pra fila. Pedido com LISTA IMPRESSA só volta se
+ * `incluirLista: true` (ação explícita da operadora) — a API ignora os
+ * outros (nexus #218): logout, bloqueio e "sair da fila" mandam os ids e a
+ * lista fica presa com quem imprimiu, até a virada do dia.
+ */
+export function devolverLote(orderIds?: string[], opts?: { incluirLista?: boolean }): Promise<{ devolvidos: number }> {
   return apiRequest<{ devolvidos: number }>("/separacao/lote/devolver", {
     method: "POST",
-    body: orderIds && orderIds.length > 0 ? { orderIds } : {},
+    body: {
+      ...(orderIds && orderIds.length > 0 ? { orderIds } : {}),
+      ...(opts?.incluirLista ? { incluirLista: true } : {}),
+    },
   }).catch(async (e: unknown) => {
     // Degradação (nexus sem o endpoint): devolve um a um os ids que o caller
     // conhece. Sem ids não há o que fazer aqui — o janitor recupera.

@@ -814,7 +814,7 @@ export function SeparacaoRunner({
     if (ids.length === 0) return;
     saindoRef.current = true;
     orderRef.current = null;
-    await devolverLote(ids).catch(() => {
+    await devolverLote(ids, { incluirLista: opts?.incluirLista === true }).catch(() => {
       /* best-effort: o janitor recupera */
     });
   }, []);
