@@ -457,7 +457,10 @@ export function SeparacaoRunner({
       // Reposição em background (push do WS, troca de filtro) cede a vez: o
       // caminho do complete já vai repor, e duas chamadas em voo trocariam o
       // pedido da mesa no meio da conferência.
-      if (opts?.preservarAtual && (puxandoRef.current || completingRef.current)) return;
+      // Enquanto o Picking Geral carimba+imprime, NENHUM claimLote de fundo:
+      // um lote() com recorte no meio soltava pedidos que a folha já tem e
+      // eles ficavam fora do snapshot — irrecuperáveis (achado da revisão 04/09).
+      if (opts?.preservarAtual && (puxandoRef.current || completingRef.current || imprimindoRef.current)) return;
       const atual = opts?.preservarAtual ? orderRef.current : null;
       const filtrosDaVez = filtersRef.current;
       if (!atual) {
@@ -480,6 +483,9 @@ export function SeparacaoRunner({
               sizes: queue.sizes,
               filters: filtersRef.current,
             });
+        // Entrou pelo tile (sem "Retomar") com lista de ontem/hoje na mesa: a
+        // partir daqui é `meus-pedidos`, sem completar o lote com a fila.
+        if (orders.some((o) => !!o.listaEm)) presaNaListaRef.current = true;
         // Ordem de tentativa capturada ANTES de o lote ser substituído — a
         // sequência nova já não sabe onde o pedido concluído estava.
         const candidatos = opts?.depoisDe ? candidatosDepoisDe(opts.depoisDe) : [];
@@ -754,15 +760,20 @@ export function SeparacaoRunner({
   const devolverAtual = useCallback(async () => {
     const ord = orderRef.current;
     if (!ord || completing) return;
-    if (ord.listaEm) {
+    const naLista = ord.listaEm || loteRef.current.find((o) => o.id === ord.id)?.listaEm;
+    if (naLista) {
       showNotice("Pedido de lista impressa fica com você até o fim do dia — use Pular (P) pra seguir pro próximo.");
       return;
     }
     setPhase("loading");
     orderRef.current = null;
     setOrder(null);
-    await releaseSeparacao(ord.id).catch(() => {
-      /* best-effort: o janitor recupera */
+    await releaseSeparacao(ord.id).catch((e: unknown) => {
+      // 409 `lista_impressa` (nexus #219) e afins: diz por quê em vez de fingir.
+      const msg = e instanceof ApiError && e.body && typeof e.body === "object" && "message" in e.body
+        ? String((e.body as { message?: unknown }).message ?? "")
+        : "";
+      if (msg) showNotice(`Não devolvido: ${msg}`);
     });
     await puxarLote({ depoisDe: ord.id });
   }, [completing, puxarLote, showNotice]);
@@ -1084,14 +1095,17 @@ export function SeparacaoRunner({
    * lembrar de abrir "Listas impressas".
    */
   const [listasEscapadas, setListasEscapadas] = useState<ListaResumo[]>([]);
+  const imprimindoRef = useRef(false);
+  /** Pedidos da lista fora da mesa dela: na fila sem claim + com outra mesa que ainda não começou. */
+  const escapados = (l: ListaResumo) => l.pedidosRecuperaveis + (l.pedidosRetomaveis ?? 0);
   const [recuperandoListas, setRecuperandoListas] = useState(false);
   const vigiarListas = useCallback(async () => {
     try {
       const { listas } = await getListas();
-      const hoje = new Date().toDateString();
-      setListasEscapadas(
-        listas.filter((l) => l.pedidosRecuperaveis > 0 && new Date(l.criadoEm).toDateString() === hoje),
-      );
+      // Dia em America/Sao_Paulo (`diaDe`), não o fuso da máquina — estação
+      // Windows em UTC às 21h30 já "virou o dia" e descartava a lista de hoje.
+      const hoje = diaDe(new Date().toISOString());
+      setListasEscapadas(listas.filter((l) => escapados(l) > 0 && diaDe(l.criadoEm) === hoje));
     } catch {
       /* rede: tenta no próximo ciclo */
     }
@@ -1226,21 +1240,27 @@ export function SeparacaoRunner({
     setRecuperandoListas(true);
     let voltaram = 0;
     let retomados = 0;
+    let falhas = 0;
     try {
-      for (const l of listasEscapadas) {
-        const r = await recuperarLista(l.id);
-        voltaram += r.recuperados;
-        retomados += r.retomados ?? 0;
+      // Todas as listas, mesmo que uma falhe; o resultado conta o que passou.
+      const rs = await Promise.allSettled(listasEscapadas.map((l) => recuperarLista(l.id)));
+      for (const r of rs) {
+        if (r.status === "fulfilled") {
+          voltaram += r.value.recuperados;
+          retomados += r.value.retomados ?? 0;
+        } else {
+          falhas += 1;
+        }
       }
       aplicarFiltros(emptyFilters());
-      await puxarLote();
+      // preservarAtual: não zera a leitura do pedido que está na mesa.
+      await puxarLote({ preservarAtual: true });
       showNotice(
         `${voltaram} ${voltaram === 1 ? "pedido da lista voltou" : "pedidos da lista voltaram"} pra sua mesa` +
           (retomados > 0 ? ` (+${retomados} retomados de outra mesa)` : "") +
+          (falhas > 0 ? ` — ${falhas} lista(s) falharam, tente de novo` : "") +
           ".",
       );
-    } catch (e) {
-      showNotice(`Não deu pra recuperar a lista: ${e instanceof Error ? e.message : String(e)}`);
     } finally {
       setRecuperandoListas(false);
       void vigiarListas();
@@ -1339,6 +1359,9 @@ export function SeparacaoRunner({
     setLote((atual) =>
       atual.map((o) => (alvo.has(o.id) && !o.listaEm ? { ...o, listaEm: agora, listaId } : o)),
     );
+    // O pedido da MESA é outro objeto (state `order`): carimba ele também,
+    // senão o guard do "Devolver" via `orderRef` não enxerga a lista.
+    setOrder((o) => (o && alvo.has(o.id) && !o.listaEm ? { ...o, listaEm: agora, listaId } : o));
   }, []);
 
   /** Pedidos do lote com lista impressa — o banner e o chip da sidebar. */
@@ -1408,9 +1431,9 @@ export function SeparacaoRunner({
       {notice && <div style={noticeBanner}>ℹ {notice}</div>}
       {listasEscapadas.length > 0 && (
         <div style={listaBannerAlerta}>
-          🚨 <strong>{listasEscapadas.reduce((n, l) => n + l.pedidosRecuperaveis, 0)}</strong>{" "}
-          {listasEscapadas.reduce((n, l) => n + l.pedidosRecuperaveis, 0) === 1 ? "pedido da sua lista impressa está" : "pedidos da sua lista impressa estão"}{" "}
-          na fila sem você — eles são seus até o fim do dia.{" "}
+          🚨 <strong>{listasEscapadas.reduce((n, l) => n + escapados(l), 0)}</strong>{" "}
+          {listasEscapadas.reduce((n, l) => n + escapados(l), 0) === 1 ? "pedido da sua lista impressa está" : "pedidos da sua lista impressa estão"}{" "}
+          fora da sua mesa — eles são seus até o fim do dia.{" "}
           <button style={inlineReconnect} disabled={recuperandoListas} onClick={() => void recuperarListasEscapadas()}>
             {recuperandoListas ? "recuperando…" : "Recuperar agora"}
           </button>
@@ -1551,6 +1574,9 @@ export function SeparacaoRunner({
           emConferencia={emConferenciaForaDoFiltro}
           operadora={operadora}
           onListaImpressa={marcarLotePresoLocalmente}
+          onImprimindo={(v) => {
+            imprimindoRef.current = v;
+          }}
           onLimparFiltros={() => aplicarFiltros(emptyFilters())}
           onClose={() => setPickingOpen(false)}
         />
@@ -1788,7 +1814,7 @@ function LoteSidebar({
   // operadora que recuperou a lista impressa e não achava o pedido estava
   // com um recorte antigo escondendo (04/09).
   const visiveis = termo.length === 0 ? lote : todos.filter((o) => casaBusca(o, termo));
-  const comLista = lote.filter((o) => !!o.listaEm).length;
+  const comLista = todos.filter((o) => !!o.listaEm).length; // lote inteiro, não o recorte
   const { largura, alca } = useLarguraSidebar();
 
   return (

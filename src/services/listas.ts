@@ -24,6 +24,8 @@ export type ListaResumo = {
   totalPecas: number;
   /** Quantos dos pedidos desta lista estão HOJE `ready` e sem claim. */
   pedidosRecuperaveis: number;
+  /** `separating` com OUTRA mesa, sem iniciado_em e sem lista — o recuperar retoma (nexus #220; ausente antes). */
+  pedidosRetomaveis?: number;
   recuperacoes: number;
   recuperadaEm: string | null;
 };
