@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { imagemRedimensionada, miniatura } from "../src/lib/imagens";
+import { imagemRedimensionada, miniatura, imagemLeve, miniaturaLeve } from "../src/lib/imagens";
 
 const ORIGINAL =
   "https://cdn.shopify.com/s/files/1/0653/3975/2616/files/RESSURECTED.jpg?v=1772119324";
@@ -43,5 +43,22 @@ describe("imagemRedimensionada", () => {
 
   it("miniatura usa 400", () => {
     expect(miniatura(ORIGINAL)).toContain("width=400");
+  });
+});
+
+describe("imagemLeve / miniaturaLeve (só host que o CDN entrega pequeno)", () => {
+  it("Shopify: pede a largura ao CDN", () => {
+    expect(imagemLeve("https://cdn.shopify.com/s/files/1/x/foto.jpg?v=1", 800)).toBe(
+      "https://cdn.shopify.com/s/files/1/x/foto.jpg?v=1&width=800",
+    );
+  });
+  it("Tiny/S3 full-res vira null (placeholder), nunca a original", () => {
+    expect(imagemLeve("https://s3.amazonaws.com/tiny-anexos-us/foto.jpg", 800)).toBeNull();
+    expect(miniaturaLeve("https://s3.amazonaws.com/tiny-anexos-us/foto.jpg")).toBeNull();
+  });
+  it("vazio, null e URL inválida viram null", () => {
+    expect(imagemLeve(null, 800)).toBeNull();
+    expect(imagemLeve("", 800)).toBeNull();
+    expect(imagemLeve("nao-e-url", 800)).toBeNull();
   });
 });
