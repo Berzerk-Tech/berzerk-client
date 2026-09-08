@@ -20,11 +20,24 @@ const MOTIVOS_RAPIDOS = [
   "Leitor com problema",
 ];
 
+/**
+ * Outro uso do mesmo modal (ex.: devolver lista impressa): troca título,
+ * explicação e motivos rápidos; o resto (supervisor, PIN, erros) é igual.
+ */
+export type SupervisorContexto = {
+  titulo: string;
+  descricao: string;
+  motivosRapidos: string[];
+  /** Rótulo do botão de confirmar (padrão "Liberar pedido"). */
+  botao: string;
+};
+
 type Props = {
   faltantes: LiberacaoFaltante[];
   onCancel: () => void;
   /** Conclui o pedido com a liberação — deve LANÇAR em erro (o modal mostra). */
   onConfirm: (liberacao: LiberacaoSupervisor) => Promise<void>;
+  contexto?: SupervisorContexto;
 };
 
 function apiErrorCode(e: unknown): string | null {
@@ -46,7 +59,8 @@ function friendlyError(e: unknown): string {
   return e instanceof Error ? e.message : String(e);
 }
 
-export function SupervisorModal({ faltantes, onCancel, onConfirm }: Props) {
+export function SupervisorModal({ faltantes, onCancel, onConfirm, contexto }: Props) {
+  const motivosRapidos = contexto?.motivosRapidos ?? MOTIVOS_RAPIDOS;
   const [supervisores, setSupervisores] = useState<SupervisorInfo[] | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [selected, setSelected] = useState<string | null>(null);
@@ -150,12 +164,18 @@ export function SupervisorModal({ faltantes, onCancel, onConfirm }: Props) {
   return (
     <div style={overlay} onClick={() => !busy && onCancel()}>
       <div style={sheet} onClick={(e) => e.stopPropagation()}>
-        <h2 style={title}>🔓 Liberação de supervisor</h2>
+        <h2 style={title}>🔓 {contexto?.titulo ?? "Liberação de supervisor"}</h2>
         <p style={subtitle}>
-          {totalFaltam === 1
-            ? "1 peça não foi identificada pelo RFID."
-            : `${totalFaltam} peças não foram identificadas pelo RFID.`}{" "}
-          Só um supervisor pode concluir este pedido assim.
+          {contexto ? (
+            contexto.descricao
+          ) : (
+            <>
+              {totalFaltam === 1
+                ? "1 peça não foi identificada pelo RFID."
+                : `${totalFaltam} peças não foram identificadas pelo RFID.`}{" "}
+              Só um supervisor pode concluir este pedido assim.
+            </>
+          )}
         </p>
 
         {faltantes.length > 0 && (
@@ -216,7 +236,7 @@ export function SupervisorModal({ faltantes, onCancel, onConfirm }: Props) {
               <>
                 <span style={fieldLabel}>Motivo</span>
                 <div style={chipsRow}>
-                  {MOTIVOS_RAPIDOS.map((m) => (
+                  {motivosRapidos.map((m) => (
                     <button
                       key={m}
                       type="button"
@@ -328,7 +348,7 @@ export function SupervisorModal({ faltantes, onCancel, onConfirm }: Props) {
               disabled={!podeLiberar}
               onClick={() => void liberar()}
             >
-              {busy ? "Liberando…" : "Liberar pedido"}
+              {busy ? "Liberando…" : (contexto?.botao ?? "Liberar pedido")}
             </button>
           )}
         </div>

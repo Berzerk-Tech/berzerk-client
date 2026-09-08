@@ -411,12 +411,24 @@ export function getMeusPedidos(): Promise<{ orders: Order[] }> {
  * outros (nexus #218): logout, bloqueio e "sair da fila" mandam os ids e a
  * lista fica presa com quem imprimiu, até a virada do dia.
  */
-export function devolverLote(orderIds?: string[], opts?: { incluirLista?: boolean }): Promise<{ devolvidos: number }> {
+export function devolverLote(
+  orderIds?: string[],
+  opts?: {
+    incluirLista?: boolean;
+    /**
+     * Lista impressa antes da virada do dia: quem não é supervisor só solta
+     * com a chave dele (mesmo `liberacao` do complete — PIN validado no
+     * nexus, que responde 409 `lista_impressa` sem ela).
+     */
+    liberacao?: LiberacaoSupervisor;
+  },
+): Promise<{ devolvidos: number }> {
   return apiRequest<{ devolvidos: number }>("/separacao/lote/devolver", {
     method: "POST",
     body: {
       ...(orderIds && orderIds.length > 0 ? { orderIds } : {}),
       ...(opts?.incluirLista ? { incluirLista: true } : {}),
+      ...(opts?.liberacao ? { liberacao: opts.liberacao } : {}),
     },
   }).catch(async (e: unknown) => {
     // Degradação (nexus sem o endpoint): devolve um a um os ids que o caller

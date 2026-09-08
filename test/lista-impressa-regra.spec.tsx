@@ -1,7 +1,9 @@
 // Regra de negócio (Leonardo, 04/09): pedido de LISTA IMPRESSA fica com quem
-// imprimiu até o fim do dia. Nenhum caminho do app pode devolvê-lo pra fila —
-// nem "Devolver à fila" no card, nem sair da fila. Foi a causa de "os mistos
-// sumiram"; este teste segura a regra.
+// imprimiu até o fim do dia. Nenhum caminho AUTOMÁTICO do app devolve ele pra
+// fila (sair da fila, logout, bloqueio). Foi a causa de "os mistos sumiram";
+// este teste segura a regra. Desde 08/09 "Devolver à fila" no card abre a
+// chave do supervisor (PIN) e devolve a lista inteira — lista impressa sem o
+// filtro, 50 feitos, 50 presos com a Nicole sem caminho nenhum.
 import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Order } from "../src/services/orders";
@@ -23,6 +25,7 @@ vi.mock("../src/services/orders", async () => {
     releaseSeparacao: (...a: unknown[]) => releaseSeparacao(...(a as [])),
     devolverLote: (...a: unknown[]) => devolverLote(...(a as [])),
     completeSeparacao: vi.fn(async () => null),
+    getSupervisores: vi.fn(async () => ({ supervisores: [{ id: "sup-1", nome: "Sup", temPin: true }] })),
   };
 });
 vi.mock("../src/services/listas", async () => {
@@ -114,13 +117,33 @@ describe("lista impressa fica com a operadora até o fim do dia", () => {
   });
   afterEach(() => cleanup());
 
-  it("\"Devolver à fila\" no pedido de lista não chama release e avisa", async () => {
+  it("\"Devolver à fila\" no pedido de lista não chama release: abre a chave do supervisor", async () => {
     await montar();
     expect(screen.getAllByText("#700001").length).toBeGreaterThan(0);
     fireEvent.click(screen.getByText("Devolver à fila"));
     await act(async () => { await new Promise((r) => setTimeout(r, 30)); });
     expect(releaseSeparacao).not.toHaveBeenCalled();
-    expect(screen.getByText(/fica com você até o fim do dia/)).toBeTruthy();
+    expect(devolverLote).not.toHaveBeenCalled();
+    expect(screen.getByText(/Devolver a lista impressa/)).toBeTruthy();
+  });
+
+  it("com o PIN do supervisor devolve o lote inteiro (lista junto) e sai da fila", async () => {
+    const onBack = vi.fn();
+    devolverLote.mockResolvedValueOnce({ devolvidos: 5 });
+    await montar(onBack);
+    fireEvent.click(screen.getByText("Devolver à fila"));
+    await act(async () => { await new Promise((r) => setTimeout(r, 30)); });
+    fireEvent.click(screen.getByText("Sup"));
+    fireEvent.click(screen.getByText("Lista impressa sem o filtro"));
+    fireEvent.change(screen.getByPlaceholderText("••••"), { target: { value: "1234" } });
+    fireEvent.click(screen.getByText("Devolver lista"));
+    await act(async () => { await new Promise((r) => setTimeout(r, 30)); });
+    expect(devolverLote).toHaveBeenCalledTimes(1);
+    const [ids, opts] = devolverLote.mock.calls[0] as unknown as [string[], { incluirLista?: boolean; liberacao?: { supervisorId: string; pin: string; motivo: string } }];
+    expect([...ids].sort()).toEqual(["ord-1", "ord-2", "ord-3", "ord-4", "ord-5"]);
+    expect(opts.incluirLista).toBe(true);
+    expect(opts.liberacao).toMatchObject({ supervisorId: "sup-1", pin: "1234", motivo: "Lista impressa sem o filtro" });
+    expect(onBack).toHaveBeenCalled();
   });
 
   it("sair da fila devolve só os pedidos SEM lista, nunca com incluirLista", async () => {

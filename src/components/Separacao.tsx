@@ -3,6 +3,7 @@ import { BackButton } from "./BackButton";
 import { AmbientBackground } from "./AmbientBackground";
 import { OperatorChip } from "./OperatorChip";
 import { SeparacaoRunner } from "./SeparacaoRunner";
+import { SupervisorModal } from "./SupervisorModal";
 import { useRfid } from "../contexts/RfidContext";
 import { ApiError } from "../lib/api";
 import { QUEUES, SEM_TAMANHO, queueFor, type Queue } from "../lib/filas";
@@ -11,6 +12,7 @@ import {
   devolverLote,
   getMeusPedidos,
   getQueueCounts,
+  type LiberacaoSupervisor,
   type Order,
   type QueueCounts,
 } from "../services/orders";
@@ -44,6 +46,8 @@ export function Separacao({ onBack }: Props) {
   // do `if (confirmed) return` — na 0.9.33 ficou depois e quebrou a regra dos
   // hooks: tela branca ao entrar na fila de mistos.
   const [avisoLista, setAvisoLista] = useState<string | null>(null);
+  /** Modal do PIN pra devolver lista impressa (declarado aqui: há return condicional abaixo). */
+  const [devolverListaOpen, setDevolverListaOpen] = useState(false);
 
   // Contagem das filas: o WS do nexus empurra `queue.changed` (tiny-sync,
   // claim, complete, release) e cada evento refaz o fetch; o intervalo de 60s
@@ -177,7 +181,18 @@ export function Separacao({ onBack }: Props) {
   // presa com quem imprimiu (04/09: 73 pedidos da Nicole voltaram pra fila por
   // um devolver e outra mesa levou) — pra soltar a lista é de dentro da fila,
   // pelo "Devolver tudo" explícito.
+  const devolverListaConfirm = async (liberacao: LiberacaoSupervisor) => {
+    await devolverLote(emAberto.map((o) => o.id), { incluirLista: true, liberacao });
+    setDevolverListaOpen(false);
+    setEmAberto([]);
+    setAvisoLista(null);
+  };
+
   const devolverEmAberto = async () => {
+    if (comLista.length > 0) {
+      setDevolverListaOpen(true);
+      return;
+    }
     setDevolvendo(true);
     try {
       const semLista = emAberto.filter((o) => !o.listaEm);
@@ -266,6 +281,20 @@ export function Separacao({ onBack }: Props) {
           </button>
           {avisoLista && <div style={{ marginTop: 8, fontSize: 13 }}>{avisoLista}</div>}
         </div>
+      )}
+
+      {devolverListaOpen && (
+        <SupervisorModal
+          faltantes={[]}
+          contexto={{
+            titulo: "Devolver a lista impressa",
+            descricao: `A lista fica com quem imprimiu até o fim do dia. Devolver ${emAberto.length === 1 ? "o pedido" : `os ${emAberto.length} pedidos`} pra fila antes disso precisa da chave do supervisor. A folha impressa perde a validade.`,
+            motivosRapidos: ["Lista impressa sem o filtro", "Troca de mesa / turno", "Peças não vão chegar hoje"],
+            botao: "Devolver lista",
+          }}
+          onCancel={() => setDevolverListaOpen(false)}
+          onConfirm={devolverListaConfirm}
+        />
       )}
 
       <main style={main}>
