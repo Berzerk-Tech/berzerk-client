@@ -181,6 +181,74 @@ describe("conferir — pedido normal (casamento por GTIN)", () => {
   });
 });
 
+// Pedido #881030 (08/09): a separação bipou a Surpresa P `…5AF6`, a mesa
+// recebeu OUTRA Surpresa P (`…4C62`, EAN diferente). Grade 2/2 coberta por
+// produto/slot, tag da separação ausente → fecha como "peça trocada por
+// equivalente" (o nexus aceita o ship e grava as tags da mesa).
+describe("conferir — peça trocada por equivalente (#881030)", () => {
+  const kagehime = item({ id: "it-k", ean: "7894901598574", sku: null, nome: "Oversized - Kagehime - P", tamanho: "P", quantidade: 1 });
+  const surpresa = item({ id: "it-s", ean: "7891476008231", sku: null, nome: "Oversized - Surpresa - P", tamanho: "P", quantidade: 1 });
+  const TAG_K = "3035E1DDD43A744000000784";
+  const TAG_S_SEPARACAO = "3035E1A85000CDC000005AF6";
+  const TAG_S_MESA = "3035E1C16029278000004C62";
+
+  it("grade coberta por produto com tag da separação ausente fecha e marca a troca", () => {
+    const c = conferir({
+      items: [kagehime, surpresa],
+      naMesa: [TAG_K, TAG_S_MESA],
+      rfidTags: [TAG_K, TAG_S_SEPARACAO],
+      resolved: new Map([
+        [TAG_K, look(TAG_K, "7894901598574")],
+        [TAG_S_MESA, look(TAG_S_MESA, "7893080421423")],
+      ]),
+    });
+    expect(c.lidas).toBe(2);
+    expect(c.faltantes).toEqual([TAG_S_SEPARACAO]);
+    expect(c.trocaEquivalente).toBe(true);
+    expect(c.completo).toBe(true);
+    expect(c.contadas).toEqual([TAG_K, TAG_S_MESA]);
+  });
+
+  it("peça trocada que o inventário NÃO reconhece não fecha (pode ser lixo na mesa)", () => {
+    const c = conferir({
+      items: [kagehime, surpresa],
+      naMesa: [TAG_K, TAG_S_MESA],
+      rfidTags: [TAG_K, TAG_S_SEPARACAO],
+      resolved: new Map([[TAG_K, look(TAG_K, "7894901598574")]]),
+    });
+    expect(c.lidas).toBe(1);
+    expect(c.trocaEquivalente).toBe(false);
+    expect(c.completo).toBe(false);
+  });
+
+  it("peça trocada por produto ERRADO não fecha", () => {
+    const c = conferir({
+      items: [kagehime, surpresa],
+      naMesa: [TAG_S_MESA, "EPC-OUTRA"],
+      rfidTags: [TAG_K, TAG_S_SEPARACAO],
+      resolved: new Map([
+        [TAG_S_MESA, look(TAG_S_MESA, "7893080421423")],
+        ["EPC-OUTRA", look("EPC-OUTRA", "7890000000099")],
+      ]),
+    });
+    // a primeira real cobre o slot Surpresa; a segunda não é Kagehime P
+    expect(c.porItem.get("it-k") ?? 0).toBe(0);
+    expect(c.trocaEquivalente).toBe(false);
+    expect(c.completo).toBe(false);
+  });
+
+  it("caminho normal (todas as tags da separação lidas) não marca troca", () => {
+    const c = conferir({
+      items: [kagehime, surpresa],
+      naMesa: [TAG_K, TAG_S_SEPARACAO],
+      rfidTags: [TAG_K, TAG_S_SEPARACAO],
+      resolved: new Map([[TAG_K, look(TAG_K, "7894901598574")]]),
+    });
+    expect(c.completo).toBe(true);
+    expect(c.trocaEquivalente).toBe(false);
+  });
+});
+
 describe("isSurpresaSlot", () => {
   it("reconhece pelo nome do item do Tiny e pelos permitidos do nexus", () => {
     expect(isSurpresaSlot(item())).toBe(true);
