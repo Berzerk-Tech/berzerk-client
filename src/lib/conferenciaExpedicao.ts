@@ -76,8 +76,21 @@ export type Conferencia = {
   lidas: number;
   /** Peças esperadas = soma das quantidades da grade. */
   total: number;
-  /** (a) toda `rfid_tags` lida E (b) peças lidas ≥ grade. */
+  /**
+   * Fecha por um de dois caminhos: (a) toda `rfid_tags` lida E peças lidas ≥
+   * grade; ou (b) peça trocada por equivalente — a grade inteira casou por
+   * produto/slot com peças REAIS da mesa, mesmo faltando tag da separação
+   * (ver `trocaEquivalente`).
+   */
   completo: boolean;
+  /**
+   * Caminho (b): a mesa cobre a grade item a item, mas tag(s) gravada(s) na
+   * separação não estão aqui (`faltantes`) — alguém bipou uma peça e ensacou
+   * outra equivalente (com "Surpresa" é o normal: qualquer Surpresa P serve).
+   * #881030 (08/09): 42 dos 99 forçados do dia eram só isso. O nexus aceita o
+   * `ship` nesse caso sem override e grava as tags da mesa no pedido.
+   */
+  trocaEquivalente: boolean;
 };
 
 /** Produto REAL do pedido que a tag referencia (GTIN, depois SKU textual). */
@@ -141,9 +154,13 @@ export function conferir(params: {
   const porItem = new Map<string, number>();
   const contadas: string[] = [];
   const fora: string[] = [];
+  // Peças que casaram com a grade por PRODUTO ou por slot Surpresa (passadas
+  // 1 e 2) — não pela passada 3, que só confia na lista da separação.
+  let casadasPorProduto = 0;
   const restante = (it: OrderItem) => it.quantidade - (porItem.get(it.id) ?? 0);
-  const conta = (epc: string, it: OrderItem | null) => {
+  const conta = (epc: string, it: OrderItem | null, porProduto = false) => {
     if (it) porItem.set(it.id, (porItem.get(it.id) ?? 0) + 1);
+    if (porProduto) casadasPorProduto += 1;
     contadas.push(epc);
   };
 
@@ -155,7 +172,7 @@ export function conferir(params: {
     }
     const look = resolved.get(epc);
     const it = look ? casaProdutoReal(items, look, restante) : null;
-    if (it) conta(epc, it);
+    if (it) conta(epc, it, true);
     else sobra.push(epc);
   }
 
@@ -166,7 +183,7 @@ export function conferir(params: {
     // perdida na mesa fecharia o pedido).
     const real = resolved.has(epc) || tags.has(epc);
     const slot = real ? items.find((it) => isSurpresaSlot(it) && restante(it) > 0) : undefined;
-    if (slot) conta(epc, slot);
+    if (slot) conta(epc, slot, true);
     else semSlot.push(epc);
   }
 
@@ -181,6 +198,9 @@ export function conferir(params: {
   const faltantes = Array.from(tags).filter((t) => !vistos.has(t));
   const total = items.reduce((a, it) => a + it.quantidade, 0);
   const lidas = contadas.length;
+  const pelaSeparacao = faltantes.length === 0 && lidas >= total;
+  // Grade vazia não é "coberta por produto": sem item, ninguém casou nada.
+  const trocaEquivalente = !pelaSeparacao && total > 0 && casadasPorProduto >= total;
   return {
     porItem,
     contadas,
@@ -188,6 +208,7 @@ export function conferir(params: {
     faltantes,
     lidas,
     total,
-    completo: faltantes.length === 0 && lidas >= total,
+    completo: pelaSeparacao || trocaEquivalente,
+    trocaEquivalente,
   };
 }

@@ -1168,6 +1168,16 @@ function StageCenter({
         }
       />
 
+      {flow.kind === "identified" && conf?.trocaEquivalente && (
+        <div style={trocaAviso}>
+          <strong>Peça trocada na embalagem.</strong> As {total} peças da grade conferem, mas{" "}
+          {conf.faltantes.length === 1 ? "a tag" : `${conf.faltantes.length} tags`} que a separação bipou{" "}
+          {conf.faltantes.length === 1 ? "não está" : "não estão"} na mesa (
+          <code style={trocaEpc}>{conf.faltantes.map((t) => `…${t.slice(-6)}`).join(", ")}</code>
+          ). Vai com o que está na mesa; fica registrado.
+        </div>
+      )}
+
       <div style={itemsScroll} className="thin-scroll">
         <ItemsGrid items={order.items} progress={conf?.porItem ?? new Map()} />
       </div>
@@ -1416,16 +1426,21 @@ function HistItens({ items }: { items: OrderItem[] }) {
     );
   }
 
+  // A linha inteira abre a lista com nomes — a mesa pediu isso pra TODO pedido,
+  // não só pros que têm "+N" (antes, pedido de 1–3 peças não tinha como abrir).
   return (
-    <div style={histThumbs}>
+    <div
+      role="button"
+      tabIndex={0}
+      style={histThumbsClicavel}
+      title={`Ver ${items.length === 1 ? "a peça" : `as ${items.length} peças`} com nome`}
+      onClick={() => setAberto(true)}
+      onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); setAberto(true); } }}
+    >
       {comFoto.slice(0, HIST_THUMBS_VISIVEIS).map((it) => (
         <img key={it.id} src={miniaturaLeve(it.imagemUrl) ?? undefined} alt="" style={histThumb} loading="lazy" decoding="async" />
       ))}
-      {ocultos > 0 && (
-        <button type="button" style={histMaisTile} onClick={() => setAberto(true)} title={`Ver todas as ${items.length} peças`}>
-          +{ocultos}
-        </button>
-      )}
+      {ocultos > 0 && <span style={histMaisTile}>+{ocultos}</span>}
       {comFoto.length === 0 && ocultos === 0 && (
         <span style={histThumbEmpty}>{count} {count === 1 ? "item" : "itens"}</span>
       )}
@@ -1728,6 +1743,8 @@ const itemCount: CSSProperties = { fontFamily: "var(--font-mono)", fontSize: 13,
 
 const actionsRow: CSSProperties = { display: "flex", gap: 12, alignItems: "center", justifyContent: "center" };
 const autoHint: CSSProperties = { fontSize: 13, color: "var(--info-text)", fontWeight: 600 };
+const trocaAviso: CSSProperties = { fontSize: 13, lineHeight: 1.4, color: "var(--warning-text)", background: "var(--warning-bg)", border: "1px solid var(--warning-border)", borderRadius: 8, padding: "8px 12px" };
+const trocaEpc: CSSProperties = { fontFamily: "var(--font-mono)", fontSize: 12 };
 const packingBarWrap: CSSProperties = { display: "flex", flexDirection: "column", gap: 12, alignItems: "center" };
 const packingBar: CSSProperties = { width: "60%", height: 4, background: "rgba(0,0,0,.18)", borderRadius: 999, overflow: "hidden" };
 const packingFill: CSSProperties = { height: "100%", background: "var(--warning-text)", transition: "width 80ms linear" };
@@ -1765,6 +1782,7 @@ const histNumero: CSSProperties = { fontFamily: "var(--font-mono)", fontSize: 14
 const histDot: CSSProperties = { width: 8, height: 8, borderRadius: "50%" };
 const histCliente: CSSProperties = { fontSize: 12, color: "var(--text-secondary)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" };
 const histThumbs: CSSProperties = { display: "flex", gap: 6 };
+const histThumbsClicavel: CSSProperties = { ...histThumbs, alignItems: "center", cursor: "pointer" };
 const histThumb: CSSProperties = { width: 42, height: 42, borderRadius: 6, objectFit: "cover", background: "var(--bg-input)", border: "1px solid var(--border)" };
 const histThumbEmpty: CSSProperties = { fontSize: 11, color: "var(--text-muted)", fontFamily: "var(--font-mono)" };
 const histThumbPlaceholder: CSSProperties = { display: "inline-flex", alignItems: "center", justifyContent: "center", color: "var(--text-faint)", fontSize: 12, flexShrink: 0 };
