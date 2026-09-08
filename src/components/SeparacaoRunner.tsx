@@ -762,7 +762,11 @@ export function SeparacaoRunner({
     if (!ord || completing) return;
     const naLista = ord.listaEm || loteRef.current.find((o) => o.id === ord.id)?.listaEm;
     if (naLista) {
-      showNotice("Pedido de lista impressa fica com você até o fim do dia — use Pular (P) pra seguir pro próximo.");
+      // Lista impressa fica com quem imprimiu até o fim do dia; devolver
+      // antes é com a chave do supervisor (08/09: lista de mistos de 100
+      // impressa sem filtro, 50 feitos, e "Devolver" só mostrava um aviso que
+      // ninguém via). O modal devolve a LISTA INTEIRA que sobrou, não só este.
+      setDevolverListaOpen(true);
       return;
     }
     setPhase("loading");
@@ -836,6 +840,28 @@ export function SeparacaoRunner({
       /* best-effort: o janitor recupera */
     });
   }, []);
+
+  // === Devolver lista impressa com a chave do supervisor ===
+  const [devolverListaOpen, setDevolverListaOpen] = useState(false);
+  const devolverListaConfirm = useCallback(
+    async (liberacao: LiberacaoSupervisor) => {
+      const ids = loteRef.current.map((o) => o.id);
+      if (ids.length === 0) {
+        setDevolverListaOpen(false);
+        return;
+      }
+      // Erros (PIN errado, 409) sobem pro modal. Só sai da fila quando o
+      // nexus confirmar — senão a lista continuaria dela e a tela de filas
+      // mostraria o banner de retomada na mesma hora.
+      await devolverLote(ids, { incluirLista: true, liberacao });
+      saindoRef.current = true;
+      orderRef.current = null;
+      setDevolverListaOpen(false);
+      setPhase("loading");
+      onBack();
+    },
+    [onBack],
+  );
 
   // === Liberação por supervisor (concluir SEM todas as peças no RFID) ===
   const [supervisorOpen, setSupervisorOpen] = useState(false);
@@ -1529,6 +1555,19 @@ export function SeparacaoRunner({
             setServerFaltantes(null);
           }}
           onConfirm={supervisorConfirm}
+        />
+      )}
+      {devolverListaOpen && (
+        <SupervisorModal
+          faltantes={[]}
+          contexto={{
+            titulo: "Devolver a lista impressa",
+            descricao: `A lista fica com quem imprimiu até o fim do dia. Devolver os ${loteRef.current.length} ${loteRef.current.length === 1 ? "pedido que sobrou" : "pedidos que sobraram"} pra fila antes disso precisa da chave do supervisor. A folha impressa perde a validade.`,
+            motivosRapidos: ["Lista impressa sem o filtro", "Troca de mesa / turno", "Peças não vão chegar hoje"],
+            botao: "Devolver lista",
+          }}
+          onCancel={() => setDevolverListaOpen(false)}
+          onConfirm={devolverListaConfirm}
         />
       )}
       {confirmFaltam !== null && (
