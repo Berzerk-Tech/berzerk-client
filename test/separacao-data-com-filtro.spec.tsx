@@ -220,10 +220,12 @@ describe("seletor Data com filtro de produto ativo", () => {
     // lote dela tem 1 pedido em 26/08 e 2 em 27/08.
     await montar();
     fireEvent.click(screen.getByRole("button", { name: /^Data ▾$/ }));
-    await waitFor(() => screen.getByRole("button", { name: /26\/08\/2026/ }));
-    expect(screen.getByRole("button", { name: /26\/08\/2026 \(13\)/ })).toBeTruthy();
-    expect(screen.getByRole("button", { name: /27\/08\/2026 \(7\)/ })).toBeTruthy();
-    expect(screen.getByRole("button", { name: /Todos \(23\)/ })).toBeTruthy();
+    // `\s*`: data e contagem são <span>s separados e o nome acessível (jsdom 30)
+    // não põe espaço entre eles. Espera a contagem FINAL (fila + lote), senão
+    // pega o "(1)" só do lote, que aparece antes da fila responder.
+    await waitFor(() => screen.getByRole("button", { name: /26\/08\/2026\s*\(13\)/ }));
+    expect(screen.getByRole("button", { name: /27\/08\/2026\s*\(7\)/ })).toBeTruthy();
+    expect(screen.getByRole("button", { name: /Todos\s*\(23\)/ })).toBeTruthy();
   });
 
   it("com filtro de ADIÇÃO: escolher a data continua funcionando e o menu reabre cheio", async () => {
