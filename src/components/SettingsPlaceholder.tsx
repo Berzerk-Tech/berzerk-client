@@ -1,6 +1,7 @@
 import { useEffect, useState, type CSSProperties } from "react";
 import { BackButton } from "./BackButton";
 import { UpdateChecker } from "./UpdateChecker";
+import { GpuSettings } from "./GpuSettings";
 import { AmbientBackground } from "./AmbientBackground";
 import { getStationId } from "../lib/station";
 import {
@@ -103,6 +104,11 @@ export function SettingsPlaceholder({ onBack }: Props) {
         <div style={section}>
           <SectionHeader kicker="Sistema" label="Atualizações" />
           <UpdateChecker />
+        </div>
+
+        <div style={section}>
+          <SectionHeader kicker="Sistema" label="Vídeo" />
+          <GpuSettings />
         </div>
 
         <div style={section}>
@@ -870,7 +876,7 @@ function ExpedicaoCard() {
   );
 }
 
-function ToggleRow({
+export function ToggleRow({
   label,
   hint,
   checked,
