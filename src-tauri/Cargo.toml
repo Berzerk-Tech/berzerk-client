@@ -1,6 +1,6 @@
 [package]
 name = "berzerk-client"
-version = "0.9.37"
+version = "0.9.38"
 description = "Berzerk Client — estação industrial de etiquetagem e expedição"
 authors = ["Berzerk Tech"]
 edition = "2021"
@@ -35,3 +35,6 @@ tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 urlencoding = "2"
 # Decodifica os PDFs/PNGs (base64) que o front manda pra impressão silenciosa.
 base64 = "0.23"
+# Resolve o diretório de config do app (%APPDATA% no Windows) pra preferência
+# de GPU — já é dependência transitiva do tauri, então não muda o lock à toa.
+dirs = "6"

@@ -1,3 +1,4 @@
+mod gpu_prefs;
 mod itag_client;
 mod itag_iprint;
 mod oauth_loopback;
@@ -9,6 +10,34 @@ use tauri::Manager;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    let context = tauri::generate_context!();
+    #[cfg_attr(not(windows), allow(unused_variables))]
+    let identifier = context.config().identifier.clone();
+
+    // `--disable-gpu` precisa chegar no WebView2 ANTES dele subir — por isso
+    // é lido aqui, direto do arquivo (gpu_prefs::read), sem depender do
+    // AppHandle/plugins. WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS é a env var que
+    // o WebView2 anexa aos argumentos do Chromium interno; mexer em
+    // `additional_browser_args` no tauri.conf.json substituiria os defaults
+    // do Tauri em vez de só adicionar essa flag.
+    #[cfg(windows)]
+    if gpu_prefs::read(&identifier) {
+        let mut args = std::env::var("WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS").unwrap_or_default();
+        if !args.is_empty() {
+            args.push(' ');
+        }
+        args.push_str("--disable-gpu");
+        // SAFETY: ainda estamos single-thread, antes de qualquer plugin ou
+        // thread do Tauri subir — nenhum outro código pode estar lendo/
+        // escrevendo env vars concorrentemente neste ponto.
+        // (`set_var` só é `unsafe` a partir da edition 2024; o `allow` evita o
+        // aviso `unused_unsafe` na 2021 sem perder a anotação quando migrar.)
+        #[allow(unused_unsafe)]
+        unsafe {
+            std::env::set_var("WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS", args);
+        }
+    }
+
     tauri::Builder::default()
         // Single-instance PRIMEIRO na cadeia (doc oficial do Tauri): se já tem uma
         // instância rodando, essa aqui precisa desistir o quanto antes, sem gastar
@@ -54,8 +83,10 @@ pub fn run() {
             printing::print_image_silent,
             printing::list_windows_printers,
             printing::print_engine_status,
+            gpu_prefs::gpu_get_disabled,
+            gpu_prefs::gpu_set_disabled,
         ])
-        .run(tauri::generate_context!())
+        .run(context)
         .expect("error while running tauri application");
 }
 
