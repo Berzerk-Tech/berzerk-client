@@ -43,12 +43,18 @@ const EPC_CACHE_KEY = "berzerk_epc_resolve_cache_v2";
  *  — senão uma resposta errada ficava fixa na estação pra sempre. */
 const NEXUS_TTL_MS = 5 * 60 * 1000;
 const EPC_CACHE_MAX = 5000;
-/** Depois de quanto tempo um EPC "não resolvido" pode ser consultado de novo. */
+/** Depois de quanto tempo um EPC que a nuvem iTAG disse NÃO EXISTIR pode ser
+ *  consultado lá de novo. Só vale pra "não existe" — nuvem fora/estourada não
+ *  entra em backoff nenhum: a próxima leitura (ou R) tenta de novo. */
 const UNRESOLVED_RETRY_MS = 5 * 60 * 1000;
-/** Teto por chamada à nuvem iTAG / epc-lookup dentro de `resolveEpcs`: a mesa
- *  não pode ficar em LENDO por minutos porque a nuvem pendurou (o Rust tenta
- *  2 bases × 30 s por chunk). Passou disso, segue com o que tem (cache/SGTIN). */
-const RESOLVE_TIMEOUT_MS = 8000;
+/** Teto da chamada à nuvem iTAG dentro de `resolveEpcs`. Era 8 s até 0.9.39 e
+ *  o Rust consultava em lotes de 8 sequenciais: mesa com muitas peças estourava
+ *  e TUDO caía no fallback do nexus (inventário com tamanho trocado). Agora o
+ *  Rust consulta tudo em paralelo com 8 s por chamada; o teto aqui é só o
+ *  guarda-chuva. Passou disso, segue com o que tem (fallback provisório). */
+const RESOLVE_TIMEOUT_MS = 20000;
+/** Teto do fallback `/separacao/epc-lookup` (nexus). */
+const NEXUS_TIMEOUT_MS = 8000;
 function comTimeout<T>(p: Promise<T>, ms: number, rotulo: string): Promise<T> {
   return new Promise<T>((resolve, reject) => {
     const id = window.setTimeout(() => reject(new Error(`${rotulo}: sem resposta em ${ms / 1000}s`)), ms);
@@ -67,7 +73,18 @@ function comTimeout<T>(p: Promise<T>, ms: number, rotulo: string): Promise<T> {
 
 function loadEpcCache(): Map<string, EpcLookupItem> {
   try {
-    const raw = localStorage.getItem(EPC_CACHE_KEY);
+    let raw = localStorage.getItem(EPC_CACHE_KEY);
+    if (!raw) {
+      // Migração do cache v1 (até 0.9.38): só quem tem nome veio da nuvem
+      // iTAG — o resto era fallback do nexus e fica de fora.
+      const v1 = localStorage.getItem("berzerk_epc_resolve_cache_v1");
+      if (v1) {
+        const soItag = (JSON.parse(v1) as [string, EpcLookupItem][]).filter(([, v]) => !!v.name);
+        raw = JSON.stringify(soItag);
+        localStorage.setItem(EPC_CACHE_KEY, raw);
+        localStorage.removeItem("berzerk_epc_resolve_cache_v1");
+      }
+    }
     if (!raw) return new Map();
     // Só a nuvem iTAG é persistida (v2) — quem veio sem `fonte` é dela.
     return new Map(
@@ -456,24 +473,26 @@ export function RfidProvider({ children }: { children: ReactNode }) {
       const result = new Map<string, EpcLookupItem>();
       const agora = Date.now();
       let misses: string[] = [];
+      const fallbackOnly: string[] = [];
       for (const e of norm) {
         if (/^\d{13}$/.test(e)) {
           result.set(e, { epc: e, ean13: e, sku: null, size: null, batchCode: null });
           continue;
         }
         const cached = cacheRef.current.get(e);
-        const doNexus = nexusRef.current.get(e);
-        const failedAt = unresolvedRef.current.get(e);
         if (cached) {
           result.set(e, cached);
-        } else if (doNexus && agora - doNexus.em < NEXUS_TTL_MS) {
-          result.set(e, doNexus.item);
-        } else if (failedAt !== undefined && agora - failedAt < UNRESOLVED_RETRY_MS) {
-          const decoded = decodeSgtin96(e);
-          if (decoded) result.set(e, { epc: e, ean13: decoded, sku: null, size: null, batchCode: null, fonte: "sgtin" });
+          continue;
+        }
+        // Sem resposta da NUVEM em cache: vai consultá-la (de novo, se a última
+        // vez foi fallback do nexus/SGTIN — esses são provisórios e é
+        // justamente no R da operadora que a nuvem ganha a 2ª chance). A única
+        // exceção é a nuvem ter dito que o EPC NÃO EXISTE há menos de 5 min.
+        const naoExisteEm = unresolvedRef.current.get(e);
+        if (naoExisteEm !== undefined && agora - naoExisteEm < UNRESOLVED_RETRY_MS) {
+          fallbackOnly.push(e);
         } else {
-          unresolvedRef.current.delete(e); // TTL vencido: tenta de novo
-          nexusRef.current.delete(e);
+          unresolvedRef.current.delete(e);
           misses.push(e);
         }
       }
@@ -491,9 +510,10 @@ export function RfidProvider({ children }: { children: ReactNode }) {
         try {
           const details = await comTimeout(lookupEpcDetails(misses), RESOLVE_TIMEOUT_MS, "nuvem iTAG");
           for (const d of details) {
+            const key = d.epc.toUpperCase();
             if (d.found && d.ean13) {
               commit({
-                epc: d.epc,
+                epc: key,
                 ean13: d.ean13,
                 sku: null,
                 size: d.tamanho,
@@ -501,6 +521,12 @@ export function RfidProvider({ children }: { children: ReactNode }) {
                 name: d.nome,
                 fonte: "itag",
               });
+            } else if (!d.found && d.fonte !== "erro") {
+              // A nuvem RESPONDEU que não conhece o EPC (nos dois ambientes):
+              // só aí entra em backoff. `fonte: "erro"` = algum ambiente não
+              // respondeu → sem backoff, a próxima leitura tenta de novo.
+              if (unresolvedRef.current.size > EPC_CACHE_MAX) unresolvedRef.current.clear();
+              unresolvedRef.current.set(key, agora);
             }
           }
         } catch (e) {
@@ -509,9 +535,18 @@ export function RfidProvider({ children }: { children: ReactNode }) {
         misses = misses.filter((e) => !result.has(e));
       }
 
-      if (misses.length > 0) {
+      // Fallback PROVISÓRIO (nexus, depois SGTIN) pra quem a nuvem não resolveu
+      // agora. Nunca persiste e nunca bloqueia nova consulta à nuvem.
+      const pendentes = [...misses, ...fallbackOnly];
+      const semNexus: string[] = [];
+      for (const e of pendentes) {
+        const doNexus = nexusRef.current.get(e);
+        if (doNexus && agora - doNexus.em < NEXUS_TTL_MS) result.set(e, doNexus.item);
+        else semNexus.push(e);
+      }
+      if (semNexus.length > 0) {
         try {
-          const { items } = await comTimeout(epcLookup(misses), RESOLVE_TIMEOUT_MS, "epc-lookup");
+          const { items } = await comTimeout(epcLookup(semNexus), NEXUS_TIMEOUT_MS, "epc-lookup");
           for (const item of items) {
             const key = item.epc.toUpperCase();
             const it = { ...item, fonte: "nexus" as const };
@@ -522,12 +557,10 @@ export function RfidProvider({ children }: { children: ReactNode }) {
         } catch (e) {
           setLastError(e instanceof Error ? e.message : String(e));
         }
-        misses = misses.filter((e) => !result.has(e));
       }
 
-      for (const e of misses) {
-        if (unresolvedRef.current.size > EPC_CACHE_MAX) unresolvedRef.current.clear();
-        unresolvedRef.current.set(e, agora);
+      for (const e of pendentes) {
+        if (result.has(e)) continue;
         const decoded = decodeSgtin96(e);
         if (decoded) result.set(e, { epc: e, ean13: decoded, sku: null, size: null, batchCode: null, fonte: "sgtin" });
       }
