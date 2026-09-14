@@ -72,15 +72,23 @@ export type Order = {
 
 export type ClaimResponse = { order: Order | null };
 
+/**
+ * De onde saiu a resolução EPC → peça. `itag` = nuvem da iTAG (a verdade da
+ * etiqueta impressa; só ela vale pra corrigir o inventário do nexus); `nexus`
+ * = `/separacao/epc-lookup` (cópia do inventário, que pode estar com o tamanho
+ * trocado — 14/09/2026); `sgtin` = decodificação local (não distingue grade).
+ */
+export type FonteResolucao = "itag" | "nexus" | "sgtin";
+
 export type EpcLookupItem = {
   epc: string;
   ean13: string;
   sku: string | null;
   size: string | null;
   batchCode: string | null;
-  /** Nome do produto — só vem quando resolvido pela nuvem da iTAG (o endpoint
-   *  do nexus não manda; opcional pra manter o shape do contrato). */
+  /** Nome do produto (nuvem iTAG, ou `nome` da etiqueta iTAG via nexus). */
   name?: string | null;
+  fonte?: FonteResolucao;
 };
 
 export type Me = {
@@ -589,7 +597,14 @@ export type LeituraResolvida = {
   sku: string | null;
   size: string | null;
   name: string | null;
+  /** Ver `FonteResolucao` — o nexus só corrige o inventário com `itag`. */
+  fonte?: FonteResolucao;
 };
+
+/** `EpcLookupItem` → `LeituraResolvida` (o que vai no complete/ship). */
+export function leituraDe(epc: string, l: EpcLookupItem): LeituraResolvida {
+  return { epc, ean13: l.ean13, sku: l.sku, size: l.size, name: l.name ?? null, fonte: l.fonte };
+}
 
 export function completeSeparacao(
   orderId: string,
@@ -632,10 +647,15 @@ export async function epcLookup(epcs: string[]): Promise<{ items: EpcLookupItem[
   const items: EpcLookupItem[] = [];
   for (let i = 0; i < epcs.length; i += EPC_LOOKUP_CHUNK) {
     const chunk = epcs.slice(i, i + EPC_LOOKUP_CHUNK);
-    const r = await apiRequest<{ items: EpcLookupItem[] }>("/separacao/epc-lookup", {
-      query: { epcs: chunk.join(",") },
-    });
-    items.push(...r.items);
+    const r = await apiRequest<{ items: Array<EpcLookupItem & { nome?: string | null }> }>(
+      "/separacao/epc-lookup",
+      { query: { epcs: chunk.join(",") } },
+    );
+    // O nexus manda o nome como `nome` — até 0.9.38 o app lia `name` e a peça
+    // resolvida por aqui aparecia sem nome na mesa.
+    for (const it of r.items) {
+      items.push({ ...it, name: it.name ?? it.nome ?? null, fonte: "nexus" });
+    }
   }
   return { items };
 }

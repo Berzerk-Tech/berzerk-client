@@ -44,6 +44,7 @@ import {
   getMeusPedidos,
   getQueueDates,
   iniciarSeparacao,
+  leituraDe,
   releaseSeparacao,
   type EpcLookupItem,
   type LiberacaoFaltante,
@@ -650,7 +651,7 @@ export function SeparacaoRunner({
         return tags.flatMap((t) => {
           const epc = t.toUpperCase();
           const l = map.get(epc);
-          return l ? [{ epc, ean13: l.ean13, sku: l.sku, size: l.size, name: l.name ?? null }] : [];
+          return l ? [leituraDe(epc, l)] : [];
         });
       } catch {
         return [];
