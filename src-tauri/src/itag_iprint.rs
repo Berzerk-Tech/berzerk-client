@@ -16,6 +16,9 @@ use std::time::Duration;
 
 const PRINT_TIMEOUT_SECS: u64 = 60;
 const QUERY_TIMEOUT_SECS: u64 = 30;
+/// Consulta EPC→peça na nuvem: por chamada. Ver `itag_epc_details`.
+const LOOKUP_TIMEOUT_SECS: u64 = 8;
+const LOOKUP_CONCURRENCY: usize = 16;
 const POLL_INTERVAL_MS: u64 = 800;
 const POLL_MAX_ATTEMPTS: u32 = 12; // ~10s total
 
@@ -359,7 +362,10 @@ pub async fn itag_epc_details(
     extra_bases: Option<Vec<String>>,
     codigo_empresa: Option<u32>,
 ) -> Result<Vec<EpcDetail>, String> {
-    let client = build_client(QUERY_TIMEOUT_SECS).map_err(|e| format!("client_init: {}", e))?;
+    // Timeout curto POR CHAMADA: o app espera o conjunto todo (`RESOLVE_TIMEOUT_MS`
+    // no RfidContext) e, se estourar, perde tudo — 30 s numa chamada travada
+    // derrubava a mesa inteira pro fallback do nexus.
+    let client = build_client(LOOKUP_TIMEOUT_SECS).map_err(|e| format!("client_init: {}", e))?;
     let empresa = codigo_empresa.unwrap_or(1);
 
     let mut bases = vec![base(&config)];
@@ -370,43 +376,53 @@ pub async fn itag_epc_details(
         }
     }
 
-    let mut out: Vec<EpcDetail> = Vec::with_capacity(epcs.len());
-    // Chunks de 8 concorrentes (mesmo batch size do edge do posvenda).
-    for chunk in epcs.chunks(8) {
-        let handles: Vec<_> = chunk
-            .iter()
-            .map(|epc| {
-                let epc = epc.trim().to_uppercase();
-                let client = client.clone();
-                let bases = bases.clone();
-                let user = config.basic_user.clone();
-                let pass = config.basic_pass.clone();
-                tokio::spawn(async move {
-                    for b in &bases {
-                        match lookup_epc_once(&client, b, &user, &pass, empresa, &epc).await {
-                            Ok(Some(mut d)) => {
-                                d.fonte = Some(b.clone());
-                                return d;
-                            }
-                            Ok(None) => continue,
-                            Err(_) => continue, // ambiente fora → tenta o próximo
+    // TODOS os EPCs em paralelo (teto de LOOKUP_CONCURRENCY). Até 0.9.39 eram
+    // chunks de 8 SEQUENCIAIS: mesa com 12+ peças (mistos) levava 2+ rodadas de
+    // até 2 chamadas por EPC, estourava os 8 s do app e TODAS as peças caíam
+    // no fallback do nexus — que estava com o tamanho trocado (14/09/2026).
+    let sem = std::sync::Arc::new(tokio::sync::Semaphore::new(LOOKUP_CONCURRENCY));
+    let handles: Vec<_> = epcs
+        .iter()
+        .map(|epc| {
+            let epc = epc.trim().to_uppercase();
+            let client = client.clone();
+            let bases = bases.clone();
+            let user = config.basic_user.clone();
+            let pass = config.basic_pass.clone();
+            let sem = sem.clone();
+            tokio::spawn(async move {
+                let _permit = sem.acquire_owned().await;
+                let mut falhou = false;
+                for b in &bases {
+                    match lookup_epc_once(&client, b, &user, &pass, empresa, &epc).await {
+                        Ok(Some(mut d)) => {
+                            d.fonte = Some(b.clone());
+                            return d;
+                        }
+                        Ok(None) => continue,
+                        Err(_) => {
+                            falhou = true;
+                            continue; // ambiente fora → tenta o próximo
                         }
                     }
-                    EpcDetail {
-                        epc,
-                        ean13: None,
-                        nome: None,
-                        tamanho: None,
-                        cor: None,
-                        found: false,
-                        fonte: None,
-                    }
-                })
+                }
+                EpcDetail {
+                    epc,
+                    ean13: None,
+                    nome: None,
+                    tamanho: None,
+                    cor: None,
+                    found: false,
+                    // `erro` = pelo menos um ambiente não respondeu: o app NÃO
+                    // pode tratar como "não existe" (sem backoff, tenta de novo).
+                    fonte: if falhou { Some("erro".to_string()) } else { None },
+                }
             })
-            .collect();
-        for h in handles {
-            out.push(h.await.map_err(|e| format!("join: {}", e))?);
-        }
+        })
+        .collect();
+    let mut out: Vec<EpcDetail> = Vec::with_capacity(epcs.len());
+    for h in handles {
+        out.push(h.await.map_err(|e| format!("join: {}", e))?);
     }
     Ok(out)
 }

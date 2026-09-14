@@ -55,6 +55,8 @@ export type EpcDetail = {
   tamanho: string | null;
   cor: string | null;
   found: boolean;
+  /** Base que resolveu; `"erro"` quando algum ambiente não respondeu (não é
+   *  "não existe" — o RfidContext não entra em backoff nesse caso). */
   fonte: string | null;
 };
 

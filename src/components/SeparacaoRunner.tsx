@@ -111,6 +111,11 @@ function gtinCandidates(...vals: Array<string | null | undefined>): string[] {
   return Array.from(out);
 }
 
+/** Nome curto da fonte de resolução pra UI/console. */
+function rotuloFonte(f: EpcLookupItem["fonte"]): string {
+  return f === "nexus" ? "nexus (inventário)" : f === "sgtin" ? "código da etiqueta" : "iTAG";
+}
+
 type Phase = "loading" | "separating" | "empty" | "error";
 
 // ---------------------------------------------------------------------------
@@ -290,6 +295,10 @@ type ExtraTag = {
    *  peça lida (mesmo tamanho, nome parecido — ver `itemParecidoDoPedido`),
    *  pra operadora perceber "produto errado" em vez de "bug entre pedidos". */
   parecidoNome?: string | null;
+  /** De onde saiu a resolução. Não sendo a nuvem iTAG, é PROVISÓRIA — o
+   *  inventário do nexus tinha tamanho trocado (14/09/2026) e o SGTIN não
+   *  distingue grade; a UI manda apertar R pra consultar a iTAG de novo. */
+  fonte?: EpcLookupItem["fonte"];
 };
 
 /** Entrada do console de leitura (o que o leitor viu e como resolvemos). */
@@ -1026,6 +1035,7 @@ export function SeparacaoRunner({
           beepError();
           if (look) {
             const desc = [look.name, look.size, look.ean13].filter(Boolean).join(" · ");
+            const provisoria = look.fonte !== "itag";
             // Excedente do próprio pedido (produto certo, unidade a mais) ou
             // peça de outro produto? Muda a mensagem E o card que fica vermelho.
             const excedido = itemDoPedido(ord, look);
@@ -1043,8 +1053,13 @@ export function SeparacaoRunner({
               itemId: excedido?.id,
               imagemUrl: excedido?.imagemUrl ?? null,
               parecidoNome: parecido?.nome ?? null,
+              fonte: look.fonte,
             });
-            pushLog({ epc: epcU, desc: desc || "(sem descrição)", status: "extra" });
+            pushLog({
+              epc: epcU,
+              desc: (desc || "(sem descrição)") + (provisoria ? ` · via ${rotuloFonte(look.fonte)}` : ""),
+              status: "extra",
+            });
             if (excedido) {
               showReject(
                 `Peça SOBRESSALENTE: ${desc} — o pedido já tem as unidades desse produto. Tire a peça da mesa e reinicie (R).`,
@@ -1702,6 +1717,11 @@ function ReadLogPanel({
                 </span>
                 {x.kind === "alheia" && x.parecidoNome && (
                   <span style={extrasPinnedSimilar}>O pedido pede: {x.parecidoNome}</span>
+                )}
+                {x.kind !== "desconhecida" && x.fonte && x.fonte !== "itag" && (
+                  <span style={extrasPinnedSimilar}>
+                    Identificada pelo {rotuloFonte(x.fonte)}, não pela iTAG — pode estar errada. Aperte R pra consultar de novo.
+                  </span>
                 )}
                 <span style={logEpc}>{x.epc}</span>
               </div>
