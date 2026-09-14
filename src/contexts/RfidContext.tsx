@@ -36,7 +36,12 @@ import {
 import { decodeSgtin96 } from "../lib/sgtin";
 import { epcLookup, type EpcLookupItem } from "../services/orders";
 
-const EPC_CACHE_KEY = "berzerk_epc_resolve_cache_v1";
+const EPC_CACHE_KEY = "berzerk_epc_resolve_cache_v2";
+/** Resposta do nexus (`/separacao/epc-lookup`) vale por pouco tempo e só em
+ *  memória: é cópia do inventário, que pode estar com o tamanho trocado
+ *  (14/09/2026). Vencido o prazo, a próxima leitura tenta a nuvem iTAG de novo
+ *  — senão uma resposta errada ficava fixa na estação pra sempre. */
+const NEXUS_TTL_MS = 5 * 60 * 1000;
 const EPC_CACHE_MAX = 5000;
 /** Depois de quanto tempo um EPC "não resolvido" pode ser consultado de novo. */
 const UNRESOLVED_RETRY_MS = 5 * 60 * 1000;
@@ -64,7 +69,10 @@ function loadEpcCache(): Map<string, EpcLookupItem> {
   try {
     const raw = localStorage.getItem(EPC_CACHE_KEY);
     if (!raw) return new Map();
-    return new Map(JSON.parse(raw) as [string, EpcLookupItem][]);
+    // Só a nuvem iTAG é persistida (v2) — quem veio sem `fonte` é dela.
+    return new Map(
+      (JSON.parse(raw) as [string, EpcLookupItem][]).map(([k, v]) => [k, { ...v, fonte: v.fonte ?? "itag" }]),
+    );
   } catch {
     return new Map();
   }
@@ -172,6 +180,8 @@ export function RfidProvider({ children }: { children: ReactNode }) {
    *  no nexus depois da primeira leitura — antes ficava "não identificada"
    *  até reiniciar o app). */
   const unresolvedRef = useRef<Map<string, number>>(new Map());
+  /** Resoluções vindas do nexus — só memória, com TTL (`NEXUS_TTL_MS`). */
+  const nexusRef = useRef<Map<string, { item: EpcLookupItem; em: number }>>(new Map());
   const persistTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   /** Persistência com debounce: serializar o cache inteiro (até 5000 entradas)
@@ -444,6 +454,7 @@ export function RfidProvider({ children }: { children: ReactNode }) {
     async (epcs: string[]): Promise<Map<string, EpcLookupItem>> => {
       const norm = Array.from(new Set(epcs.map((e) => e.trim().toUpperCase()).filter(Boolean)));
       const result = new Map<string, EpcLookupItem>();
+      const agora = Date.now();
       let misses: string[] = [];
       for (const e of norm) {
         if (/^\d{13}$/.test(e)) {
@@ -451,19 +462,24 @@ export function RfidProvider({ children }: { children: ReactNode }) {
           continue;
         }
         const cached = cacheRef.current.get(e);
+        const doNexus = nexusRef.current.get(e);
         const failedAt = unresolvedRef.current.get(e);
         if (cached) {
           result.set(e, cached);
-        } else if (failedAt !== undefined && Date.now() - failedAt < UNRESOLVED_RETRY_MS) {
+        } else if (doNexus && agora - doNexus.em < NEXUS_TTL_MS) {
+          result.set(e, doNexus.item);
+        } else if (failedAt !== undefined && agora - failedAt < UNRESOLVED_RETRY_MS) {
           const decoded = decodeSgtin96(e);
-          if (decoded) result.set(e, { epc: e, ean13: decoded, sku: null, size: null, batchCode: null });
+          if (decoded) result.set(e, { epc: e, ean13: decoded, sku: null, size: null, batchCode: null, fonte: "sgtin" });
         } else {
           unresolvedRef.current.delete(e); // TTL vencido: tenta de novo
+          nexusRef.current.delete(e);
           misses.push(e);
         }
       }
 
       let touchedCache = false;
+      // Só a nuvem iTAG entra no cache persistente: é a verdade da etiqueta.
       const commit = (item: EpcLookupItem) => {
         const key = item.epc.toUpperCase();
         cacheRef.current.set(key, item);
@@ -476,7 +492,15 @@ export function RfidProvider({ children }: { children: ReactNode }) {
           const details = await comTimeout(lookupEpcDetails(misses), RESOLVE_TIMEOUT_MS, "nuvem iTAG");
           for (const d of details) {
             if (d.found && d.ean13) {
-              commit({ epc: d.epc, ean13: d.ean13, sku: null, size: d.tamanho, batchCode: null, name: d.nome });
+              commit({
+                epc: d.epc,
+                ean13: d.ean13,
+                sku: null,
+                size: d.tamanho,
+                batchCode: null,
+                name: d.nome,
+                fonte: "itag",
+              });
             }
           }
         } catch (e) {
@@ -488,7 +512,13 @@ export function RfidProvider({ children }: { children: ReactNode }) {
       if (misses.length > 0) {
         try {
           const { items } = await comTimeout(epcLookup(misses), RESOLVE_TIMEOUT_MS, "epc-lookup");
-          for (const item of items) commit(item);
+          for (const item of items) {
+            const key = item.epc.toUpperCase();
+            const it = { ...item, fonte: "nexus" as const };
+            if (nexusRef.current.size > EPC_CACHE_MAX) nexusRef.current.clear();
+            nexusRef.current.set(key, { item: it, em: agora });
+            result.set(key, it);
+          }
         } catch (e) {
           setLastError(e instanceof Error ? e.message : String(e));
         }
@@ -497,9 +527,9 @@ export function RfidProvider({ children }: { children: ReactNode }) {
 
       for (const e of misses) {
         if (unresolvedRef.current.size > EPC_CACHE_MAX) unresolvedRef.current.clear();
-        unresolvedRef.current.set(e, Date.now());
+        unresolvedRef.current.set(e, agora);
         const decoded = decodeSgtin96(e);
-        if (decoded) result.set(e, { epc: e, ean13: decoded, sku: null, size: null, batchCode: null });
+        if (decoded) result.set(e, { epc: e, ean13: decoded, sku: null, size: null, batchCode: null, fonte: "sgtin" });
       }
 
       if (touchedCache) {

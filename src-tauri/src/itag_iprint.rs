@@ -47,7 +47,7 @@ pub struct IprintItem {
     pub unidade: Option<String>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Clone)]
 pub struct EpcEntry {
     pub epc: String,
     #[serde(rename = "codigoInventario")]
@@ -58,11 +58,26 @@ pub struct EpcEntry {
     pub ean13: Option<String>,
 }
 
+/// O que a iTAG diz sobre UM EPC que acabou de queimar (ecoado no retorno do
+/// gerarRFID / no inventário). É a ÚNICA fonte confiável do vínculo
+/// EPC → tamanho: a iTAG NÃO devolve os EPCs na ordem do payload, e distribuir
+/// por posição gravou 67% do inventário com o tamanho trocado (14/09/2026).
+#[derive(Serialize, Clone, Debug, PartialEq)]
+pub struct EpcMapeado {
+    pub epc: String,
+    pub ean13: Option<String>,
+    pub tamanho: Option<String>,
+    pub referencia: Option<String>,
+}
+
 #[derive(Serialize)]
 pub struct GerarRfidResponse {
     #[serde(rename = "codigoInventario")]
     pub codigo_inventario: Option<i64>,
     pub epcs: Vec<String>,
+    /// Vínculo EPC → item conforme a iTAG devolveu (mesma ordem de `epcs`).
+    /// Vazio só se a resposta veio como lista crua de strings.
+    pub mapeamento: Vec<EpcMapeado>,
     /// Marca true quando a resposta do POST não trouxe EPCs e a gente
     /// completou via poll do findPageByPredicate.
     pub polled: bool,
@@ -219,13 +234,24 @@ pub async fn itag_iprint_gerar_rfid(
 
     let codigo_inventario = extract_codigo_inventario(&parsed);
     let mut epcs = extract_epcs(&parsed);
+    let mut mapeamento = extract_epc_mapeamento(&parsed);
     let mut polled = false;
 
     // Se gerarRFID não retornou EPCs inline, faz poll até preencher.
     if epcs.is_empty() {
         if let Some(ci) = codigo_inventario {
             polled = true;
-            epcs = poll_inventory_epcs(&client, &config, ci, total_quantidade).await?;
+            let entries = poll_inventory_epcs(&client, &config, ci, total_quantidade).await?;
+            mapeamento = entries
+                .iter()
+                .map(|e| EpcMapeado {
+                    epc: e.epc.clone(),
+                    ean13: e.ean13.clone(),
+                    tamanho: e.tamanho.clone(),
+                    referencia: e.referencia.clone(),
+                })
+                .collect();
+            epcs = entries.into_iter().map(|e| e.epc).collect();
         } else {
             return Err(format!(
                 "epc_extraction: response sem codigoInventario nem EPCs — {}",
@@ -237,6 +263,7 @@ pub async fn itag_iprint_gerar_rfid(
     Ok(GerarRfidResponse {
         codigo_inventario,
         epcs,
+        mapeamento,
         polled,
         raw_preview,
     })
@@ -443,14 +470,14 @@ async fn poll_inventory_epcs(
     config: &IprintConfig,
     codigo_inventario: i64,
     expected_total: u32,
-) -> Result<Vec<String>, String> {
+) -> Result<Vec<EpcEntry>, String> {
     let mut last_seen: Vec<EpcEntry> = vec![];
     for attempt in 0..POLL_MAX_ATTEMPTS {
         tokio::time::sleep(Duration::from_millis(POLL_INTERVAL_MS)).await;
         match query_inventory_raw(client, config, codigo_inventario, 0, 500).await {
             Ok(entries) => {
                 if entries.len() as u32 >= expected_total {
-                    return Ok(entries.into_iter().map(|e| e.epc).collect());
+                    return Ok(entries);
                 }
                 last_seen = entries;
             }
@@ -466,7 +493,7 @@ async fn poll_inventory_epcs(
         Err("epc_extraction: poll não encontrou nenhum EPC após 10s".to_string())
     } else {
         // Retorna parcial — o frontend pode decidir o que fazer
-        Ok(last_seen.into_iter().map(|e| e.epc).collect())
+        Ok(last_seen)
     }
 }
 
@@ -579,6 +606,41 @@ fn extract_codigo_inventario(value: &serde_json::Value) -> Option<i64> {
     None
 }
 
+/// Mapeamento EPC → tamanho/ean13/referencia a partir dos OBJETOS da resposta
+/// (array no root ou `content`). Lista crua de strings não tem metadado → vazio.
+fn extract_epc_mapeamento(value: &serde_json::Value) -> Vec<EpcMapeado> {
+    let arr = value
+        .as_array()
+        .or_else(|| value.get("content").and_then(|v| v.as_array()));
+    let Some(arr) = arr else {
+        return vec![];
+    };
+    let s = |obj: &serde_json::Value, k: &str| -> Option<String> {
+        match obj.get(k) {
+            Some(serde_json::Value::String(v)) if !v.trim().is_empty() => Some(v.trim().to_string()),
+            Some(serde_json::Value::Number(n)) => Some(n.to_string()),
+            _ => None,
+        }
+    };
+    arr.iter()
+        .filter_map(|v| {
+            let epc = v
+                .get("epc")
+                .or_else(|| v.get("itagInventarioIprintItemCompl").and_then(|c| c.get("epc")))
+                .or_else(|| v.get("produtoIprintCompl").and_then(|c| c.get("epc")))
+                .and_then(|x| x.as_str())
+                .map(|x| x.trim().to_uppercase())
+                .filter(|x| !x.is_empty())?;
+            Some(EpcMapeado {
+                epc,
+                ean13: s(v, "ean13"),
+                tamanho: s(v, "tamanho"),
+                referencia: s(v, "referencia"),
+            })
+        })
+        .collect()
+}
+
 fn extract_epcs(value: &serde_json::Value) -> Vec<String> {
     // Array no root: pode ser de strings ou de objetos com campo .epc
     if let Some(arr) = value.as_array() {
@@ -662,6 +724,25 @@ mod tests {
         });
         assert_eq!(extract_epcs(&v), vec!["X1", "X2"]);
         assert_eq!(extract_codigo_inventario(&v), Some(7));
+    }
+
+    #[test]
+    fn mapeamento_vem_dos_objetos_e_nao_da_lista_crua() {
+        let v = serde_json::json!([
+            { "epc": "e1", "nome": "Camisa M", "tamanho": "M", "ean13": "7890000000012", "referencia": "CAM" },
+            { "itagInventarioIprintItemCompl": { "epc": "E2" }, "tamanho": "G", "ean13": 7890000000029u64 },
+            { "sem_epc": true }
+        ]);
+        let m = extract_epc_mapeamento(&v);
+        assert_eq!(m.len(), 2);
+        assert_eq!(m[0].epc, "E1");
+        assert_eq!(m[0].tamanho.as_deref(), Some("M"));
+        assert_eq!(m[0].ean13.as_deref(), Some("7890000000012"));
+        assert_eq!(m[0].referencia.as_deref(), Some("CAM"));
+        assert_eq!(m[1].epc, "E2");
+        assert_eq!(m[1].tamanho.as_deref(), Some("G"));
+        assert_eq!(m[1].ean13.as_deref(), Some("7890000000029"));
+        assert!(extract_epc_mapeamento(&serde_json::json!(["AABB"])).is_empty());
     }
 
     #[test]

@@ -61,9 +61,18 @@ export type PrintJobFailure = {
 
 export type PrintJobResult = PrintJobSuccess | PrintJobFailure;
 
+/** Vínculo EPC → item como a iTAG devolveu — ver `EpcMapeado` no Rust. */
+export type EpcMapeado = {
+  epc: string;
+  ean13: string | null;
+  tamanho: string | null;
+  referencia: string | null;
+};
+
 type GerarRfidResponse = {
   codigoInventario: number | null;
   epcs: string[];
+  mapeamento: EpcMapeado[];
   polled: boolean;
   rawPreview: string;
 };
@@ -153,12 +162,14 @@ export async function printJob(input: PrintJobInput): Promise<PrintJobResult> {
   // Persiste o mapping EPC → batch/job. Não falha o print inteiro se isso
   // der erro — a impressão física já aconteceu; logamos pra tratar depois.
   try {
-    // Manda SÓ a lista, na ordem em que a iTAG a devolveu — quem casa EPC ↔
-    // tamanho é o servidor, expandindo os itens do job. Ver a nota grande em
-    // `services/printJobs.ts`.
+    // Manda a lista E o mapeamento EPC → tamanho/ean13 que a PRÓPRIA iTAG
+    // devolveu: é por ele que o nexus grava o vínculo. A ordem da lista NÃO
+    // é a do payload (a distribuição por posição trocou 67% dos tamanhos —
+    // 14/09/2026). Ver a nota grande em `services/printJobs.ts`.
     await saveEpcInventory({
       jobId: input.jobId,
       epcs: resp.epcs,
+      mapeamento: resp.mapeamento ?? [],
       codigoInventarioItag: resp.codigoInventario,
     });
   } catch (e) {

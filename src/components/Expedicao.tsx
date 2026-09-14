@@ -40,7 +40,7 @@ import {
   type ExpedicaoMode,
 } from "../services/expedicaoMode";
 import { conferir, type Conferencia } from "../lib/conferenciaExpedicao";
-import type { EpcLookupItem, LeituraResolvida, OrderItem } from "../services/orders";
+import { leituraDe, type EpcLookupItem, type LeituraResolvida, type OrderItem } from "../services/orders";
 
 type Props = { onBack: () => void };
 
@@ -619,7 +619,7 @@ export function Expedicao({ onBack }: Props) {
         return tags.flatMap((t) => {
           const epc = t.toUpperCase();
           const l = map.get(epc);
-          return l ? [{ epc, ean13: l.ean13, sku: l.sku, size: l.size, name: l.name ?? null }] : [];
+          return l ? [leituraDe(epc, l)] : [];
         });
       } catch {
         return [];

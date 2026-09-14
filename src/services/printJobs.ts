@@ -10,17 +10,19 @@
 //
 // Duas mudanças de responsabilidade que valem a leitura:
 //
-// 1. QUEM DISTRIBUI EPC → TAMANHO É O SERVIDOR. `saveEpcInventory` mandava as
-//    linhas prontas; agora manda só a lista de EPCs na ordem em que a iTAG a
-//    devolveu, e o nexus expande os itens do job. O job é a cópia confiável do
-//    payload — refazer a expansão aqui era duplicar a regra que decide qual EPC
-//    é de qual tamanho, e errar nela grava o EAN errado na etiqueta.
+// 1. QUEM GRAVA EPC → TAMANHO É O SERVIDOR, a partir do `mapeamento` que a
+//    PRÓPRIA iTAG devolve por EPC (tamanho/ean13/referencia). Até 0.9.38 ia só
+//    a lista e o nexus distribuía por POSIÇÃO sobre os itens do job — e a iTAG
+//    não devolve na ordem do payload: 67% do inventário ficou com o tamanho
+//    trocado (14/09/2026), o que aparecia na separação como "não é deste
+//    pedido" sempre que a nuvem iTAG não respondia. Posição ficou no nexus só
+//    como fallback pra client antigo.
 // 2. `discardTestForBatch` virou UMA chamada transacional no servidor, em vez
 //    de três passos daqui (buscar jobs → apagar EPCs → cancelar jobs), que
 //    podiam parar no meio e deixar EPC de teste vivo com job cancelado.
 
 import { apiRequest } from "../lib/api";
-import type { PrintJobItem } from "../lib/itag/iprint";
+import type { EpcMapeado, PrintJobItem } from "../lib/itag/iprint";
 
 /** Vocabulário do nexus (o Supabase usava queued/printing/done/failed/cancelled). */
 export type RfidPrintJobStatus =
@@ -276,29 +278,49 @@ export async function discardTestForBatch(batchId: string): Promise<void> {
 /**
  * Persiste o mapping EPC → lote depois que a iTAG retornou os EPCs queimados.
  *
- * Manda SÓ a lista, na ordem em que a iTAG a devolveu. Quem distribui EPC →
- * tamanho é o servidor, expandindo os itens do job: a iTAG imprime na ordem do
- * payload e devolve na mesma ordem, e o job é a única cópia confiável daquele
- * payload. Refazer a expansão aqui duplicaria a regra — e um erro nela grava o
- * EPC com o EAN do tamanho errado, o que só aparece meses depois, na separação.
+ * Manda a lista E o `mapeamento` (tamanho/ean13/referencia por EPC, exatamente
+ * como a iTAG devolveu). O nexus grava o vínculo por ele; EPC sem mapeamento
+ * cai na distribuição por posição de antes, que é ERRADA na prática (a iTAG
+ * não devolve na ordem do payload) — `porMapeamento` na resposta diz quantos
+ * foram pelo caminho certo.
  *
  * Idempotente por EPC: reenviar o mesmo job (retry) não duplica.
  */
 export async function saveEpcInventory(params: {
   jobId: string;
   epcs: string[];
+  mapeamento?: EpcMapeado[];
   codigoInventarioItag: number | null;
-}): Promise<{ inserted: number; skipped: number }> {
-  if (params.epcs.length === 0) return { inserted: 0, skipped: 0 };
-  const dto = await apiRequest<{ gravados: number; sobraram: number }>("/etiquetagem/epcs", {
-    method: "POST",
-    body: {
-      jobId: params.jobId,
-      epcs: params.epcs.map((e) => e.trim().toUpperCase()).filter(Boolean),
-      codigoInventarioItag: params.codigoInventarioItag,
+}): Promise<{ inserted: number; skipped: number; porMapeamento: number }> {
+  if (params.epcs.length === 0) return { inserted: 0, skipped: 0, porMapeamento: 0 };
+  const epcs = params.epcs.map((e) => e.trim().toUpperCase()).filter(Boolean);
+  const mapeamento = (params.mapeamento ?? [])
+    .map((m) => ({
+      epc: m.epc.trim().toUpperCase(),
+      ean13: m.ean13 ?? null,
+      tamanho: m.tamanho ?? null,
+      referencia: m.referencia ?? null,
+    }))
+    .filter((m) => m.epc);
+  const dto = await apiRequest<{ gravados: number; sobraram: number; porMapeamento?: number }>(
+    "/etiquetagem/epcs",
+    {
+      method: "POST",
+      body: {
+        jobId: params.jobId,
+        epcs,
+        ...(mapeamento.length > 0 ? { mapeamento } : {}),
+        codigoInventarioItag: params.codigoInventarioItag,
+      },
     },
-  });
-  return { inserted: dto.gravados, skipped: dto.sobraram };
+  );
+  const porMapeamento = dto.porMapeamento ?? 0;
+  if (porMapeamento < epcs.length) {
+    console.warn(
+      `[epcs] job ${params.jobId}: ${epcs.length - porMapeamento}/${epcs.length} EPC(s) gravados por posição (sem mapeamento da iTAG ou nexus antigo)`,
+    );
+  }
+  return { inserted: dto.gravados, skipped: dto.sobraram, porMapeamento };
 }
 
 /**
