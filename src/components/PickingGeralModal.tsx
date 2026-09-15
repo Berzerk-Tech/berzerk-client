@@ -56,9 +56,8 @@ type Escopo = "lote" | "fila";
 
 type Props = {
   queue: { mode: SeparationMode; size: string; sizes: string[] };
-  /** Data de emissão escolhida (YYYY-MM-DD) ou null = todas as datas. */
-  data: string | null;
-  /** Filtros de produto ativos — o picking mostra o que a fila mostra. */
+  /** Filtros ativos — data de emissão (recorte De/Até, pontas opcionais) e
+   *  produto. O picking mostra exatamente o que a fila/sidebar mostram. */
   filters: QueueFilters;
   /** O LOTE da operadora — a folha que ela leva pra prateleira sai DAQUI.
    *  JÁ recortado por produto E por data, igual à sidebar. */
@@ -85,7 +84,6 @@ type Props = {
 
 export function PickingGeralModal({
   queue,
-  data,
   filters,
   lote,
   emConferencia,
@@ -135,8 +133,8 @@ export function PickingGeralModal({
       // BUCKET da fila: `XG` cobre XXG/G1/G2/G3 — sem o plural a folha da fila
       // mostrava só o tamanho-rótulo, uma fila diferente da que ela separa.
       sizes: queue.sizes,
-      dateFrom: data ?? undefined,
-      dateTo: data ?? undefined,
+      dateFrom: filters.dateFrom,
+      dateTo: filters.dateTo,
       filters,
     })
       .then((d) => {
@@ -160,7 +158,7 @@ export function PickingGeralModal({
     };
     // `filters` entra por referência estável do runner (state) — o efeito só
     // roda de novo quando a operadora troca o filtro, que é o que se quer.
-  }, [escopo, produtosDoLote, lote.length, queue.mode, queue.size, queue.sizes, data, filters]);
+  }, [escopo, produtosDoLote, lote.length, queue.mode, queue.size, queue.sizes, filters]);
 
   // MISTOS: o tamanho da própria bancada não entra na folha. Na fila de mistos
   // GG as peças GG já estão com ela na bancada — o que ela precisa buscar na
@@ -263,7 +261,7 @@ export function PickingGeralModal({
     };
   }, [resumoApi, recortando, visiveis, secaoEmConferencia]);
 
-  const dataLabel = data ? `emissão ${fmtData(data)}` : "todas as datas";
+  const dataLabel = labelRecorte(filters.dateFrom, filters.dateTo) ?? "todas as datas";
   const escopoLabel = escopo === "lote" ? "Meu lote" : "Fila inteira";
   const semBancada = bancada ? `sem ${bancada} (bancada)` : null;
   const filaLabel = `Fila ${queue.size} · ${queue.mode === "total" ? "Mistos" : "Puros"}`;
@@ -387,7 +385,7 @@ export function PickingGeralModal({
 
         {erro && <div style={avisoBox}>{erro}</div>}
         {status && <div style={statusBox}>{status}</div>}
-        {(data || filtrando) && (
+        {(filters.dateFrom || filters.dateTo || filtrando) && (
           // Filtro herdado da estação (localStorage) é o motivo nº 1 de "o
           // Picking não aparece / não tem botão de imprimir" (relatos de
           // 28/08 e 02/09): a folha vem vazia e a mensagem lá embaixo não
@@ -399,7 +397,7 @@ export function PickingGeralModal({
             <span style={filtrosBannerTexto}>
               <strong>Filtros ativos nesta estação:</strong>{" "}
               {[
-                data ? `só pedidos emitidos em ${fmtData(data)}` : null,
+                labelRecorte(filters.dateFrom, filters.dateTo),
                 (filters.excludeProducts?.length ?? 0) > 0
                   ? `${filters.excludeProducts!.length} produto${filters.excludeProducts!.length === 1 ? "" : "s"} excluído${filters.excludeProducts!.length === 1 ? "" : "s"}`
                   : null,
@@ -431,7 +429,7 @@ export function PickingGeralModal({
             <span style={vazio}>
               {recortando
                 ? `Nenhum produto com o recorte atual (${[
-                    data ? `emissão ${fmtData(data)}` : null,
+                    labelRecorte(filters.dateFrom, filters.dateTo),
                     filtrando ? "filtro de produto" : null,
                     semBancada,
                   ]
@@ -483,6 +481,24 @@ export function PickingGeralModal({
 function fmtData(iso: string): string {
   const [y, m, d] = iso.split("-");
   return y && m && d ? `${d}/${m}/${y}` : iso;
+}
+
+/**
+ * Frase do recorte de data de EMISSÃO pra `dataLabel` (cabeçalho/PDF), o
+ * banner de filtros ativos e a mensagem de "nenhum produto" — as três
+ * leituras do mesmo `filters.dateFrom`/`dateTo` (pedido de campo de 15/09: o
+ * recorte deixou de ser um dia único, agora tem pontas independentes).
+ * `null` = nenhuma ponta ativa (recorte vazio).
+ */
+function labelRecorte(dateFrom?: string, dateTo?: string): string | null {
+  if (dateFrom && dateTo) {
+    return dateFrom === dateTo
+      ? `emissão ${fmtData(dateFrom)}`
+      : `emissão de ${fmtData(dateFrom)} até ${fmtData(dateTo)}`;
+  }
+  if (dateTo) return `emissão até ${fmtData(dateTo)}`;
+  if (dateFrom) return `emissão a partir de ${fmtData(dateFrom)}`;
+  return null;
 }
 
 const overlay: CSSProperties = {

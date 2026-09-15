@@ -252,4 +252,52 @@ describe("seletor Data com filtro de produto ativo", () => {
     await waitFor(() => expect(screen.getByRole("button", { name: /Todos/ })).toBeTruthy());
     expect(screen.queryByText("Carregando datas…")).toBeNull();
   });
+
+  // Relato de campo de 15/09: a operadora dos Mistos queria separar "os de
+  // pra trás" sem escolher um dia por vez. "Até ontem" e o bloco De/Até
+  // substituem o "dia único" do seletor por um recorte de pontas independentes.
+  it("'Até ontem' manda só a ponta 'ate' (sem 'de') e o gatilho mostra o recorte", async () => {
+    // "Hoje" fixo em 28/08 às 23h de SP — em UTC já é 29/08, então só o
+    // cálculo em America/Sao_Paulo dá ontem = 27/08 (último dia do fixture);
+    // um `toISOString().slice(0, 10)` mandaria 28/08 e o teste pegaria. Só o
+    // relógio (`Date`) é congelado; `setTimeout` real segue livre pro
+    // `montar()`/`drenar()` da suíte.
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date("2026-08-29T02:00:00.000Z"));
+    try {
+      await montar();
+      fireEvent.click(screen.getByRole("button", { name: /^Data ▾$/ }));
+      const ateOntem = await waitFor(() => screen.getByRole("button", { name: /Até ontem/ }));
+      await act(async () => { fireEvent.click(ateOntem); });
+      await drenar();
+
+      const ultimoClaim = filtrosDoUltimoClaim();
+      expect(ultimoClaim).toMatchObject({ dateTo: "2026-08-27" });
+      expect(ultimoClaim.dateFrom).toBeFalsy();
+      expect(
+        screen.getAllByRole("button", { name: /até 27\/08\/2026 ▾/ }).length,
+      ).toBeGreaterThan(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("De/Até + Aplicar manda as duas pontas independentes", async () => {
+    await montar();
+
+    fireEvent.click(screen.getByRole("button", { name: /^Data ▾$/ }));
+    await waitFor(() => screen.getByRole("button", { name: /26\/08\/2026/ }));
+    fireEvent.change(screen.getByLabelText("De"), { target: { value: "2026-08-26" } });
+    fireEvent.change(screen.getByLabelText("Até"), { target: { value: "2026-08-27" } });
+    await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Aplicar" })); });
+    await drenar();
+
+    expect(filtrosDoUltimoClaim()).toMatchObject({
+      dateFrom: "2026-08-26",
+      dateTo: "2026-08-27",
+    });
+    expect(
+      screen.getAllByRole("button", { name: /26\/08 → 27\/08\/2026 ▾/ }).length,
+    ).toBeGreaterThan(0);
+  });
 });

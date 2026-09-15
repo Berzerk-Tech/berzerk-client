@@ -118,6 +118,14 @@ function rotuloFonte(f: EpcLookupItem["fonte"]): string {
 
 type Phase = "loading" | "separating" | "empty" | "error";
 
+/**
+ * Recorte de data de EMISSÃO da sidebar/Picking Geral: pontas opcionais
+ * (`YYYY-MM-DD`), `null` = todas. Substituiu o "dia único" de antes (28/08)
+ * depois do relato de campo de 15/09 — a operadora dos Mistos queria "os de
+ * pra trás", não um dia específico, e o seletor só dava um dia ou "Todos".
+ */
+export type RecorteData = { de?: string; ate?: string } | null;
+
 // ---------------------------------------------------------------------------
 // Ordem local do lote e filtro DE EXIBIÇÃO
 // ---------------------------------------------------------------------------
@@ -1120,7 +1128,6 @@ export function SeparacaoRunner({
     void sessionRef.current?.reset().catch(() => {
       /* leitor fora: o poll já reporta desconexão */
     });
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [phase, order?.id, sessionEpoch]);
 
   // Declarados aqui (e não perto de onde abrem) porque o guard do atalho
@@ -1220,7 +1227,6 @@ export function SeparacaoRunner({
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [
     phase,
     completing,
@@ -1368,8 +1374,9 @@ export function SeparacaoRunner({
     void puxarLote({ preservarAtual: true });
   };
 
-  /** Data de emissão escolhida no seletor (dia único) — null = todas. */
-  const dataSel = filters.dateFrom && filters.dateFrom === filters.dateTo ? filters.dateFrom : null;
+  /** Recorte de data de emissão escolhido no seletor — null = todas. */
+  const dataSel: RecorteData =
+    filters.dateFrom || filters.dateTo ? { de: filters.dateFrom, ate: filters.dateTo } : null;
   /**
    * Datas do LOTE DELA pro seletor "Data" (relato de campo de 28/08: com um
    * filtro de produto ativo o seletor não deixava escolher a data; na ordem
@@ -1387,8 +1394,8 @@ export function SeparacaoRunner({
    * memória — o seletor passa a somar as duas origens.
    */
   const datasDoLoteDela = useMemo(() => datasDoLote(lote, filters), [lote, filters]);
-  const escolherData = (d: string | null) =>
-    aplicarFiltros({ ...filters, dateFrom: d ?? undefined, dateTo: d ?? undefined });
+  const escolherData = (r: RecorteData) =>
+    aplicarFiltros({ ...filters, dateFrom: r?.de, dateTo: r?.ate });
 
   /**
    * Carimba `listaEm`/`listaId` no lote EM MEMÓRIA depois que a folha foi
@@ -1623,7 +1630,6 @@ export function SeparacaoRunner({
       {pickingOpen && (
         <PickingGeralModal
           queue={queue}
-          data={dataSel}
           filters={filters}
           lote={visiveis}
           emConferencia={emConferenciaForaDoFiltro}
@@ -1857,13 +1863,13 @@ function LoteSidebar({
   restantes: number | null;
   atualId: string | null;
   filters: QueueFilters;
-  data: string | null;
+  data: RecorteData;
   /** Datas do lote DELA (o `queue-dates` só enxerga a fila sem dono). */
   datasDoLote: QueueDatesResponse;
   /** Pedido da mesa que ficou fora do recorte — mostrado à parte, no topo. */
   emConferencia: Order | null;
   onSelecionar: (o: Order) => void;
-  onEscolherData: (d: string | null) => void;
+  onEscolherData: (r: RecorteData) => void;
   onPickingGeral: () => void;
 }) {
   const [busca, setBusca] = useState("");
@@ -1991,10 +1997,13 @@ function casaBusca(o: Order, termo: string): boolean {
 }
 
 /**
- * Seletor "Data" do posvenda: uma linha por data de EMISSÃO presente na fila,
- * com quantos pedidos ela tem ("14/08/2026 (168)"), mais "Todos". Escolher uma
- * data manda `dateFrom = dateTo` em tudo — lote, produtos e picking. Era o
- * controle que as separadoras mais usavam pra atacar o atraso por dia.
+ * Seletor "Data" da sidebar: uma linha por data de EMISSÃO presente na fila,
+ * com quantos pedidos ela tem ("14/08/2026 (168)"), "Todos", um atalho "Até
+ * ontem" e um recorte De/Até livre. Clicar num dia continua mandando
+ * `dateFrom = dateTo` em tudo — lote, produtos e picking —, como sempre foi;
+ * os dois caminhos novos mandam pontas independentes. Pedido de campo de
+ * 15/09: a operadora dos Mistos queria atacar "os de pra trás" e o seletor só
+ * dava um dia por vez ou "Todos".
  */
 function DataMenu({
   queue,
@@ -2007,18 +2016,24 @@ function DataMenu({
   filters: QueueFilters;
   /** Datas do lote DELA — ver `datasDoLoteDela` em `SeparacaoRunner`. */
   doLote: QueueDatesResponse;
-  valor: string | null;
-  onEscolher: (d: string | null) => void;
+  valor: RecorteData;
+  onEscolher: (r: RecorteData) => void;
 }) {
   const [aberto, setAberto] = useState(false);
   const [dados, setDados] = useState<QueueDatesResponse | null>(null);
   const [indisponivel, setIndisponivel] = useState(false);
+  // Pontas em edição do bloco "De/até + Aplicar" — sincronizam com o recorte
+  // atual sempre que o menu abre (efeito abaixo), não a cada tecla.
+  const [de, setDe] = useState(valor?.de ?? "");
+  const [ate, setAte] = useState(valor?.ate ?? "");
 
   // Troca de fila/filtro invalida a contagem — recarrega na próxima abertura.
   useEffect(() => setDados(null), [queue.mode, queue.size, filters]);
 
   useEffect(() => {
     if (!aberto) return;
+    setDe(valor?.de ?? "");
+    setAte(valor?.ate ?? "");
     let alive = true;
     // `sizes` é o BUCKET da fila (XG cobre XXG/G1/G2/G3): sem ele o seletor
     // contava só o tamanho-rótulo e mostrava menos pedidos do que a fila tem.
@@ -2047,9 +2062,19 @@ function DataMenu({
     return () => window.removeEventListener("keydown", onKey);
   }, [aberto]);
 
-  const escolher = (d: string | null) => {
-    onEscolher(d);
+  const escolher = (r: RecorteData) => {
+    onEscolher(r);
     setAberto(false);
+  };
+
+  const aplicarIntervalo = () => {
+    let d: string | undefined = de || undefined;
+    let a: string | undefined = ate || undefined;
+    // Pontas trocadas (ela escolheu "até" antes de "de", ou ao contrário) —
+    // inverte em silêncio em vez de travar o "Aplicar" ou mandar um filtro
+    // impossível pro servidor.
+    if (d && a && d > a) [d, a] = [a, d];
+    escolher(d || a ? { de: d, ate: a } : null);
   };
 
   // O que a operadora pode recortar = fila sem dono (servidor) + lote dela.
@@ -2057,19 +2082,83 @@ function DataMenu({
   const datas = useMemo(() => uniaoDeDatas(dados, doLote), [dados, doLote]);
   const temContagem = dados !== null || doLote.total > 0;
 
+  // "Até ontem": o caso de campo de 15/09 em um clique. `ontem` é sempre o
+  // dia de SP — mesmo fuso de `diaDeEmissao`/`hojeSP`, senão o atalho erra
+  // perto da virada da meia-noite se a estação estiver em outro fuso. Recalcula
+  // a cada abertura: a sidebar nunca desmonta, e uma estação que fica logada
+  // de um dia pro outro mandaria "ontem" de anteontem.
+  const ontem = useMemo(() => diaAnterior(hojeSP()), [aberto]);
+  const contagemAteOntem = useMemo(
+    () => datas.dates.filter((d) => d.date <= ontem).reduce((n, d) => n + d.count, 0),
+    [datas, ontem],
+  );
+  const ateOntemAtivo = !valor?.de && valor?.ate === ontem;
+  // Opções dos selects: as datas da fila/lote + a ponta atual quando ela não
+  // está na lista (ex.: "Até ontem" numa segunda grava domingo, dia sem
+  // emissão). Sem isso o select mostrava "—" com um limite escondido por trás.
+  const opcoesDe = useMemo(() => opcoesComPonta(datas.dates, de), [datas, de]);
+  const opcoesAte = useMemo(() => opcoesComPonta(datas.dates, ate), [datas, ate]);
+
   return (
     <div style={dataWrap}>
       <button style={valor ? dataBtnOn : dataBtn} onClick={() => setAberto((v) => !v)}>
-        {valor ? fmtDataISO(valor) : "Data"} ▾
+        {labelBotaoData(valor)} ▾
       </button>
       {aberto && (
         <>
           <div style={dataBackdrop} onClick={() => setAberto(false)} />
           <div className="thin-scroll" style={dataMenu}>
+            <div style={dataIntervaloBox}>
+              <div style={dataIntervaloLinha}>
+                <span style={dataIntervaloRotulo}>De</span>
+                <select
+                  aria-label="De"
+                  style={dataIntervaloSelect}
+                  value={de}
+                  onChange={(e) => setDe(e.target.value)}
+                >
+                  <option value="">—</option>
+                  {opcoesDe.map((d) => (
+                    <option key={d} value={d}>
+                      {fmtDataISO(d)}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              <div style={dataIntervaloLinha}>
+                <span style={dataIntervaloRotulo}>até</span>
+                <select
+                  aria-label="Até"
+                  style={dataIntervaloSelect}
+                  value={ate}
+                  onChange={(e) => setAte(e.target.value)}
+                >
+                  <option value="">—</option>
+                  {opcoesAte.map((d) => (
+                    <option key={d} value={d}>
+                      {fmtDataISO(d)}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              <button style={dataIntervaloBtn} onClick={aplicarIntervalo}>
+                Aplicar
+              </button>
+            </div>
+            <div style={dataDivider} />
             <button style={valor === null ? dataItemOn : dataItem} onClick={() => escolher(null)}>
               <span style={dataItemLabel}>Todos</span>
               <span style={dataItemCount}>{temContagem ? `(${datas.total})` : ""}</span>
             </button>
+            {contagemAteOntem > 0 && (
+              <button
+                style={ateOntemAtivo ? dataItemOn : dataItem}
+                onClick={() => escolher({ ate: ontem })}
+              >
+                <span style={dataItemLabel}>Até ontem</span>
+                <span style={dataItemCount}>({contagemAteOntem})</span>
+              </button>
+            )}
             {dados === null && datas.dates.length === 0 && (
               <span style={dataAviso}>Carregando datas…</span>
             )}
@@ -2081,8 +2170,8 @@ function DataMenu({
             {datas.dates.map((d) => (
               <button
                 key={d.date}
-                style={valor === d.date ? dataItemOn : dataItem}
-                onClick={() => escolher(d.date)}
+                style={valor?.de === d.date && valor?.ate === d.date ? dataItemOn : dataItem}
+                onClick={() => escolher({ de: d.date, ate: d.date })}
               >
                 <span style={dataItemLabel}>{fmtDataISO(d.date)}</span>
                 <span style={dataItemCount}>({d.count})</span>
@@ -2100,7 +2189,6 @@ function DataMenu({
   );
 }
 
-/** YYYY-MM-DD → dd/mm/aaaa (o seletor mostra a data como o posvenda mostrava). */
 /** ISO completo → `YYYY-MM-DD` no fuso local (o dia que a operadora enxerga). */
 function diaDe(iso: string): string {
   // Mesmo fuso de `diaDeEmissao`: o dia da operação é sempre o de SP, e este
@@ -2109,9 +2197,53 @@ function diaDe(iso: string): string {
   return new Date(iso).toLocaleDateString("en-CA", { timeZone: "America/Sao_Paulo" });
 }
 
+/** YYYY-MM-DD → dd/mm/aaaa (o seletor mostra a data como o posvenda mostrava). */
 function fmtDataISO(iso: string): string {
   const [y, m, d] = iso.split("-");
   return y && m && d ? `${d}/${m}/${y}` : iso;
+}
+
+/** Datas (YYYY-MM-DD, ordenadas) pros selects De/Até: a lista da fila mais a
+ *  `ponta` atual, se ela não estiver lá — ver `opcoesDe` no `DataMenu`. */
+function opcoesComPonta(dates: { date: string }[], ponta: string): string[] {
+  const out = dates.map((d) => d.date);
+  if (ponta && !out.includes(ponta)) out.push(ponta);
+  return out.sort();
+}
+
+/** Ponta "de" do recorte no botão da sidebar quando as duas aparecem juntas:
+ *  dd/mm pra caber ("01/09 → 10/09/2026"), mas com o ano se as pontas
+ *  estiverem em anos diferentes ("31/12/2026 → 02/01/2027"). */
+function fmtDataCurta(iso: string, ate: string): string {
+  const [y, m, d] = iso.split("-");
+  if (!(y && m && d)) return iso;
+  return y === ate.slice(0, 4) ? `${d}/${m}` : `${d}/${m}/${y}`;
+}
+
+/** Dia de HOJE em `YYYY-MM-DD`, fuso de São Paulo — mesmo padrão de `diaDe`,
+ *  mas partindo do instante atual em vez de um ISO do pedido: é o que o
+ *  atalho "Até ontem" precisa pra não errar o dia perto da virada se a
+ *  estação estiver em outro fuso. */
+function hojeSP(): string {
+  return new Date().toLocaleDateString("en-CA", { timeZone: "America/Sao_Paulo" });
+}
+
+/** Dia anterior a um `YYYY-MM-DD`, sem depender do fuso da máquina: monta
+ *  meio-dia UTC pro dia dado (foge de DST) e subtrai 24h. */
+function diaAnterior(diaISO: string): string {
+  const [y, m, d] = diaISO.split("-").map(Number);
+  const dt = new Date(Date.UTC(y, m - 1, d, 12, 0, 0));
+  dt.setUTCDate(dt.getUTCDate() - 1);
+  return dt.toISOString().slice(0, 10);
+}
+
+/** Texto do gatilho "Data ▾" a partir do recorte atual. */
+function labelBotaoData(r: RecorteData): string {
+  if (!r) return "Data";
+  if (r.de && r.ate) return r.de === r.ate ? fmtDataISO(r.de) : `${fmtDataCurta(r.de, r.ate)} → ${fmtDataISO(r.ate)}`;
+  if (r.ate) return `até ${fmtDataISO(r.ate)}`;
+  if (r.de) return `de ${fmtDataISO(r.de)}`;
+  return "Data";
 }
 
 /** Card da sidebar a partir do pedido do lote (o resumo da fila não serve: os
@@ -2739,8 +2871,8 @@ const dataMenu: CSSProperties = {
   top: "calc(100% + 6px)",
   right: 0,
   zIndex: 41,
-  width: 210,
-  maxHeight: 320,
+  width: 232,
+  maxHeight: 380,
   overflowY: "auto",
   display: "flex",
   flexDirection: "column",
@@ -2788,6 +2920,57 @@ const dataAviso: CSSProperties = {
   fontSize: 11,
   color: "var(--text-muted)",
   lineHeight: 1.4,
+};
+
+const dataIntervaloBox: CSSProperties = {
+  display: "flex",
+  flexDirection: "column",
+  gap: 6,
+  padding: "4px 4px 8px",
+};
+
+const dataIntervaloLinha: CSSProperties = {
+  display: "flex",
+  alignItems: "center",
+  gap: 8,
+};
+
+const dataIntervaloRotulo: CSSProperties = {
+  width: 26,
+  flexShrink: 0,
+  fontSize: 11,
+  fontWeight: 700,
+  color: "var(--text-muted)",
+};
+
+const dataIntervaloSelect: CSSProperties = {
+  flex: 1,
+  minWidth: 0,
+  padding: "5px 6px",
+  background: "var(--bg-card)",
+  border: "1px solid var(--border-strong)",
+  borderRadius: 6,
+  color: "var(--text)",
+  fontSize: 12,
+  fontFamily: "var(--font-mono)",
+};
+
+const dataIntervaloBtn: CSSProperties = {
+  padding: "7px 10px",
+  background: "var(--info-bg)",
+  border: "1px solid var(--info-border)",
+  borderRadius: 7,
+  color: "var(--info-text)",
+  fontSize: 12,
+  fontWeight: 800,
+  cursor: "pointer",
+};
+
+/** Separa o bloco De/até+Aplicar do resto do menu (dias/atalhos). */
+const dataDivider: CSSProperties = {
+  height: 1,
+  background: "var(--border)",
+  margin: "2px 4px",
 };
 
 const sidebarTitle: CSSProperties = {
