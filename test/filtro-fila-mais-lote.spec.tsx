@@ -122,7 +122,7 @@ describe("PickingGeralModal — filtros ativos", () => {
   const base = { queue: QUEUE, lote: [] as Order[], operadora: "Sabrina", onClose: () => {} };
 
   it("sem filtro: nenhum banner", () => {
-    render(<PickingGeralModal {...base} data={null} filters={{}} />);
+    render(<PickingGeralModal {...base} filters={{}} />);
     expect(screen.queryByText(/Filtros ativos nesta estação/)).toBeNull();
   });
 
@@ -131,7 +131,6 @@ describe("PickingGeralModal — filtros ativos", () => {
     render(
       <PickingGeralModal
         {...base}
-        data="2026-09-01"
         filters={{ dateFrom: "2026-09-01", dateTo: "2026-09-01", excludeProducts: ["Calça Cargo", "Moletom"] }}
         onLimparFiltros={onLimparFiltros}
       />,
@@ -142,5 +141,11 @@ describe("PickingGeralModal — filtros ativos", () => {
     expect(banner.textContent).toContain("2 produtos excluídos");
     fireEvent.click(screen.getByRole("button", { name: "Limpar filtros" }));
     expect(onLimparFiltros).toHaveBeenCalledTimes(1);
+  });
+
+  it("recorte De/Até (só dateTo): banner mostra 'até 10/09/2026'", () => {
+    render(<PickingGeralModal {...base} filters={{ dateTo: "2026-09-10" }} />);
+    const banner = screen.getByRole("status");
+    expect(banner.textContent).toContain("até 10/09/2026");
   });
 });

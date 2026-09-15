@@ -84,7 +84,6 @@ describe("PickingGeralModal — snapshot da lista impressa", () => {
     render(
       <PickingGeralModal
         queue={QUEUE}
-        data={null}
         filters={{}}
         lote={LOTE}
         operadora="Sabrina"
@@ -116,7 +115,6 @@ describe("PickingGeralModal — snapshot da lista impressa", () => {
     render(
       <PickingGeralModal
         queue={QUEUE}
-        data={null}
         filters={{}}
         lote={LOTE}
         operadora="Sabrina"
