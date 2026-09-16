@@ -1,4 +1,4 @@
-import { useEffect, useState, type CSSProperties } from "react";
+import { useEffect, useRef, useState, type CSSProperties } from "react";
 import { BackButton } from "./BackButton";
 import { AmbientBackground } from "./AmbientBackground";
 import { OperatorChip } from "./OperatorChip";
@@ -39,6 +39,13 @@ export function Separacao({ onBack }: Props) {
   } | null>(null);
   const [counts, setCounts] = useState<QueueCounts | null>(null);
   const [authError, setAuthError] = useState<string | null>(null);
+  /**
+   * API fora do ar / rede / 5xx: sem isto a tela mostrava "0 pedidos" e a
+   * operadora não distinguia fila vazia de nexus inacessível (visto no dev
+   * Linux: CORS barrando o fetch = fila zerada, silenciosa).
+   */
+  const [redeError, setRedeError] = useState<string | null>(null);
+  const recarregarRef = useRef<() => void>(() => {});
   /** Pedidos que já são da operadora (lote de outra sessão/estação). */
   const [emAberto, setEmAberto] = useState<Order[]>([]);
   const [devolvendo, setDevolvendo] = useState(false);
@@ -52,7 +59,8 @@ export function Separacao({ onBack }: Props) {
   // Contagem das filas: o WS do nexus empurra `queue.changed` (tiny-sync,
   // claim, complete, release) e cada evento refaz o fetch; o intervalo de 60s
   // é só rede de segurança pro WS cair. Erro de auth/permissão é a API dizendo
-  // quem pode operar — mostra, não engole. Falha de rede segue silenciosa.
+  // quem pode operar — mostra, não engole. Falha de rede/5xx também aparece
+  // (banner próprio), mas mantém a última contagem boa na tela.
   useEffect(() => {
     let alive = true;
     const load = () => {
@@ -61,9 +69,16 @@ export function Separacao({ onBack }: Props) {
           if (!alive) return;
           setCounts(c);
           setAuthError(null);
+          setRedeError(null);
         })
         .catch((err) => {
-          if (!alive || !(err instanceof ApiError)) return;
+          if (!alive) return;
+          if (!(err instanceof ApiError)) {
+            setRedeError(
+              "Sem resposta da API do Nexus (rede ou servidor fora). As filas abaixo podem estar desatualizadas.",
+            );
+            return;
+          }
           if (err.status === 403) {
             setAuthError(
               "Seu usuário não tem a permissão de Separação (separacao:operate). Peça pra liberar no Nexus (Operadores).",
@@ -72,9 +87,12 @@ export function Separacao({ onBack }: Props) {
             setAuthError(
               "A API não reconheceu sua sessão. Troque de usuário e entre de novo; se persistir, avise o suporte.",
             );
+          } else {
+            setRedeError(`A API do Nexus respondeu HTTP ${err.status} ao carregar as filas.`);
           }
         });
     };
+    recarregarRef.current = load;
     load();
     const unsubscribe = subscribeQueueChanged(load);
     const id = setInterval(load, 60_000);
@@ -243,6 +261,15 @@ export function Separacao({ onBack }: Props) {
 
       {authError && <div style={mesaDownBanner}>{authError}</div>}
 
+      {redeError && (
+        <div style={mesaDownBanner}>
+          {redeError}{" "}
+          <button style={inlineReconnect} onClick={() => recarregarRef.current()}>
+            tentar agora
+          </button>
+        </div>
+      )}
+
       {filaEmAberto && (
         <div style={listaDeOutroDia ? retomarBannerAlerta : retomarBanner}>
           {comLista.length > 0 ? (
@@ -313,7 +340,9 @@ export function Separacao({ onBack }: Props) {
                 style={mode === m ? modeTabOn : modeTab}
               >
                 {m === "puro" ? "Puro" : "Mistos"}
-                <span style={mode === m ? modeTabCountOn : modeTabCount}>{totalFor(m)}</span>
+                <span style={mode === m ? modeTabCountOn : modeTabCount}>
+                  {counts === null ? "—" : totalFor(m)}
+                </span>
               </button>
             ))}
           </div>
@@ -329,7 +358,7 @@ export function Separacao({ onBack }: Props) {
             <QueueTile
               key={q}
               label={q}
-              count={countFor(q, mode)}
+              count={counts === null ? null : countFor(q, mode)}
               selected={effectiveSelected === q}
               onClick={() => setSelected((p) => (p === q ? null : q))}
             />
@@ -394,7 +423,8 @@ function QueueTile({
   wide,
 }: {
   label: string;
-  count: number;
+  /** `null` = contagem ainda não chegou (ou a API não respondeu). */
+  count: number | null;
   selected: boolean;
   onClick: () => void;
   wide?: boolean;
@@ -411,8 +441,8 @@ function QueueTile({
       <span style={{ ...tileLabel, ...(label.length > 4 ? { fontSize: 20 } : null) }}>
         {label}
       </span>
-      <span style={count > 0 ? countBadge : countBadgeZero}>
-        {count} {count === 1 ? "pedido" : "pedidos"}
+      <span style={count !== null && count > 0 ? countBadge : countBadgeZero}>
+        {count === null ? "— pedidos" : `${count} ${count === 1 ? "pedido" : "pedidos"}`}
       </span>
     </button>
   );
