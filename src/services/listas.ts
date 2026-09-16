@@ -28,6 +28,15 @@ export type ListaResumo = {
   pedidosRetomaveis?: number;
   recuperacoes: number;
   recuperadaEm: string | null;
+  /**
+   * Lista devolvida à fila de propósito (`POST /separacao/lote/devolver` com
+   * `incluirLista`, PIN do supervisor). Ausente em nexus anterior. Uma lista
+   * devolvida NÃO é "escapada": o banner 🚨 do runner não pode oferecer
+   * "Recuperar agora" pra ela — em 16/09 uma operadora devolveu a lista pra
+   * reimprimir com filtro, o banner ofereceu a devolvida e ela ficou com 2
+   * listas (173 pedidos). Recuperar pelo modal, de propósito, continua valendo.
+   */
+  devolvidaEm?: string | null;
 };
 
 /** Listas da PRÓPRIA operadora (14 dias) — não aceita ver a de outra estação

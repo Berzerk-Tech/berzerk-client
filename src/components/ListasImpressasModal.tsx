@@ -199,6 +199,9 @@ export function ListasImpressasModal({
                         <span style={l.escopo === "lote" ? escopoChipLote : escopoChipSecao}>
                           {l.escopo === "lote" ? "Lote inteiro" : "Seção"}
                         </span>
+                        {l.devolvidaEm && (
+                          <span style={devolvidaChip}>devolvida em {fmtDataHora(l.devolvidaEm)}</span>
+                        )}
                         {l.recuperadaEm && (
                           <span style={recuperadaChip}>
                             recuperada {l.recuperacoes > 1 ? `${l.recuperacoes}× ` : ""}
@@ -404,6 +407,15 @@ const escopoChipSecao: CSSProperties = {
   background: "var(--bg-input)",
   color: "var(--text-secondary)",
   border: "1px solid var(--border-strong)",
+};
+
+const devolvidaChip: CSSProperties = {
+  fontSize: 11,
+  padding: "2px 8px",
+  borderRadius: 999,
+  background: "var(--warning-bg)",
+  color: "var(--warning-text)",
+  fontWeight: 600,
 };
 
 const recuperadaChip: CSSProperties = {
