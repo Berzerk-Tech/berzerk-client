@@ -70,7 +70,12 @@ ganha, ao aplicar exclusão com pedidos ocultos de lista impressa, o botão
 
 ### Decisão
 
-_(preencher: Opção 1 ou 2)_
+**Opção 1** (Leonardo, 16/09/2026): "já que o pedido não tem peça, não vai
+sair mesmo; idealmente ninguém pegaria até ter as peças novamente". Ou seja:
+exclusão de produto solta o pedido da lista impressa, e o pedido volta pra
+fila normal — não é preciso escondê-lo das outras mesas (elas tendem a excluir
+o mesmo produto em ruptura). Se um dia quiser segurar esses pedidos até a peça
+voltar, o gancho é `separacao_rupturas`, fora deste escopo.
 
 ## Incidente que motivou (16/09/2026, mistos G, Sabrina Araújo, 173 pedidos)
 
