@@ -1154,7 +1154,11 @@ export function SeparacaoRunner({
       // Dia em America/Sao_Paulo (`diaDe`), não o fuso da máquina — estação
       // Windows em UTC às 21h30 já "virou o dia" e descartava a lista de hoje.
       const hoje = diaDe(new Date().toISOString());
-      setListasEscapadas(listas.filter((l) => escapados(l) > 0 && diaDe(l.criadoEm) === hoje));
+      // Lista DEVOLVIDA (PIN) não escapou: ela abriu mão. Sem isto o banner
+      // oferecia a lista que ela acabou de devolver (16/09: 173 pedidos).
+      setListasEscapadas(
+        listas.filter((l) => !l.devolvidaEm && escapados(l) > 0 && diaDe(l.criadoEm) === hoje),
+      );
     } catch {
       /* rede: tenta no próximo ciclo */
     }
