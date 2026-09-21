@@ -43,11 +43,15 @@ type PrintJobItemDto = {
 /** DTO cru do nexus. A UI consome o `RfidPrintJob` traduzido logo abaixo. */
 type PrintJobDto = {
   id: string;
-  loteId: string;
+  /** `null` em job AVULSO (produtoId != null). */
+  loteId: string | null;
   loteCodigo: string;
   estampa: string | null;
   cor: string | null;
   itens: PrintJobItemDto[];
+  /** `null` em job por LOTE. Job avulso tem `produtoId != null`. */
+  produtoId: string | null;
+  produtoNome: string | null;
   totalEtiquetas: number;
   impressas: number | null;
   ehTeste: boolean;
@@ -68,11 +72,17 @@ type PrintJobDto = {
  */
 export type RfidPrintJob = {
   id: string;
-  batch_id: string;
+  /** `null` em job AVULSO (product_id != null). */
+  batch_id: string | null;
   batch_code: string;
   items: PrintJobItem[];
   shirt_color: string | null;
   design_name: string | null;
+  /** `null` em job por LOTE. Job avulso (sem lote) tem `product_id != null` —
+   *  a UI deve preferir `product_name` a `batch_code`/`design_name` nesse caso
+   *  (os dois últimos só existem pro client antigo, ver NEXUS_ETIQUETAGEM_AVULSA.md). */
+  product_id: string | null;
+  product_name: string | null;
   total_etiquetas: number;
   /** Etiquetas REALMENTE queimadas (EPCs da iTAG). null até concluir. */
   printed_count: number | null;
@@ -139,6 +149,8 @@ function toJob(dto: PrintJobDto): RfidPrintJob {
     })),
     shirt_color: dto.cor,
     design_name: dto.estampa,
+    product_id: dto.produtoId,
+    product_name: dto.produtoNome,
     total_etiquetas: dto.totalEtiquetas,
     printed_count: dto.impressas,
     is_test: dto.ehTeste,
@@ -184,23 +196,34 @@ export async function fetchActivePrintJobs(): Promise<RfidPrintJob[]> {
   return dto.jobs.map(toJob);
 }
 
+type CreatePrintJobCommon = {
+  items: PrintJobItem[];
+  stationId: string;
+  isManual?: boolean;
+};
+
+/**
+ * União discriminada por `batchId`/`produtoId` — EXATAMENTE um dos dois, como
+ * a API exige. `isTest` só existe no branch por lote: a API recusa (400)
+ * `ehTeste: true` num job avulso, e não há "Descartar teste" por produto (ver
+ * NEXUS_ETIQUETAGEM_AVULSA.md), então nem oferecemos o campo nesse branch.
+ */
+export type CreatePrintJobParams =
+  | (CreatePrintJobCommon & { batchId: string; isTest?: boolean })
+  | (CreatePrintJobCommon & { produtoId: string });
+
 /**
  * Cria o job já em `imprimindo`, logo antes de chamar a iTAG.
  *
  * `totalEtiquetas` NÃO vai no corpo: o servidor soma as quantidades dos itens.
- * Estampa e cor também não — são retrato do lote, lidos lá.
+ * Estampa e cor também não — são retrato do lote/produto, lidos lá.
  */
-export async function createPrintJob(params: {
-  batchId: string;
-  items: PrintJobItem[];
-  stationId: string;
-  isTest?: boolean;
-  isManual?: boolean;
-}): Promise<string> {
+export async function createPrintJob(params: CreatePrintJobParams): Promise<string> {
+  const alvo = "batchId" in params ? { loteId: params.batchId } : { produtoId: params.produtoId };
   const dto = await apiRequest<PrintJobDto>("/etiquetagem/print-jobs", {
     method: "POST",
     body: {
-      loteId: params.batchId,
+      ...alvo,
       itens: params.items.map((i) => ({
         tamanho: i.size,
         quantidade: i.quantity,
@@ -208,7 +231,7 @@ export async function createPrintJob(params: {
         sku: i.sku,
         descricao: i.description,
       })),
-      ehTeste: params.isTest ?? false,
+      ...("batchId" in params ? { ehTeste: params.isTest ?? false } : {}),
       ehManual: params.isManual ?? false,
       estacaoId: params.stationId,
     },

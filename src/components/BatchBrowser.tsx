@@ -36,6 +36,7 @@ import {
 import { logAction } from "../services/actionLog";
 import { BatchCard, type CardState } from "./BatchCard";
 import { PrintConfirmModal, type PrintOverride } from "./PrintConfirmModal";
+import { PrintAvulsoModal, type AvulsoPrintResult } from "./PrintAvulsoModal";
 import { BackButton } from "./BackButton";
 import { useDialogo } from "../lib/useDialogo";
 import { AmbientBackground } from "./AmbientBackground";
@@ -157,6 +158,23 @@ export function BatchBrowser({
   const [pendingConfirm, setPendingConfirm] = useState<ResolvedBatch | null>(
     null,
   );
+  // Etiquetagem avulsa (produto sem lote) — ver NEXUS_ETIQUETAGEM_AVULSA.md.
+  const [avulsoOpen, setAvulsoOpen] = useState(false);
+  // Job avulso em andamento (cronômetro + trava do botão do cabeçalho). O
+  // nexus NÃO deduplica job avulso (não há `batchId` pra amarrar um lock
+  // como no fluxo por lote) — sem isto a operadora podia reabrir o modal e
+  // reimprimir a mesma quantidade em dobro enquanto o job anterior ainda
+  // estava em voo.
+  const [avulsoPrinting, setAvulsoPrinting] = useState<{
+    jobId?: string;
+    produtoNome: string;
+    total: number;
+    startedAt: number;
+  } | null>(null);
+  // Trava de reentrância: `avulsoPrinting` (state) só reflete no próximo
+  // render, tarde demais pra barrar um segundo clique no mesmo tick — mesmo
+  // raciocínio do `enviandoRef` do PrintConfirmModal.
+  const avulsoBusyRef = useRef(false);
   const [query, setQuery] = useState("");
   // Total real de pendentes no servidor — pode ser maior que o que a fila
   // mostra (MAX_VISIBLE). Alimenta o aviso "mostrando N de TOTAL".
@@ -337,9 +355,11 @@ export function BatchBrowser({
     };
   }, [load]);
 
-  // Tick por segundo quando há jobs imprimindo (local OU global)
+  // Tick por segundo quando há jobs imprimindo (local OU global OU avulso)
   const hasPrintingJobs =
-    printing.size > 0 || activeJobs.some((j) => j.status === "imprimindo");
+    printing.size > 0 ||
+    activeJobs.some((j) => j.status === "imprimindo") ||
+    avulsoPrinting != null;
   useEffect(() => {
     if (!hasPrintingJobs) return;
     const id = setInterval(() => setNow(Date.now()), 1000);
@@ -542,6 +562,106 @@ export function BatchBrowser({
       }
     },
     [pendingConfirm, stationId, operatorId, operatorEmail, load],
+  );
+
+  // Impressão AVULSA: mesmo pipeline de cima (createPrintJob → iTAG →
+  // saveEpcInventory → concluir/falhar), só que com `produtoId` em vez de
+  // `batchId` e SEM o carimbo de `markBatchRfidPrinted` — não há lote pra
+  // marcar. Ver NEXUS_ETIQUETAGEM_AVULSA.md.
+  //
+  // SEM lote, o nexus não tem `batchId` pra deduplicar o job — é o
+  // `avulsoBusyRef`/`avulsoPrinting` abaixo que impede a operadora de reabrir
+  // o modal e mandar a MESMA quantidade duas vezes enquanto o job anterior
+  // ainda está em voo (review 22/09).
+  const handleAvulsoConfirm = useCallback(
+    async ({ produtoId, produtoNome, items }: AvulsoPrintResult) => {
+      if (avulsoBusyRef.current) return;
+      avulsoBusyRef.current = true;
+      setAvulsoOpen(false);
+      const totalRequested = items.reduce((sum, i) => sum + i.quantity, 0);
+      setAvulsoPrinting({ produtoNome, total: totalRequested, startedAt: Date.now() });
+
+      let jobId: string;
+      try {
+        jobId = await printJobsService.createPrintJob({
+          produtoId,
+          items,
+          stationId,
+          isManual: true,
+        });
+      } catch (e) {
+        avulsoBusyRef.current = false;
+        setAvulsoPrinting(null);
+        void avisar(`Falha ao criar job avulso de "${produtoNome}": ${formatError(e)}`);
+        return;
+      }
+      setAvulsoPrinting((prev) => (prev ? { ...prev, jobId } : prev));
+
+      try {
+        const result = await itagPrintJob({
+          jobId,
+          batchCode: "AVULSO",
+          items,
+          shirtColor: null,
+          designName: produtoNome,
+          operatorId,
+          audit: { operatorName: operatorEmail },
+        });
+
+        if (result.success) {
+          await printJobsService.markDone(jobId, result.count);
+          const partial = result.count > 0 && result.count < totalRequested;
+          if (partial) {
+            void avisar(
+              `Impressão parcial de "${produtoNome}": ${result.count} de ${totalRequested} etiquetas.`,
+            );
+          } else if (result.count > 0) {
+            void avisar(
+              `${result.count} etiqueta${result.count === 1 ? "" : "s"} de "${produtoNome}" impressas.`,
+            );
+          }
+          logAction({
+            action: partial ? "impressao_parcial" : "impressao_concluida",
+            jobId,
+            details: {
+              produtoId,
+              produtoNome,
+              printed: result.count,
+              requested: totalRequested,
+              avulso: true,
+            },
+          });
+        } else {
+          const detail = result.stage ? ` (${result.stage})` : "";
+          const msg = result.error + detail;
+          await printJobsService.markFailed(jobId, msg);
+          void avisar(`Impressão avulsa de "${produtoNome}" falhou: ${msg}`);
+          logAction({
+            action: "impressao_falhou",
+            jobId,
+            details: { produtoId, produtoNome, error: msg, avulso: true },
+          });
+        }
+      } catch (e) {
+        const msg = formatError(e);
+        try {
+          await printJobsService.markFailed(jobId, msg);
+        } catch {
+          /* swallow */
+        }
+        void avisar(`Impressão avulsa de "${produtoNome}" falhou: ${msg}`);
+        logAction({
+          action: "impressao_falhou",
+          jobId,
+          details: { produtoId, produtoNome, error: msg, avulso: true },
+        });
+      } finally {
+        avulsoBusyRef.current = false;
+        setAvulsoPrinting(null);
+        load(false);
+      }
+    },
+    [stationId, operatorId, operatorEmail, load],
   );
 
   // Reimpressão: limpa a estampa e o lote volta pra fila. Pro caso de job
@@ -787,7 +907,10 @@ export function BatchBrowser({
         await invoke("itag_iprint_movimentar", {
           config: toRustConfig(config),
           epcs: pendingEpcs,
-          notaFiscal: job.batch_code,
+          // `job.batch_code` de job avulso é "AVULSO · <nome>" (truncado a
+          // 160 chars) — isso vai como segmento de URL pro iTAG. `AVULSO`
+          // puro (o mesmo texto que a UI já mostra) é o que faz sentido aqui.
+          notaFiscal: jobDisplayCode(job),
           situacaoDestino: config.situacaoDestino,
           empresaOrigem: config.empresaOrigem,
           empresaDestino: config.empresaDestino,
@@ -934,6 +1057,18 @@ export function BatchBrowser({
           </div>
         </div>
         <div style={subHeaderRight}>
+          <button
+            onClick={() => setAvulsoOpen(true)}
+            disabled={avulsoPrinting != null}
+            style={avulsoPrinting != null ? avulsoBtnBusy : avulsoBtn}
+            title={
+              avulsoPrinting != null
+                ? "Aguarde a impressão avulsa em andamento terminar"
+                : "Imprimir etiqueta de um produto do catálogo, sem lote de produção"
+            }
+          >
+            {avulsoPrinting != null ? "Imprimindo avulso…" : "Imprimir avulso"}
+          </button>
           <StatusChip
             label="Realtime"
             tone={
@@ -979,6 +1114,15 @@ export function BatchBrowser({
       </header>
 
       <main style={main}>
+        {avulsoPrinting && (
+          <div style={avulsoPrintingBanner}>
+            Imprimindo <strong>{avulsoPrinting.total}</strong> etiqueta
+            {avulsoPrinting.total === 1 ? "" : "s"} de "{avulsoPrinting.produtoNome}"…{" "}
+            <span style={{ fontFamily: "var(--font-mono)" }}>
+              {formatElapsedSec(Math.floor((now - avulsoPrinting.startedAt) / 1000))}
+            </span>
+          </div>
+        )}
         <div style={statsRow}>
           <Stat
             label="prontos"
@@ -1247,6 +1391,13 @@ export function BatchBrowser({
           onConfirm={confirmAndPrint}
         />
       )}
+      {avulsoOpen && (
+        <PrintAvulsoModal
+          onCancel={() => setAvulsoOpen(false)}
+          onConfirm={handleAvulsoConfirm}
+          confirmar={confirmar}
+        />
+      )}
       {dialogo}
     </div>
   );
@@ -1269,6 +1420,16 @@ function formatElapsedSec(sec: number): string {
   const m = Math.floor(sec / 60);
   const s = sec % 60;
   return `${m}m ${s.toString().padStart(2, "0")}s`;
+}
+
+// Job avulso (product_id != null) não tem lote: `batch_code`/`design_name`
+// são só o retrato pro client antigo (loteCodigo = "AVULSO · <nome>", que
+// duplicaria o nome na tela). A 0.9.44 prefere os campos estruturados.
+function jobDisplayCode(job: RfidPrintJob): string {
+  return job.product_id != null ? "AVULSO" : job.batch_code;
+}
+function jobDisplayName(job: RfidPrintJob): string | null {
+  return job.product_id != null ? job.product_name : job.design_name;
 }
 
 const JOB_STATUS_LABEL: Record<RfidPrintJobStatus, string> = {
@@ -1332,9 +1493,9 @@ function PrintJobRow({
       </span>
       <div style={queueInfo}>
         <div style={queueTopLine}>
-          <span style={queueCode}>{job.batch_code}</span>
+          <span style={queueCode}>{jobDisplayCode(job)}</span>
           <span style={queueDesign}>
-            {job.design_name ?? "—"}
+            {jobDisplayName(job) ?? "—"}
             {job.shirt_color && (
               <>
                 <span style={queueDot}>·</span>
@@ -1398,9 +1559,9 @@ function AwaitingMovRow({
       </span>
       <div style={queueInfo}>
         <div style={queueTopLine}>
-          <span style={queueCode}>{entry.job.batch_code}</span>
+          <span style={queueCode}>{jobDisplayCode(entry.job)}</span>
           <span style={queueDesign}>
-            {entry.job.design_name ?? "—"}
+            {jobDisplayName(entry.job) ?? "—"}
             {entry.job.is_test && <span style={queueDot}> · 🧪 teste</span>}
             {entry.job.is_manual && <span style={queueDot}> · ✋ manual</span>}
             {entry.job.shirt_color && (
@@ -1732,6 +1893,36 @@ const refreshBtnBusy: CSSProperties = {
   ...refreshBtn,
   opacity: 0.6,
   cursor: "wait",
+};
+
+const avulsoBtn: CSSProperties = {
+  background: "var(--accent)",
+  color: "var(--accent-text)",
+  border: 0,
+  padding: "6px 14px",
+  borderRadius: 6,
+  cursor: "pointer",
+  fontSize: 12,
+  fontWeight: 600,
+};
+
+const avulsoBtnBusy: CSSProperties = {
+  ...avulsoBtn,
+  opacity: 0.6,
+  cursor: "wait",
+};
+
+const avulsoPrintingBanner: CSSProperties = {
+  display: "flex",
+  alignItems: "center",
+  gap: 8,
+  background: "var(--info-bg)",
+  color: "var(--info-text)",
+  border: "1px solid var(--info-border)",
+  padding: "10px 16px",
+  borderRadius: 8,
+  fontSize: 13,
+  marginBottom: 20,
 };
 
 const main: CSSProperties = {
