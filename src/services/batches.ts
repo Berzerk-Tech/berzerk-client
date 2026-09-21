@@ -15,9 +15,10 @@
 // tela, e um rename global aqui misturaria dois riscos numa mudança só.
 
 import { apiRequest } from "../lib/api";
-import { compareSizes, type GradeEntry } from "../lib/grade";
+import type { GradeEntry } from "../lib/grade";
 import type { PrintJobItem } from "../lib/itag/iprint";
 import { formatLabelDescription } from "../lib/labelFormatter";
+import { buildItemsFromEans, type SizeEntry } from "../lib/printItems";
 
 /** De onde veio o EAN. Hoje só há uma fonte: o catálogo canônico do nexus. */
 export type EanSource = "catalogo";
@@ -142,7 +143,9 @@ type LoteDto = {
 
 type LotesDto = { lotes: LoteDto[]; total: number; limite: number };
 
-type EansDto = {
+/** Exportado: `GET /etiquetagem/produtos/:id/eans` (etiquetagem avulsa) devolve
+ *  exatamente este shape — ver `src/services/produtosAvulso.ts`. */
+export type EansDto = {
   produtoId: string | null;
   produtoNome: string | null;
   corNome: string | null;
@@ -365,18 +368,16 @@ export function buildPrintItems(resolved: ResolvedBatch): PrintJobItem[] {
     product_name: resolved.batch.product_name,
     design_name: resolved.batch.design_name ?? "",
   };
-  return resolved.batch.sizes
-    .filter((g) => resolved.eans[g.size])
-    // Ordem canônica de tamanho (PP→P→M→G→GG→XG→XXG). A iTAG imprime na ordem
-    // do payload, então ordenamos aqui pra etiqueta sair em sequência — e é
-    // esse mesmo alinhamento que o servidor usa pra casar EPC↔tamanho.
-    .slice()
-    .sort((a, b) => compareSizes(a.size, b.size))
-    .map((g) => ({
-      size: g.size,
-      quantity: g.quantity,
-      ean13: resolved.eans[g.size],
-      sku: resolved.skus[g.size] ?? resolved.eans[g.size],
-      description: formatLabelDescription(lote, g.size),
-    }));
+  const entries: SizeEntry[] = resolved.batch.sizes.map((g) => ({
+    size: g.size,
+    quantity: g.quantity,
+    ean13: resolved.eans[g.size] ?? null,
+    sku: resolved.skus[g.size] ?? resolved.eans[g.size] ?? null,
+  }));
+  // Ordem canônica de tamanho (PP→P→M→G→GG→XG→XXG) e o filtro de EAN ficam no
+  // núcleo compartilhado com a impressão avulsa — ver src/lib/printItems.ts.
+  // A iTAG imprime na ordem do payload, então ordenar aqui é o que faz a
+  // etiqueta sair em sequência, e é esse mesmo alinhamento que o servidor usa
+  // pra casar EPC↔tamanho.
+  return buildItemsFromEans(entries, (size) => formatLabelDescription(lote, size));
 }

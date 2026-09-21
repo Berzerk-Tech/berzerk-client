@@ -25,7 +25,9 @@ export type PrintJobItem = {
 export type PrintJobInput = {
   /** ID do job criado em `rfid_print_jobs` (createPrintJob retorna isso). */
   jobId: string;
-  batchId: string;
+  /** Auditoria — ausente em job AVULSO (sem lote). `batchCode` continua
+   *  obrigatório: manda "AVULSO" nesse caso (ver NEXUS_ETIQUETAGEM_AVULSA.md). */
+  batchId?: string;
   batchCode: string;
   items: PrintJobItem[];
   shirtColor?: string | null;
