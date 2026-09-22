@@ -68,7 +68,29 @@ export type Order = {
    *  pedido. `null`/ausente = pedido preso sem lista associada (nexus antigo,
    *  ou `marcarListaImpressa` que não devolveu `listaId`). */
   listaId?: string | null;
+  /**
+   * Avisos best-effort do `complete` (NEXUS_EXPEDICAO.md §8) — NÃO bloqueiam a
+   * conclusão, é aviso antecipado pra tela de conferência. Aditivo/opcional:
+   * nexus antigo não manda o campo. Ausente/vazio = nenhum aviso pendente.
+   */
+  avisos?: Aviso[];
 };
+
+/** Ver `Order.avisos` — hoje só existe o de AWB já coletado (§8); a união
+ *  deixa aberto pro nexus mandar outros tipos sem quebrar o client. */
+export type AwbJaColetadoAviso = {
+  tipo: "awb_ja_coletado";
+  awb: string;
+  primeiroScanEm: string;
+  ultimoEvento: string | null;
+};
+
+export type Aviso = AwbJaColetadoAviso;
+
+/** Primeiro aviso de AWB já coletado do pedido, se houver (pura — sem I/O). */
+export function avisoAwbColetado(order: Order | null | undefined): AwbJaColetadoAviso | null {
+  return order?.avisos?.find((a): a is AwbJaColetadoAviso => a.tipo === "awb_ja_coletado") ?? null;
+}
 
 export type ClaimResponse = { order: Order | null };
 

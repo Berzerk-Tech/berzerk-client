@@ -352,3 +352,104 @@ type NfData = {
 
 Enquanto estes endpoints não sobem, o app degrada com aviso em 404 e tem um modo
 mock local pra ensaiar a UX.
+
+---
+
+## 8. AWB já coletado (22/09, revisado) — pro time do client (Berzerk Client)
+
+Contexto: em 22/09, 162 pedidos que já tinham sido separados (`awaiting_pickup`,
+AWB emitido) nunca passaram pela expedição de verdade. Foram devolvidos pra fila
+(`ready`, tags RFID limpas) **com o `tracking_number` MANTIDO** — vão ser
+separados de novo e a expedição vai gerar/imprimir a **MESMA etiqueta (mesmo
+AWB)**. Se o pacote original também tiver saído, a J&T recebe dois pacotes com o
+mesmo código de rastreio. O nexus detecta isso e pode recusar despachar; o que
+muda pro client:
+
+### `POST /expedicao/orders/:id/ship` pode devolver 409 `awb_ja_coletado`
+
+```json
+{
+  "error": "awb_ja_coletado",
+  "message": "Este AWB (888030815319463) já foi coletado pela J&T em 20/09/2026 09:00. Pacote duplicado — chame o supervisor pra liberar com PIN.",
+  "awb": "888030815319463",
+  "primeiroScanEm": "2026-09-20T12:00:00.000Z",
+  "ultimoEvento": "Coletado"
+}
+```
+
+`message` vem formatada em pt-BR/horário de Brasília (pronta pra mostrar); os
+outros campos continuam ISO. **Só acontece quando o scan é ANTERIOR à
+separação atual** — pedido `awaiting_pickup` cuja J&T coletou DEPOIS de
+separado (caso comum: "coletou fisicamente, ninguém apertou enviar ainda")
+nunca cai neste 409, mesmo com AWB já escaneado.
+
+**⚠️ AÇÃO OBRIGATÓRIA no client (0.9.45): incluir `'awb_ja_coletado'` em
+`CODIGOS_DEFINITIVOS`** (`Expedicao.tsx`, ~linhas 108-144, ou onde esse array
+estiver hoje) — sem isso, o client trata um 409 desconhecido como falha
+transitória e fica **retentando o mesmo `ship` a cada 15s indefinidamente**,
+sem mostrar nada pra operadora. Com o código na lista de definitivos, o app
+para de retentar sozinho e mostra a tela abaixo.
+
+A tela de embalagem deve mostrar algo como:
+
+> **Esse AWB já foi coletado pela J&T em dd/mm hh:mm. Pacote duplicado. Chame o
+> supervisor.**
+
+com um botão de **liberação por PIN de supervisor** (mesmo componente/fluxo já
+usado pra liberar tags incompletas/peças insuficientes na Separação e na
+Expedição — picker de supervisor + campo de PIN). Reenviando o `ship` com o
+corpo:
+
+```json
+{
+  "rfidTags": ["E28..."],
+  "liberacaoAwbColetado": {
+    "supervisorId": "uuid-do-supervisor",
+    "pin": "1234",
+    "motivo": "pacote original comprovadamente extraviado, confirmado com o cliente"
+  }
+}
+```
+
+PIN errado/inválido continua vindo como 422 (`nao_supervisor` /
+`pin_nao_definido` / `pin_invalido`), nunca como esse 409 — a UI de erro de PIN
+já existente serve sem mudança.
+
+### `POST /separacao/:id/complete` pode avisar ANTES da expedição
+
+Como o `jt-coleta` (ou a conferência ao vivo do próprio `ship`) pode só
+descobrir o scan depois que a peça já foi separada, o `complete` da separação
+ganhou um campo **aditivo** (não quebra clients antigos, que ignoram campos
+desconhecidos):
+
+```json
+{
+  "...": "resto do Order como sempre",
+  "avisos": [
+    {
+      "tipo": "awb_ja_coletado",
+      "awb": "888030815319463",
+      "primeiroScanEm": "2026-09-20T12:00:00.000Z",
+      "ultimoEvento": "Coletado"
+    }
+  ]
+}
+```
+
+Isto **não bloqueia** a conclusão da separação — o pedido vira `awaiting_pickup`
+normalmente, e sai INDEPENDENTE de qualquer trava do lado do nexus (é sempre
+best-effort informativo). É um aviso antecipado: mostre o mesmo banner de "AWB
+já coletado, chame o supervisor" já na tela de conferência da separação, antes
+mesmo de a peça chegar na mesa de embalagem — evita imprimir etiqueta e levar
+o pacote até a coleta pra só então descobrir o problema. `avisos` vem
+ausente/vazio no caso comum (nenhum aviso pendente).
+
+### Rollout — a trava só liga DEPOIS deste release
+
+O 409 acima é opt-in do lado do nexus: uma trava (`expedicao_guard_awb_coletado_ativo`
+em `system_settings`) nasce **DESLIGADA**. Enquanto desligada, o nexus só
+REGISTRA o achado (auditoria, sem efeito nenhum no `ship`) — o client 0.9.44
+em produção nunca vê esse 409, e portanto **este release (0.9.45, com os três
+itens acima) precisa estar em produção ANTES de alguém ligar a trava do lado
+do nexus**. Avise quando o 0.9.45 estiver rodando na frota pra combinarmos o
+momento de ligar.

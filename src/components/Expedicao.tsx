@@ -20,8 +20,10 @@ import {
   rotuloDocumento,
 } from "../lib/reimpressao";
 import { ExpedicaoHistoryModal } from "./ExpedicaoHistoryModal";
+import { SupervisorModal } from "./SupervisorModal";
 import {
   EXP_ERR,
+  awbJaColetadoDetails,
   epcMatch,
   expedicaoErrorCode,
   getDocumentos,
@@ -29,6 +31,7 @@ import {
   markLabelPrinted,
   shipErrorMessage,
   shipOrder,
+  type AwbJaColetadoDetails,
   type Documentos,
   type EpcMatch,
   type ExpedicaoOrder,
@@ -40,7 +43,24 @@ import {
   type ExpedicaoMode,
 } from "../services/expedicaoMode";
 import { conferir, type Conferencia } from "../lib/conferenciaExpedicao";
-import { leituraDe, type EpcLookupItem, type LeituraResolvida, type OrderItem } from "../services/orders";
+import { fmtDataHora } from "../lib/datas";
+import {
+  CODIGOS_DEFINITIVOS,
+  classificarCodigoShip,
+  loadShipRetry,
+  proximoJobDaFila,
+  rotuloPedido,
+  saveShipRetry,
+  type ShipRetryJob,
+  type ShipTentativa,
+} from "../lib/shipRetry";
+import {
+  leituraDe,
+  type EpcLookupItem,
+  type LeituraResolvida,
+  type LiberacaoSupervisor,
+  type OrderItem,
+} from "../services/orders";
 
 type Props = { onBack: () => void };
 
@@ -83,46 +103,13 @@ const RESOLVE_DEBOUNCE_MS = 250;
 // novo sozinho — o operador não tem mouse/teclado, "Nova leitura" é exceção.
 const RESOLVE_RETRY_MS = 4000;
 const BUFFER_WARN = 12;
-/**
- * Fila de `ship` pendente (falha de rede ao fechar o pacote) — PERSISTIDA por
- * estação. Sem isso, fechar o app com reenvio pendente deixava o pedido
- * `awaiting_pickup` no nexus e o Tiny sem `enviado`, com a peça já ensacada.
- */
-const SHIP_RETRY_KEY = "berzerk_expedicao_ship_retry_v1";
-type ShipRetryJob = {
-  orderId: string;
-  numero: string | null;
-  lidas: string[];
-  override?: string;
-  /** Conta Tiny — pra reapertar `markLabelPrinted` quando o ship devolve JT_LABEL_REQUIRED. */
-  conta?: "FM" | "JT";
-  /** O servidor apontou peça faltando e a trava de supervisor está ligada: só sai com motivo humano. */
-  precisaMotivo?: boolean;
-  /** Resolução EPC→peça das tags lidas (nuvem iTAG) — o nexus casa as peças por ela. */
-  leituras?: LeituraResolvida[];
-  /** Job preso no modal já foi reapertado UMA vez com leituras (e ainda assim caiu na conferência). */
-  reapertadoComLeituras?: boolean;
-};
-
-/** Códigos em que o servidor discorda da conferência da mesa — precisam de motivo HUMANO (trava de supervisor). */
-const CODIGOS_CONFERENCIA = new Set<string>(["tags_incompletas", "pecas_insuficientes", "liberacao_necessaria"]);
-/** Códigos em que repetir não resolve: alguém mexeu no pedido no Nexus. */
-const CODIGOS_DEFINITIVOS = new Set<string>([EXP_ERR.INVALID_STATUS, EXP_ERR.ORDER_NOT_FOUND]);
-
-type ShipTentativa =
-  | { ok: true }
-  | { ok: false; tipo: "rede" | "aguardar" | "conferencia" | "definitivo"; code: string | null };
 
 /**
  * Depois que o pacote saiu da mesa o ship TEM que passar — um pedido embalado
  * e não expedido vira pedido "não enviado" no Tiny e cliente sem aviso.
- * Política por código:
- * - sem código (rede)            → fila persistente, reenvia sozinho;
- * - JT_LABEL_REQUIRED            → registra a impressão de novo e repete (é só carimbo);
- * - TRACKING_REQUIRED / outros   → fila, tenta de novo (o rastreio chega);
- * - tags_incompletas & cia.      → NUNCA override automático: a trava de supervisor
- *                                  existe pra um humano decidir — abre o modal de motivo;
- * - invalid_status / not_found   → desiste e avisa (alguém mexeu no Nexus).
+ * A classificação por código (conferência/definitivo/awb_coletado/aguardar) é
+ * pura — ver `classificarCodigoShip` (`lib/shipRetry.ts`). Aqui só o que
+ * precisa de I/O: sem código (rede) e o retry especial de `JT_LABEL_REQUIRED`.
  */
 async function expedirEmbalado(job: ShipRetryJob, segundaVez = false): Promise<ShipTentativa> {
   try {
@@ -139,33 +126,17 @@ async function expedirEmbalado(job: ShipRetryJob, segundaVez = false): Promise<S
       }
       return expedirEmbalado(job, true);
     }
-    if (CODIGOS_CONFERENCIA.has(code)) return { ok: false, tipo: "conferencia", code };
-    if (CODIGOS_DEFINITIVOS.has(code)) return { ok: false, tipo: "definitivo", code };
-    return { ok: false, tipo: "aguardar", code };
+    return classificarCodigoShip(code, awbJaColetadoDetails(e));
   }
 }
 
-function loadShipRetry(): ShipRetryJob[] {
-  try {
-    const raw = localStorage.getItem(SHIP_RETRY_KEY);
-    const parsed: unknown = raw ? JSON.parse(raw) : [];
-    if (!Array.isArray(parsed)) return [];
-    return parsed.filter(
-      (j): j is ShipRetryJob =>
-        !!j && typeof j === "object" && typeof (j as ShipRetryJob).orderId === "string" && Array.isArray((j as ShipRetryJob).lidas),
-    );
-  } catch {
-    return [];
-  }
-}
-
-function saveShipRetry(jobs: ShipRetryJob[]): void {
-  try {
-    if (jobs.length === 0) localStorage.removeItem(SHIP_RETRY_KEY);
-    else localStorage.setItem(SHIP_RETRY_KEY, JSON.stringify(jobs));
-  } catch {
-    /* ignore */
-  }
+/** Texto da barra vermelha de AWB já coletado — prefere o `message` do servidor
+ *  (já vem pronto em pt-BR); monta um fallback com o que tiver (`awb`/`primeiroScanEm`
+ *  podem faltar — quem trava o job é a flag `bloqueadoPorAwb`, não este detalhe). */
+function awbColetadoMsg(j: AwbJaColetadoDetails | undefined): string {
+  if (j?.message) return j.message;
+  const quando = fmtDataHora(j?.primeiroScanEm);
+  return `Esse AWB${j?.awb ? ` (${j.awb})` : ""} já foi coletado pela J&T${quando ? ` em ${quando}` : ""}. Pacote duplicado. Chame o supervisor.`;
 }
 /**
  * Uma peça é considerada "na mesa" enquanto foi lida nos últimos PRESENCE_TTL ms.
@@ -675,7 +646,7 @@ export function Expedicao({ onBack }: Props) {
       registra(false);
       return;
     }
-    const num = `#${order.numero ?? ""}`;
+    const num = rotuloPedido(order.numero);
     switch (r.tipo) {
       case "rede":
         enqueueRetry(job);
@@ -692,13 +663,19 @@ export function Expedicao({ onBack }: Props) {
       case "definitivo":
         showNotice(`Expedição de ${num} recusada: ${shipErrorMessage(r.code ?? "")} Confira no Nexus.`, 15000);
         break;
+      case "awb_coletado":
+        // Nunca reenviar sozinho — fica na fila e mostra a barra vermelha
+        // persistente com "Liberar com PIN" (ver `pendentesAwbColetado`). É a
+        // FLAG que trava (ver `lib/shipRetry.ts`); os detalhes são só pra mensagem.
+        enqueueRetry({ ...job, bloqueadoPorAwb: true, awbColetado: r.awbColetado });
+        break;
     }
     registra(true);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [showNotice]);
 
   // ---- fila de retry do ship ----
-  // Sobrevive a fechar/reabrir o app (localStorage) — ver SHIP_RETRY_KEY.
+  // Sobrevive a fechar/reabrir o app (localStorage) — ver `lib/shipRetry.ts`.
   const retryQueue = useRef<ShipRetryJob[]>(loadShipRetry());
   // Só pra re-renderizar a barra de pendências quando a fila muda (a fila vive no ref).
   const [, setQueueVersion] = useState(0);
@@ -715,16 +692,63 @@ export function Expedicao({ onBack }: Props) {
   const [liberacao, setLiberacao] = useState<ShipRetryJob | null>(null);
   const liberacaoRef = useRef<ShipRetryJob | null>(null);
   liberacaoRef.current = liberacao;
-  const pendentesDeMotivo = retryQueue.current.filter((j) => j.precisaMotivo);
-  const pendentesAguardando = retryQueue.current.filter((j) => !j.precisaMotivo);
+  // Pedido embalado cujo AWB já foi coletado pela J&T (§8): fica preso na fila
+  // até um supervisor liberar com PIN — ver `confirmarLiberacaoAwb`.
+  const [liberacaoAwb, setLiberacaoAwb] = useState<ShipRetryJob | null>(null);
+  const liberacaoAwbRef = useRef<ShipRetryJob | null>(null);
+  liberacaoAwbRef.current = liberacaoAwb;
+  const pendentesAwbColetado = retryQueue.current.filter((j) => j.bloqueadoPorAwb);
+  const pendentesDeMotivo = retryQueue.current.filter((j) => j.precisaMotivo && !j.bloqueadoPorAwb);
+  const pendentesAguardando = retryQueue.current.filter((j) => !j.precisaMotivo && !j.bloqueadoPorAwb);
   // Foco no campo de bipagem — NUNCA com um modal aberto: o efeito do filho
   // (foco no modal) roda antes deste, e o input roubava as teclas 1–6/Enter.
   useEffect(() => {
-    if (overrideOpen || liberacao) return;
+    if (overrideOpen || liberacao || liberacaoAwb) return;
     if (flow.kind === "idle" || flow.kind === "identified" || flow.kind === "packing" || flow.kind === "done") {
       inputRef.current?.focus();
     }
-  }, [flow.kind, overrideOpen, liberacao]);
+  }, [flow.kind, overrideOpen, liberacao, liberacaoAwb]);
+  /**
+   * Reenvia o `ship` com a liberação de supervisor (PIN validado server-side)
+   * depois de um `awb_ja_coletado`. Chama `shipOrder` DIRETO (não passa por
+   * `expedirEmbalado`) pra deixar o 422 de PIN (nao_supervisor/pin_nao_definido/
+   * pin_invalido) subir intacto pro `SupervisorModal` mostrar — mesmo padrão
+   * de `devolverListaConfirm`/`supervisorConfirm` na Separação: `onConfirm`
+   * LANÇA em erro, o modal exibe. Exceção: recusa DEFINITIVA (`invalid_status`/
+   * `order_not_found` — alguém mexeu no pedido no Nexus) não fica presa
+   * esperando um PIN que nunca vai resolver — tira da fila e avisa, como o
+   * resto da fila faz.
+   */
+  const confirmarLiberacaoAwb = useCallback(
+    async (liberacaoSupervisor: LiberacaoSupervisor) => {
+      const job = liberacaoAwb;
+      if (!job) return;
+      if (modoRef.current !== "oficial") {
+        throw new Error("Modo teste: nada é expedido. Volte pro modo oficial pra liberar este pedido.");
+      }
+      const num = rotuloPedido(job.numero);
+      try {
+        await shipOrder(job.orderId, job.lidas, job.override ? { motivo: job.override } : undefined, job.leituras, {
+          supervisorId: liberacaoSupervisor.supervisorId,
+          pin: liberacaoSupervisor.pin,
+          motivo: liberacaoSupervisor.motivo,
+        });
+      } catch (e) {
+        const code = expedicaoErrorCode(e);
+        if (code && CODIGOS_DEFINITIVOS.has(code)) {
+          setQueue(retryQueue.current.filter((j) => j.orderId !== job.orderId));
+          setLiberacaoAwb(null);
+          showNotice(`Expedição de ${num} recusada: ${shipErrorMessage(code)} Confira no Nexus.`, 15000);
+          return;
+        }
+        throw e; // PIN (422) e outros: o modal mostra e a pessoa tenta de novo.
+      }
+      setQueue(retryQueue.current.filter((j) => j.orderId !== job.orderId));
+      setLiberacaoAwb(null);
+      showNotice(`Expedição de ${num} liberada com PIN.`);
+    },
+    [liberacaoAwb, setQueue, showNotice],
+  );
   const confirmarLiberacao = useCallback(
     async (motivo: string) => {
       const job = liberacao;
@@ -736,7 +760,7 @@ export function Expedicao({ onBack }: Props) {
       }
       setLiberacao(null);
       const comMotivo: ShipRetryJob = { ...job, override: motivo, precisaMotivo: false };
-      const num = job.numero ? `#${job.numero}` : "o pedido";
+      const num = rotuloPedido(job.numero);
       const r = await expedirEmbalado(comMotivo);
       if (r.ok) {
         setQueue(retryQueue.current.filter((j) => j.orderId !== job.orderId));
@@ -748,6 +772,15 @@ export function Expedicao({ onBack }: Props) {
         showNotice(`Expedição de ${num} recusada: ${shipErrorMessage(r.code ?? "")} Confira no Nexus.`, 15000);
         return;
       }
+      if (r.tipo === "awb_coletado") {
+        // Mesmo tratamento do switch de `concluirCiclo`: NUNCA reenviar sozinho
+        // (senão volta pro loop de 15s) — fica preso até liberar com PIN. A
+        // barra vermelha aparece sozinha (ver `pendentesAwbColetado`), sem
+        // abrir modal nenhum aqui.
+        enqueueRetry({ ...comMotivo, precisaMotivo: false, bloqueadoPorAwb: true, awbColetado: r.awbColetado });
+        showNotice(`Expedição de ${num} recusada: ${awbColetadoMsg(r.awbColetado)}`, 15000);
+        return;
+      }
       // rede/aguardar/conferência de novo: guarda o motivo e deixa a fila reapertar.
       enqueueRetry({ ...comMotivo, precisaMotivo: r.tipo === "conferencia" });
       showNotice(`Expedição de ${num} ainda não passou (${shipErrorMessage(r.code ?? "")}). Vai tentar de novo sozinho.`);
@@ -756,7 +789,9 @@ export function Expedicao({ onBack }: Props) {
   );
   const retryBusyRef = useRef(false);
   useEffect(() => {
-    const pendentes = retryQueue.current.length;
+    // Bloqueado por AWB não "reenvia sozinho" — não entra na contagem do
+    // aviso de mount (só some pelo "Liberar com PIN" ou recusa definitiva).
+    const pendentes = retryQueue.current.filter((j) => !j.bloqueadoPorAwb).length;
     if (pendentes > 0) {
       showNotice(`${pendentes} expedição(ões) pendente(s) de sessão anterior — reenviando em segundo plano.`);
     }
@@ -768,16 +803,14 @@ export function Expedicao({ onBack }: Props) {
       // vez com `leituras` preenchidas, se ainda não tinha: pedido que caiu no
       // modal só porque o servidor não achou o EPC na réplica passa sozinho.
       const temLeituras = (j: ShipRetryJob) => (j.leituras?.length ?? 0) > 0;
-      // Job com o modal de motivo aberto é da pessoa, não do loop.
-      const emLiberacao = liberacaoRef.current?.orderId;
-      const job =
-        retryQueue.current.find((j) => !j.precisaMotivo && j.orderId !== emLiberacao) ??
-        retryQueue.current.find((j) => j.precisaMotivo && !j.reapertadoComLeituras && j.orderId !== emLiberacao);
+      // Job com o modal de motivo (ou de PIN) aberto é da pessoa, não do loop.
+      const emLiberacao = liberacaoRef.current?.orderId ?? liberacaoAwbRef.current?.orderId;
+      const job = proximoJobDaFila(retryQueue.current, emLiberacao);
       if (!job) {
         retryBusyRef.current = false;
         return;
       }
-      const rotulo = job.numero ? `#${job.numero}` : "um pedido pendente";
+      const rotulo = rotuloPedido(job.numero);
       // Sem leituras (nuvem iTAG fora na hora): tenta resolver de novo agora.
       const tentativa = temLeituras(job)
         ? Promise.resolve(job)
@@ -799,6 +832,12 @@ export function Expedicao({ onBack }: Props) {
             // Só marca "já reapertei" se de fato foi com leituras; sem elas
             // (nuvem fora) fica elegível de novo quando ela voltar.
             setQueue([...semEle, { ...j, precisaMotivo: true, reapertadoComLeituras: j.reapertadoComLeituras || temLeituras(j) }]);
+          } else if (r.tipo === "awb_coletado") {
+            // Só devia acontecer se um job ainda não bloqueado (rede/aguardar)
+            // voltar a bater nesse 409 num reenvio — a partir daqui a FLAG some
+            // da seleção automática (`proximoJobDaFila`) e vira barra vermelha,
+            // como o caso comum.
+            setQueue([...semEle, { ...j, bloqueadoPorAwb: true, awbColetado: r.awbColetado }]);
           } else {
             setQueue([...semEle, j]);
           }
@@ -957,6 +996,27 @@ export function Expedicao({ onBack }: Props) {
         <div style={warnBanner}>Muitas tags na mesa ({bufferSize}). Se tiver peça de outro pedido, tire e aperte <strong>R</strong>.</div>
       )}
       {notice && <div style={noticeBanner}>ℹ {notice}</div>}
+      {pendentesAwbColetado.length > 0 && !liberacaoAwb && (
+        <div style={pendBarAwb}>
+          {pendentesAwbColetado.length > 1 && (
+            <span style={pendBarAwbTitulo}>
+              ⛔ {pendentesAwbColetado.length} pedidos com AWB já coletado pela J&T — pacote duplicado. Chame o
+              supervisor.
+            </span>
+          )}
+          {pendentesAwbColetado.map((j) => (
+            <div key={j.orderId} style={pendBarAwbRow}>
+              <span>
+                {pendentesAwbColetado.length === 1 ? "⛔ " : ""}
+                {rotuloPedido(j.numero)} — {awbColetadoMsg(j.awbColetado)}
+              </span>
+              <button type="button" style={pendBtn} onClick={() => setLiberacaoAwb(j)}>
+                Liberar com PIN
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
       {pendentesDeMotivo.length > 0 && !liberacao && (
         <div style={pendBar}>
           <span>
@@ -985,6 +1045,23 @@ export function Expedicao({ onBack }: Props) {
           intro={`O pedido #${liberacao.numero ?? ""} já foi embalado, mas o servidor apontou peça faltando e a trava de supervisor está ligada. Informe o motivo pra expedir:`}
           onCancel={() => setLiberacao(null)}
           onConfirm={(motivo) => void confirmarLiberacao(motivo)}
+        />
+      )}
+      {liberacaoAwb && (
+        <SupervisorModal
+          faltantes={[]}
+          contexto={{
+            titulo: `AWB já coletado pela J&T — pedido ${rotuloPedido(liberacaoAwb.numero)}`,
+            descricao: `${awbColetadoMsg(liberacaoAwb.awbColetado)} Confirme com o supervisor antes de liberar — o pacote pode ser duplicado de verdade.`,
+            motivosRapidos: [
+              "Pacote original extraviado, confirmado com o cliente",
+              "Pacote original devolvido/cancelado",
+              "Coleta anterior registrada por engano",
+            ],
+            botao: "Liberar com PIN",
+          }}
+          onCancel={() => setLiberacaoAwb(null)}
+          onConfirm={confirmarLiberacaoAwb}
         />
       )}
 
@@ -1806,6 +1883,10 @@ const modalTextarea: CSSProperties = { minHeight: 80, padding: "10px 12px", back
 const pendBar: CSSProperties = { display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, padding: "10px 14px", background: "var(--danger-bg)", border: "1px solid var(--danger-border)", color: "var(--danger-text)", fontSize: 13, fontWeight: 600 };
 const pendBarSoft: CSSProperties = { padding: "8px 14px", background: "var(--info-bg)", border: "1px solid var(--info-border)", color: "var(--info-text)", fontSize: 12, fontWeight: 600 };
 const pendBtn: CSSProperties = { padding: "8px 14px", fontSize: 12, fontWeight: 700, textTransform: "uppercase", letterSpacing: 0.5, border: 0, borderRadius: 8, background: "#dc2626", color: "white", cursor: "pointer", flexShrink: 0 };
+/** Barra de AWB já coletado (§8) — lista, não só o primeiro: pode haver mais de um pedido preso. */
+const pendBarAwb: CSSProperties = { display: "flex", flexDirection: "column", gap: 8, padding: "10px 14px", background: "var(--danger-bg)", border: "1px solid var(--danger-border)", color: "var(--danger-text)", fontSize: 13, fontWeight: 600 };
+const pendBarAwbTitulo: CSSProperties = { fontWeight: 700 };
+const pendBarAwbRow: CSSProperties = { display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12 };
 const motivoGrid: CSSProperties = { display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 };
 const motivoBtn: CSSProperties = { display: "flex", alignItems: "center", gap: 10, padding: "14px 12px", fontSize: 15, fontWeight: 600, textAlign: "left", border: "1px solid var(--border)", borderRadius: 10, background: "var(--bg-input)", color: "var(--text)", cursor: "pointer", lineHeight: 1.2 };
 const motivoBtnOn: CSSProperties = { borderColor: "var(--info-text)", background: "var(--info-bg)", color: "var(--info-text)" };

@@ -21,6 +21,7 @@ import {
 } from "../lib/sidebarLargura";
 import { useRfid, type ReadingSession } from "../contexts/RfidContext";
 import { beepError, beepOk } from "../lib/beep";
+import { fmtDataHora } from "../lib/datas";
 import { LARGURA_CARD, imagemRedimensionada, miniatura } from "../lib/imagens";
 import { subscribeQueueChanged } from "../lib/realtime";
 import { itemParecidoDoPedido, itemSize } from "../lib/itemParecido";
@@ -37,6 +38,7 @@ import { ListasImpressasModal } from "./ListasImpressasModal";
 import { PickingFiltersModal, emptyFilters, loadFilters, saveFilters } from "./PickingFiltersModal";
 import { ApiError } from "../lib/api";
 import {
+  avisoAwbColetado,
   claimLote,
   completeSeparacao,
   devolverLote,
@@ -46,6 +48,7 @@ import {
   iniciarSeparacao,
   leituraDe,
   releaseSeparacao,
+  type AwbJaColetadoAviso,
   type EpcLookupItem,
   type LiberacaoFaltante,
   type LeituraResolvida,
@@ -430,6 +433,14 @@ export function SeparacaoRunner({
     if (noticeTimerRef.current) clearTimeout(noticeTimerRef.current);
     noticeTimerRef.current = setTimeout(() => setNotice(null), 8000);
   }, []);
+  /**
+   * Aviso antecipado de AWB já coletado (NEXUS_EXPEDICAO.md §8) — o `complete`
+   * pode devolvê-lo mesmo com a conclusão dando certo. NÃO some sozinho (nem
+   * com timeout, nem ao pular pro pedido seguinte): fica até a operadora
+   * dispensar (Esc ou clique), pra não passar batido enquanto ela já está
+   * conferindo o próximo card.
+   */
+  const [avisoAwb, setAvisoAwb] = useState<AwbJaColetadoAviso | null>(null);
 
   const resetLeitura = useCallback(() => {
     progressRef.current = new Map();
@@ -685,7 +696,13 @@ export function SeparacaoRunner({
     completingRef.current = true;
     try {
       const tags = collectedTags();
-      await completeSeparacao(ord.id, tags, undefined, await leiturasPayload(tags));
+      const res = await completeSeparacao(ord.id, tags, undefined, await leiturasPayload(tags));
+      // Best-effort, não bloqueia: mesmo pedido concluído normalmente, o
+      // servidor pode ter achado que este AWB (reaproveitado de uma separação
+      // anterior devolvida) já foi coletado pela J&T — avisa ANTES da mesa de
+      // embalagem, sem segurar a conclusão nem sumir sozinho (ver `avisoAwb`).
+      const aviso = avisoAwbColetado(res);
+      if (aviso) setAvisoAwb(aviso);
       // Reposição: o lote volta a ter 10 (ou o que a fila ainda tiver) e a mesa
       // abre o pedido SEGUINTE a este, não o primeiro card.
       await puxarLote({ depoisDe: ord.id });
@@ -939,7 +956,11 @@ export function SeparacaoRunner({
       if (!ord) return;
       // Erros sobem pro modal (PIN errado etc.) — só fecha quando concluir.
       const tags = collectedTags();
-      await completeSeparacao(ord.id, tags, liberacao, await leiturasPayload(tags));
+      const res = await completeSeparacao(ord.id, tags, liberacao, await leiturasPayload(tags));
+      // Mesmo aviso antecipado do caminho normal (ver `finish`) — a liberação
+      // de supervisor não é motivo pra perder o aviso de AWB já coletado.
+      const aviso = avisoAwbColetado(res);
+      if (aviso) setAvisoAwb(aviso);
       setSupervisorOpen(false);
       setServerFaltantes(null);
       await puxarLote({ depoisDe: ord.id });
@@ -1207,6 +1228,15 @@ export function SeparacaoRunner({
           return;
       }
       const key = e.key.toLowerCase();
+      // Aviso de AWB já coletado (§8): Esc dispensa, mas nunca por baixo de um
+      // modal — senão a MESMA tecla que fecha o modal apagava o aviso junto.
+      if (key === "escape") {
+        if (avisoAwb && !modalAberto) {
+          e.preventDefault();
+          setAvisoAwb(null);
+        }
+        return;
+      }
       if (key === "k") {
         if (phase !== "separating" || !orderRef.current || completing || modalAberto) return;
         e.preventDefault();
@@ -1241,6 +1271,7 @@ export function SeparacaoRunner({
     faltantesOpen,
     filtersOpen,
     confirmFaltam,
+    avisoAwb,
     restartLeitura,
     liberarOuConcluir,
     pularAtual,
@@ -1478,6 +1509,24 @@ export function SeparacaoRunner({
             : `${extras.length} peças sobressalentes na mesa`}{" "}
           — tire da mesa e aperte <strong>R</strong> pra reiniciar a leitura. O pedido não
           conclui com peça a mais.
+        </div>
+      )}
+      {avisoAwb && (
+        <div style={avisoAwbBanner} onClick={() => setAvisoAwb(null)}>
+          <span>
+            ⛔ AWB {avisoAwb.awb} já foi coletado pela J&amp;T em {fmtDataHora(avisoAwb.primeiroScanEm)} — pacote
+            duplicado. Avise o supervisor antes de embalar.
+          </span>
+          <button
+            type="button"
+            style={avisoAwbDismissBtn}
+            onClick={(e) => {
+              e.stopPropagation();
+              setAvisoAwb(null);
+            }}
+          >
+            Ciente (Esc)
+          </button>
         </div>
       )}
       {reject && extras.length === 0 && <div style={rejectBanner}>⚠ {reject}</div>}
@@ -2666,6 +2715,7 @@ function fmtData(iso: string): string {
       });
 }
 
+
 function MesaStatus({
   connected,
   host,
@@ -3622,6 +3672,35 @@ const extrasBanner: CSSProperties = {
   fontSize: 14,
   fontWeight: 700,
   textAlign: "center",
+};
+
+/** AWB já coletado (NEXUS_EXPEDICAO.md §8) — persistente, some só por Esc/clique. */
+const avisoAwbBanner: CSSProperties = {
+  display: "flex",
+  alignItems: "center",
+  justifyContent: "space-between",
+  gap: 12,
+  padding: "12px 32px",
+  background: "var(--danger-bg)",
+  color: "var(--danger-text)",
+  border: "1px solid var(--danger-border)",
+  fontSize: 14,
+  fontWeight: 700,
+  cursor: "pointer",
+};
+
+const avisoAwbDismissBtn: CSSProperties = {
+  padding: "8px 14px",
+  fontSize: 12,
+  fontWeight: 700,
+  textTransform: "uppercase",
+  letterSpacing: 0.5,
+  border: "1px solid var(--danger-border)",
+  borderRadius: 8,
+  background: "transparent",
+  color: "var(--danger-text)",
+  cursor: "pointer",
+  flexShrink: 0,
 };
 
 const noticeBanner: CSSProperties = {
