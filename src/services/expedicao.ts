@@ -201,6 +201,9 @@ export const EXP_ERR = {
   TINY_RATE_LIMITED: "tiny_rate_limited",
   MISSING_PERMISSION: "missing_permission",
   VALIDATION_ERROR: "validation_error",
+  /** Ver NEXUS_EXPEDICAO.md §8 — pedido devolvido pra fila com o MESMO AWB de
+   *  um pacote que a J&T já coletou antes desta separação (duplicado). */
+  AWB_JA_COLETADO: "awb_ja_coletado",
 } as const;
 
 /** Extrai o `{ error: 'CODIGO' }` de um ApiError (ou null se não for de negócio). */
@@ -233,9 +236,42 @@ export function shipErrorMessage(code: string | null): string {
       return "o pedido não está num status que permita expedir.";
     case EXP_ERR.ORDER_NOT_FOUND:
       return "o pedido não foi encontrado.";
+    case EXP_ERR.AWB_JA_COLETADO:
+      return "esse AWB já foi coletado pela J&T antes desta separação (pacote duplicado).";
     default:
       return "erro no servidor de expedição.";
   }
+}
+
+// ---------------------------------------------------------------------------
+// AWB já coletado (409 `awb_ja_coletado`) — ver NEXUS_EXPEDICAO.md §8
+// ---------------------------------------------------------------------------
+
+/** Corpo extra do 409 `awb_ja_coletado` (além do `error`). */
+export type AwbJaColetadoDetails = {
+  awb: string;
+  /** Já formatada em pt-BR/horário de Brasília, pronta pra mostrar. */
+  message: string;
+  primeiroScanEm: string;
+  ultimoEvento: string | null;
+};
+
+/** Credencial de liberação (mesmo modelo do supervisor da Separação) pra reenviar
+ *  o `ship` depois de um `awb_ja_coletado` — ver `shipOrder`. */
+export type LiberacaoAwbColetado = { supervisorId: string; pin: string; motivo: string };
+
+/** Extrai `{ awb, message, primeiroScanEm, ultimoEvento }` de um 409 `awb_ja_coletado` (null se não for esse erro/corpo incompleto). */
+export function awbJaColetadoDetails(e: unknown): AwbJaColetadoDetails | null {
+  if (expedicaoErrorCode(e) !== EXP_ERR.AWB_JA_COLETADO) return null;
+  if (!(e instanceof ApiError) || !e.body || typeof e.body !== "object") return null;
+  const b = e.body as Record<string, unknown>;
+  if (typeof b.awb !== "string" || typeof b.message !== "string" || typeof b.primeiroScanEm !== "string") return null;
+  return {
+    awb: b.awb,
+    message: b.message,
+    primeiroScanEm: b.primeiroScanEm,
+    ultimoEvento: typeof b.ultimoEvento === "string" ? b.ultimoEvento : null,
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -323,13 +359,16 @@ export function markLabelPrinted(tinyOrderNumber: string, tinyAccount: "FM" | "J
  * Marca o pedido como `shipped` (grava ator+timestamp, replica pro Tiny).
  * Idempotente: já-shipped devolve 200 com o pedido como está (retry seguro).
  * Erros: TRACKING_REQUIRED, JT_LABEL_REQUIRED, tags_incompletas, invalid_status,
- * order_not_found.
+ * order_not_found, awb_ja_coletado (ver `liberacaoAwbColetado`).
  */
 export function shipOrder(
   orderId: string,
   rfidTags: string[],
   override?: ShipOverride,
   leituras?: LeituraResolvida[],
+  /** Reenvio depois de um 409 `awb_ja_coletado` liberado por um supervisor (PIN validado
+   *  server-side). Aditivo — sem ela o corpo do `ship` fica como sempre foi. */
+  liberacaoAwbColetado?: LiberacaoAwbColetado,
 ): Promise<ExpedicaoOrder> {
   if (isExpedicaoSimulacao()) return Promise.resolve(mockShip(orderId));
   // `leituras` = resolução EPC→peça que a mesa fez pela nuvem iTAG (mesmo
@@ -343,6 +382,7 @@ export function shipOrder(
       rfidTags,
       ...(override ? { override } : {}),
       ...(leituras && leituras.length > 0 ? { leituras } : {}),
+      ...(liberacaoAwbColetado ? { liberacaoAwbColetado } : {}),
     },
   });
 }
