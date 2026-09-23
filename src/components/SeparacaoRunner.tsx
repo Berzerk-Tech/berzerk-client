@@ -27,7 +27,7 @@ import { subscribeQueueChanged } from "../lib/realtime";
 import { itemParecidoDoPedido, itemSize } from "../lib/itemParecido";
 import { onBeforeForcedLogout } from "../lib/idleSession";
 import { onAntesDeBloquear } from "../lib/updateGate";
-import { SupervisorModal } from "./SupervisorModal";
+import { SupervisorModal, type SobressalenteInfo } from "./SupervisorModal";
 import { ConfirmDialog } from "./ConfirmDialog";
 import { PickingGeralModal } from "./PickingGeralModal";
 import { ItensFaltantesModal } from "./ItensFaltantesModal";
@@ -318,6 +318,10 @@ type LogEntry = {
   epc: string;
   desc: string;
   status: "ok" | "extra" | "unknown";
+  /** Quem resolveu o EPC (iTAG/nexus/SGTIN) — sempre visível no console pra
+   *  confrontar com a peça física (23/09: Hana P × Hana M só diferem no último
+   *  dígito do EAN, que o SGTIN não carrega). */
+  fonte?: EpcLookupItem["fonte"];
 };
 
 const LOG_MAX = 50;
@@ -933,12 +937,12 @@ export function SeparacaoRunner({
   const liberarOuConcluir = useCallback(() => {
     const ord = orderRef.current;
     if (!ord || completing) return;
-    if (exigirSupervisorRef.current) {
+    // Sobressalente na mesa: concluir SEM ela só com PIN de supervisor, mesmo
+    // com a trava de faltantes desligada — o modal mostra o que fica de fora.
+    // Antes a operadora ficava presa quando a peça a mais era só uma pilha
+    // vizinha no alcance da antena (R não resolve, a tag continua no campo).
+    if (exigirSupervisorRef.current || extrasRef.current.size > 0) {
       setSupervisorOpen(true);
-      return;
-    }
-    if (extrasRef.current.size > 0) {
-      showNotice("Tire a peça sobressalente da mesa e reinicie a leitura (R) antes de concluir.");
       return;
     }
     const lista = faltantes();
@@ -948,7 +952,7 @@ export function SeparacaoRunner({
       return;
     }
     void finish();
-  }, [completing, faltantes, finish, showNotice]);
+  }, [completing, faltantes, finish]);
 
   const supervisorConfirm = useCallback(
     async (liberacao: LiberacaoSupervisor) => {
@@ -956,7 +960,20 @@ export function SeparacaoRunner({
       if (!ord) return;
       // Erros sobem pro modal (PIN errado etc.) — só fecha quando concluir.
       const tags = collectedTags();
-      const res = await completeSeparacao(ord.id, tags, liberacao, await leiturasPayload(tags));
+      // Rastro na auditoria do nexus: o motivo leva as sobressalentes que
+      // ficaram na mesa (nunca entram em `rfidTags`/`leituras`).
+      const sobras = Array.from(extrasRef.current.values());
+      const lib: LiberacaoSupervisor =
+        sobras.length > 0
+          ? {
+              ...liberacao,
+              motivo: `${liberacao.motivo} · sobressalente na mesa: ${sobras
+                .slice(0, 5)
+                .map((x) => `${x.label} (…${x.epc.slice(-4)})`)
+                .join(", ")}${sobras.length > 5 ? ` +${sobras.length - 5}` : ""}`,
+            }
+          : liberacao;
+      const res = await completeSeparacao(ord.id, tags, lib, await leiturasPayload(tags));
       // Mesmo aviso antecipado do caminho normal (ver `finish`) — a liberação
       // de supervisor não é motivo pra perder o aviso de AWB já coletado.
       const aviso = avisoAwbColetado(res);
@@ -1057,6 +1074,7 @@ export function SeparacaoRunner({
             epc: epcU,
             desc: [look!.name ?? item.nome, look!.size, look!.ean13].filter(Boolean).join(" · "),
             status: "ok",
+            fonte: look!.fonte,
           });
           changed = true;
           beepOk();
@@ -1088,6 +1106,7 @@ export function SeparacaoRunner({
               epc: epcU,
               desc: (desc || "(sem descrição)") + (provisoria ? ` · via ${rotuloFonte(look.fonte)}` : ""),
               status: "extra",
+              fonte: look.fonte,
             });
             if (excedido) {
               showReject(
@@ -1505,10 +1524,17 @@ export function SeparacaoRunner({
         <div style={extrasBanner}>
           ⛔{" "}
           {extras.length === 1
-            ? "1 peça sobressalente na mesa"
-            : `${extras.length} peças sobressalentes na mesa`}{" "}
-          — tire da mesa e aperte <strong>R</strong> pra reiniciar a leitura. O pedido não
-          conclui com peça a mais.
+            ? "1 peça sobressalente na mesa: "
+            : `${extras.length} peças sobressalentes na mesa: `}
+          <strong>
+            {extras
+              .slice(0, 3)
+              .map((x) => `${x.label} (…${x.epc.slice(-4)})`)
+              .join(", ")}
+            {extras.length > 3 ? ` +${extras.length - 3}` : ""}
+          </strong>
+          . Tire do alcance da antena (pode ser uma pilha ao lado) e aperte <strong>R</strong>.
+          Pra concluir com ela sobrando na mesa, use <strong>Liberar com supervisor (K)</strong>.
         </div>
       )}
       {avisoAwb && (
@@ -1626,6 +1652,7 @@ export function SeparacaoRunner({
       {supervisorOpen && (
         <SupervisorModal
           faltantes={serverFaltantes ?? faltantes()}
+          sobressalentes={extras.map((x): SobressalenteInfo => ({ epc: x.epc, label: x.label }))}
           onCancel={() => {
             setSupervisorOpen(false);
             setServerFaltantes(null);
@@ -1777,16 +1804,20 @@ function ReadLogPanel({
                 {x.kind === "alheia" && x.parecidoNome && (
                   <span style={extrasPinnedSimilar}>O pedido pede: {x.parecidoNome}</span>
                 )}
-                {x.kind !== "desconhecida" && x.fonte && x.fonte !== "itag" && (
+                {x.kind !== "desconhecida" && x.fonte && (
                   <span style={extrasPinnedSimilar}>
-                    Identificada pelo {rotuloFonte(x.fonte)}, não pela iTAG — pode estar errada. Aperte R pra consultar de novo.
+                    {x.fonte === "itag"
+                      ? "Identificada pela iTAG (nuvem da etiqueta)."
+                      : `Identificada pelo ${rotuloFonte(x.fonte)}, não pela iTAG — pode estar errada. Aperte R pra consultar de novo.`}
                   </span>
                 )}
                 <span style={logEpc}>{x.epc}</span>
               </div>
             </div>
           ))}
-          <span style={extrasPinnedHint}>Depois de tirar, aperte R pra reler.</span>
+          <span style={extrasPinnedHint}>
+            Depois de tirar, aperte R pra reler. Se a peça não está na mesa, ela está perto da antena — afaste a pilha.
+          </span>
         </div>
       )}
       <div className="thin-scroll" style={logList}>
@@ -1804,7 +1835,10 @@ function ReadLogPanel({
               <span style={logDesc}>{e.desc}</span>
             </div>
             <div style={logMetaRow}>
-              <span style={logEpc}>{e.epc}</span>
+              <span style={logEpc}>
+                {e.epc}
+                {e.fonte ? ` · ${rotuloFonte(e.fonte)}` : ""}
+              </span>
               <span style={logTime}>
                 {new Date(e.ts).toLocaleTimeString("pt-BR", {
                   hour: "2-digit",
@@ -2607,7 +2641,11 @@ function OrderView({
         )}
         {!done && (
           <button style={supervisorBtn} onClick={onSupervisor} disabled={completing}>
-            {exigirSupervisor ? "🔓 Liberar com supervisor (K)" : "✅ Concluir com faltantes (K)"}
+            {temExtras
+              ? "🔓 Concluir com sobressalente (K)"
+              : exigirSupervisor
+                ? "🔓 Liberar com supervisor (K)"
+                : "✅ Concluir com faltantes (K)"}
           </button>
         )}
         <button
@@ -2620,7 +2658,7 @@ function OrderView({
             : done
               ? "Concluir separação"
               : temExtras
-                ? "Sobressalente na mesa — reinicie (R)"
+                ? "Sobressalente na mesa — tire (R) ou libere (K)"
                 : "Aguardando leitura…"}
         </button>
       </div>

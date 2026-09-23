@@ -32,8 +32,14 @@ export type SupervisorContexto = {
   botao: string;
 };
 
+/** Peça a MAIS na mesa (sobressalente) que fica de fora do pedido. */
+export type SobressalenteInfo = { epc: string; label: string };
+
 type Props = {
   faltantes: LiberacaoFaltante[];
+  /** Sobressalentes ainda na mesa: a liberação conclui o pedido SEM elas —
+   *  o supervisor precisa ver o que vai ficar sobrando (23/09, #874105). */
+  sobressalentes?: SobressalenteInfo[];
   onCancel: () => void;
   /** Conclui o pedido com a liberação — deve LANÇAR em erro (o modal mostra). */
   onConfirm: (liberacao: LiberacaoSupervisor) => Promise<void>;
@@ -59,7 +65,7 @@ function friendlyError(e: unknown): string {
   return e instanceof Error ? e.message : String(e);
 }
 
-export function SupervisorModal({ faltantes, onCancel, onConfirm, contexto }: Props) {
+export function SupervisorModal({ faltantes, sobressalentes = [], onCancel, onConfirm, contexto }: Props) {
   const motivosRapidos = contexto?.motivosRapidos ?? MOTIVOS_RAPIDOS;
   const [supervisores, setSupervisores] = useState<SupervisorInfo[] | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -170,9 +176,14 @@ export function SupervisorModal({ faltantes, onCancel, onConfirm, contexto }: Pr
             contexto.descricao
           ) : (
             <>
-              {totalFaltam === 1
-                ? "1 peça não foi identificada pelo RFID."
-                : `${totalFaltam} peças não foram identificadas pelo RFID.`}{" "}
+              {totalFaltam > 0 &&
+                (totalFaltam === 1
+                  ? "1 peça não foi identificada pelo RFID. "
+                  : `${totalFaltam} peças não foram identificadas pelo RFID. `)}
+              {sobressalentes.length > 0 &&
+                (sobressalentes.length === 1
+                  ? "1 peça a mais está na mesa e fica de fora do pedido. "
+                  : `${sobressalentes.length} peças a mais estão na mesa e ficam de fora do pedido. `)}
               Só um supervisor pode concluir este pedido assim.
             </>
           )}
@@ -189,6 +200,18 @@ export function SupervisorModal({ faltantes, onCancel, onConfirm, contexto }: Pr
                 <span style={faltanteQtd}>
                   falta{f.faltam > 1 ? "m" : ""} {f.faltam}
                 </span>
+              </div>
+            ))}
+          </div>
+        )}
+
+        {sobressalentes.length > 0 && (
+          <div style={faltantesBox}>
+            <span style={sobressalenteTitulo}>Fica na mesa (não vai no pedido):</span>
+            {sobressalentes.map((s) => (
+              <div key={s.epc} style={faltanteRow}>
+                <span style={faltanteNome}>{s.label}</span>
+                <span style={faltanteQtd}>…{s.epc.slice(-4)}</span>
               </div>
             ))}
           </div>
@@ -408,6 +431,8 @@ const faltantesBox: CSSProperties = {
   flexDirection: "column",
   gap: 6,
 };
+
+const sobressalenteTitulo: CSSProperties = { fontSize: 12, fontWeight: 700, color: "var(--danger-text, #f38ba8)" };
 
 const faltanteRow: CSSProperties = {
   display: "flex",

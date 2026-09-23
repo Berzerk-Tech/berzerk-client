@@ -102,6 +102,13 @@ const RESOLVE_DEBOUNCE_MS = 250;
 // Peças na mesa sem pedido resolvido (separação atrasada, rede, etc.): tenta de
 // novo sozinho — o operador não tem mouse/teclado, "Nova leitura" é exceção.
 const RESOLVE_RETRY_MS = 4000;
+// Sem rastreio da J&T: tenta a cada RESOLVE_RETRY_MS até este teto (~1 min) e
+// então avisa que o pedido está SEM etiqueta no sistema — antes girava pra
+// sempre em silêncio (23/09: 57 pedidos do lote de 16/09 sem etiqueta do n8n,
+// operadora presa sem saber que não ia chegar). O retry segue em background,
+// mais espaçado, e imprime sozinho se o AWB aparecer.
+const RASTREIO_TENTATIVAS_ATE_AVISO = 15;
+const RASTREIO_RETRY_BG_MS = 15000;
 const BUFFER_WARN = 12;
 
 /**
@@ -228,6 +235,8 @@ export function Expedicao({ onBack }: Props) {
   // criava uma cadeia de 4 s independente (rajada no /documentos e risco de
   // duas etiquetas).
   const rastreioTimer = useRef<number | null>(null);
+  /** Tentativas seguidas de imprimir sem rastreio, por pedido (ver RASTREIO_*). */
+  const rastreioTentativasRef = useRef<{ orderId: string; n: number } | null>(null);
   // Guard de reentrada do fechamento do ciclo (timer da embalagem × "Próximo pedido").
   const concluindoRef = useRef(false);
   const [engineWarn, setEngineWarn] = useState<string | null>(null);
@@ -489,23 +498,45 @@ export function Expedicao({ onBack }: Props) {
       // imprime: a trava tem que pegar ANTES do saco sair da máquina.
       // Tenta de novo sozinho; a etiqueta costuma voltar com o AWB em minutos.
       if (oficial && !docs.trackingNumber) {
-        setFlow({
-          kind: "error",
-          code: "rastreio_ausente",
-          message: `O pedido #${order.numero ?? ""} ainda não tem o rastreio da J&T — a etiqueta não é impressa sem ele. Tentando de novo sozinho…`,
-          order,
-        });
+        const prev = rastreioTentativasRef.current;
+        const n = prev && prev.orderId === order.id ? prev.n + 1 : 1;
+        rastreioTentativasRef.current = { orderId: order.id, n };
+        const esgotou = n >= RASTREIO_TENTATIVAS_ATE_AVISO;
+        setFlow(
+          esgotou
+            ? {
+                kind: "error",
+                code: "sem_etiqueta",
+                message:
+                  "Este pedido está SEM etiqueta J&T no sistema. Separe o pacote e avise o supervisor. A etiqueta não é impressa sem o rastreio.",
+                order,
+              }
+            : {
+                kind: "error",
+                code: "rastreio_ausente",
+                message: `O pedido #${order.numero ?? ""} ainda não tem o rastreio da J&T — a etiqueta não é impressa sem ele. Tentando de novo sozinho…`,
+                order,
+              },
+        );
         if (rastreioTimer.current) window.clearTimeout(rastreioTimer.current);
-        rastreioTimer.current = window.setTimeout(() => {
-          rastreioTimer.current = null;
-          const f = flowRef.current;
-          if (f.kind === "error" && f.code === "rastreio_ausente" && f.order?.id === order.id) {
-            // `lidas` da conferência ATUAL: a operadora pode ter completado o pedido enquanto esperava.
-            void iniciarImpressao(order, confRef.current?.contadas ?? lidas, override);
-          }
-        }, RESOLVE_RETRY_MS);
+        rastreioTimer.current = window.setTimeout(
+          () => {
+            rastreioTimer.current = null;
+            const f = flowRef.current;
+            if (
+              f.kind === "error" &&
+              (f.code === "rastreio_ausente" || f.code === "sem_etiqueta") &&
+              f.order?.id === order.id
+            ) {
+              // `lidas` da conferência ATUAL: a operadora pode ter completado o pedido enquanto esperava.
+              void iniciarImpressao(order, confRef.current?.contadas ?? lidas, override);
+            }
+          },
+          esgotou ? RASTREIO_RETRY_BG_MS : RESOLVE_RETRY_MS,
+        );
         return;
       }
+      rastreioTentativasRef.current = null;
 
       const documento = documentoDaConta(order.tinyAccount);
       const rotulo = rotuloDocumento(documento);
@@ -1193,10 +1224,18 @@ function StageCenter({
     // pedido de volta pra separação, e sem mudar status nenhum.
     const ja = flow.jaExpedido;
     const doc = ja ? documentoDaConta(ja.tinyAccount) : null;
+    // Estado terminal "sem etiqueta": número do pedido em destaque pra
+    // operadora separar o pacote e avisar o supervisor sem precisar reler.
+    const semEtiqueta = flow.code === "sem_etiqueta";
     return (
       <div style={{ ...centerBlock, padding: "0 24px" }}>
         <div style={{ ...heroDot, background: "var(--danger-text)" }} />
-        <h1 style={{ ...heroDisplay, fontSize: 56, color: "var(--danger-text)" }}>OPA</h1>
+        <h1 style={{ ...heroDisplay, fontSize: 56, color: "var(--danger-text)" }}>
+          {semEtiqueta ? "SEM ETIQUETA" : "OPA"}
+        </h1>
+        {semEtiqueta && flow.order && (
+          <div style={{ ...heroDisplay, fontSize: 72, lineHeight: 1.1 }}>#{flow.order.numero ?? "?"}</div>
+        )}
         <p style={{ ...heroHint, fontSize: 16, maxWidth: 560, color: "var(--text)" }}>{flow.message}</p>
         <div style={erroAcoesRow}>
           {ja && doc && (
