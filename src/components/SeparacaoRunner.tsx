@@ -1057,8 +1057,16 @@ export function SeparacaoRunner({
       // entrava no progresso (e no complete) de B, ou concluía o pedido errado.
       if (orderRef.current?.id !== ord.id || sessionEpochRef.current !== epoch) return;
       let changed = false;
+      // Guarda local contra tag repetida (na mesma leva ou entre levas): uma
+      // tag já contada ou já marcada como sobressalente não é processada de
+      // novo — senão a 2ª passagem da MESMA tag vira "unidade a MAIS".
+      const jaVistas = new Set<string>();
+      for (const p of progressRef.current.values()) for (const e of p.epcs) jaVistas.add(e);
+      for (const e of extrasRef.current.keys()) jaVistas.add(e);
       for (const epc of newEpcs) {
         const epcU = epc.toUpperCase();
+        if (jaVistas.has(epcU)) continue;
+        jaVistas.add(epcU);
         const look = resolved.get(epcU);
         const item = look ? matchItem(ord, look) : null;
         if (item) {

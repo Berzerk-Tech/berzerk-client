@@ -284,7 +284,10 @@ export function RfidProvider({ children }: { children: ReactNode }) {
           const poll = await runExclusive(() => pollItagTags(h));
           setConnected(true);
           setLastError(null);
-          const all = poll.tags.map((t) => t.trim().toUpperCase()).filter(Boolean);
+          // Dedupe: o iTAG devolve a MESMA tag mais de uma vez no mesmo poll
+          // (duas antenas lendo a peça) — sem isso a tag entrava duas vezes em
+          // `novos`, a 1ª contava e a 2ª virava "unidade a MAIS" (Duda, 25/09).
+          const all = Array.from(new Set(poll.tags.map((t) => t.trim().toUpperCase()).filter(Boolean)));
           // DELTA: só novos, por sessão.
           let activity = false;
           for (const l of deltaRef.current) {
