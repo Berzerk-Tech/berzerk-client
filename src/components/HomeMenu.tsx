@@ -16,6 +16,7 @@ export type Screen =
   | "home"
   | "rfid"
   | "nf"
+  | "devolucao"
   | "rastreio"
   | "separacao"
   | "settings";
@@ -135,6 +136,15 @@ export function HomeMenu({ email, onEnter }: Props) {
             iconBg="var(--warning-bg)"
             iconColor="var(--warning-text)"
             onClick={() => onEnter("nf")}
+            status="ready"
+          />
+          <ModuleCard
+            label="Devolução"
+            description="Passa as peças devolvidas na mesa, confere a quais pedidos pertenciam e fecha o lote pra voltarem ao estoque"
+            icon={<IconReturn />}
+            iconBg="var(--success-bg)"
+            iconColor="var(--success-text)"
+            onClick={() => onEnter("devolucao")}
             status="ready"
           />
         </div>
@@ -316,6 +326,17 @@ function IconReceipt(props: SVGProps<SVGSVGElement>) {
   );
 }
 
+function IconReturn(props: SVGProps<SVGSVGElement>) {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" {...props}>
+      <path d="M21 8v10a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8" />
+      <path d="M23 3H1v5h22z" />
+      <path d="M12 17v-6" />
+      <polyline points="9 14 12 11 15 14" />
+    </svg>
+  );
+}
+
 function IconSun(props: SVGProps<SVGSVGElement>) {
   return (
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round" {...props}>
@@ -460,7 +481,7 @@ const heroGreeting: CSSProperties = {
 
 const cardsGrid: CSSProperties = {
   display: "grid",
-  gridTemplateColumns: "repeat(3, 1fr)",
+  gridTemplateColumns: "repeat(4, 1fr)",
   gap: 20,
   width: "100%",
 };
