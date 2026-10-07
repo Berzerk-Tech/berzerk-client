@@ -17,6 +17,7 @@ import { iniciarWatchdogMemoria, tomarMotivoDeRecarregamento } from "./lib/memor
 import { Login } from "./components/Login";
 import { BatchBrowser } from "./components/BatchBrowser";
 import { HomeMenu, type Screen } from "./components/HomeMenu";
+import { Devolucao } from "./components/Devolucao";
 import { Expedicao } from "./components/Expedicao";
 import { PieceTrace } from "./components/PieceTrace";
 import { Separacao } from "./components/Separacao";
@@ -175,6 +176,7 @@ export default function App() {
         <BatchBrowser operatorId={sessao.sub} operatorEmail={email} onBack={back} />,
       );
     else if (screen === "nf") content = naCasca(<Expedicao onBack={back} />);
+    else if (screen === "devolucao") content = naCasca(<Devolucao onBack={back} />);
     else if (screen === "rastreio") content = naCasca(<PieceTrace onBack={back} />);
     else if (screen === "separacao") content = naCasca(<Separacao onBack={back} />);
     else if (screen === "settings") content = naCasca(<SettingsPlaceholder onBack={back} />);

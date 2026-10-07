@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 **Berzerk Client** — the factory-floor desktop app for RFID labeling and shipping. GitHub remote is `Berzerk-Tech/berzerk-client`; this local checkout is named `berzerk-rfid` (same project, different dir name — don't be thrown by the mismatch). Tauri 2 + React 19 + TypeScript + Vite + Bun, packaged as a signed Windows installer (NSIS) for factory-floor PCs, with a Linux AppImage build also produced.
 
-Three modules cover the industrial flow: **Etiquetagem** (RFID identity onto confirmed production batches), **Separação** (batch order picking against an RFID table), **Expedição** (final RFID scan, J&T shipping label + DANFE, marks the order shipped). Login is Google Workspace (`@berzerk.com.br`) via Cognito Hosted UI, orchestrated by the **Nexus** backend.
+Four modules cover the industrial flow: **Etiquetagem** (RFID identity onto confirmed production batches), **Separação** (batch order picking against an RFID table), **Expedição** (final RFID scan, J&T shipping label + DANFE, marks the order shipped), **Devolução** (returned pieces read on the RFID table into an open Nexus *lote*; closing it unlinks them from their orders and, if the Nexus switch is on, restocks Shopify). Login is Google Workspace (`@berzerk.com.br`) via Cognito Hosted UI, orchestrated by the **Nexus** backend.
 
 Ignore `minhacontaberzerk/` (a stray sibling-repo checkout, not part of this project), `node_modules/`, and `dist/`.
 
@@ -45,6 +45,7 @@ src-tauri/src/
   usb_devices.rs / rfid_usb.rs   serial port enumeration / sniffing
 migrations/               manual SQL, see Key Commands
 NEXUS_EXPEDICAO.md        contract doc for the Nexus Expedição endpoints — read before touching src/services/expedicao.ts
+NEXUS_DEVOLUCOES.md       contract doc for the Nexus Devoluções (lotes) endpoints — read before touching src/services/devolucoes.ts
 ```
 
 **Data flow / Nexus:** since 0.8.0 the app has **no Supabase runtime dependency at all** — Etiquetagem and Rastreio migrated off it (`docs/plano-corte-supabase.md` in the nexus repo). Everything goes through the Nexus API (`VITE_SEPARACAO_API_URL`, must end in `/api`) with the Cognito **`id_token`** as Bearer (not the access token — it's the one carrying `email`), plus a `X-Berzerk-Client-Version` header on every call (`src/lib/api.ts`) that lets the server force-block outdated clients with `426 app_desatualizado`. A WebSocket (`VITE_SEPARACAO_WS_URL`) pushes `queue.changed` and `print-jobs.changed`; slow polling is the fallback.
