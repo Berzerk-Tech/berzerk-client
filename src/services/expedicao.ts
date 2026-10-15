@@ -225,6 +225,21 @@ export function expedicaoErrorCode(e: unknown): string | null {
   return null;
 }
 
+/**
+ * Recusa com MOTIVO do nexus (15/10): `409 { error: 'invalid_status', motivo,
+ * message }` — `motivo` é `entrega_em_maos` (pedido que a Luana entrega
+ * pessoalmente; nunca sai pela expedição) ou `expedicao_manual` (Mercado
+ * Livre). O `error` fica `invalid_status` de propósito: o app anterior já o
+ * trata como definitivo (sem retry); este lê o `motivo` só pra mostrar a
+ * `message` do servidor em vez do texto genérico. Null = outro erro.
+ */
+export function motivoRecusa(e: unknown): { motivo: string; message: string } | null {
+  if (!(e instanceof ApiError) || !e.body || typeof e.body !== "object") return null;
+  const b = e.body as Record<string, unknown>;
+  if (typeof b.motivo !== "string" || !b.motivo || typeof b.message !== "string" || !b.message.trim()) return null;
+  return { motivo: b.motivo, message: b.message };
+}
+
 /** 404 = endpoint/pedido ausente (degradar com aviso). */
 export function isEndpointMissing(e: unknown): boolean {
   return e instanceof ApiError && e.status === 404;

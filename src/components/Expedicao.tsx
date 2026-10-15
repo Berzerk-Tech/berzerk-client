@@ -36,6 +36,7 @@ import {
   getManifest,
   isEndpointMissing,
   markLabelPrinted,
+  motivoRecusa,
   shipErrorMessage,
   shipOrder,
   type AwbJaColetadoDetails,
@@ -146,8 +147,13 @@ async function expedirEmbalado(job: ShipRetryJob, segundaVez = false): Promise<S
       }
       return expedirEmbalado(job, true);
     }
-    return classificarCodigoShip(code, awbJaColetadoDetails(e), gaiolaCheiaDetails(e));
+    return classificarCodigoShip(code, awbJaColetadoDetails(e), gaiolaCheiaDetails(e), motivoRecusa(e)?.message);
   }
+}
+
+/** Texto da recusa definitiva: `message` do servidor quando veio com `motivo`, senão o padrão. */
+function recusaMsg(r: { code: string | null; mensagem?: string }): string {
+  return r.mensagem ?? shipErrorMessage(r.code ?? "");
 }
 
 /** Texto da barra vermelha de AWB já coletado — prefere o `message` do servidor
@@ -434,13 +440,17 @@ export function Expedicao({ onBack }: Props) {
       return;
     }
     const code = expedicaoErrorCode(e);
+    // 409 com `motivo` (entrega em mãos, Mercado Livre): o pedido NÃO sai pela
+    // expedição — mostra o que o servidor disse, não "falha de conexão".
+    const recusa = motivoRecusa(e);
     setFlow({
       kind: "error",
       code: code ?? "falha_match",
       message:
-        code === "missing_permission"
+        recusa?.message ??
+        (code === "missing_permission"
           ? "Seu usuário não tem a permissão de Expedição (expedicao:operate). Peça o papel de expedidor no admin do nexus."
-          : "Falha ao consultar o servidor de expedição. Verifique a conexão e tente de novo.",
+          : "Falha ao consultar o servidor de expedição. Verifique a conexão e tente de novo."),
     });
   }, []);
 
@@ -763,7 +773,7 @@ export function Expedicao({ onBack }: Props) {
         setLiberacao({ ...job, precisaMotivo: true });
         break;
       case "definitivo":
-        showNotice(`Expedição de ${num} recusada: ${shipErrorMessage(r.code ?? "")} Confira no Nexus.`, 15000);
+        showNotice(`Expedição de ${num} recusada: ${recusaMsg(r)} Confira no Nexus.`, 15000);
         break;
       case "awb_coletado":
         // Nunca reenviar sozinho — fica na fila e mostra a barra vermelha
@@ -847,7 +857,7 @@ export function Expedicao({ onBack }: Props) {
         if (code && CODIGOS_DEFINITIVOS.has(code)) {
           setQueue(retryQueue.current.filter((j) => j.orderId !== job.orderId));
           setLiberacaoAwb(null);
-          showNotice(`Expedição de ${num} recusada: ${shipErrorMessage(code)} Confira no Nexus.`, 15000);
+          showNotice(`Expedição de ${num} recusada: ${motivoRecusa(e)?.message ?? shipErrorMessage(code)} Confira no Nexus.`, 15000);
           return;
         }
         throw e; // PIN (422) e outros: o modal mostra e a pessoa tenta de novo.
@@ -886,7 +896,7 @@ export function Expedicao({ onBack }: Props) {
       }
       if (r.tipo === "definitivo") {
         setQueue(retryQueue.current.filter((j) => j.orderId !== job.orderId));
-        showNotice(`Expedição de ${num} recusada: ${shipErrorMessage(r.code ?? "")} Confira no Nexus.`, 15000);
+        showNotice(`Expedição de ${num} recusada: ${recusaMsg(r)} Confira no Nexus.`, 15000);
         return;
       }
       if (r.tipo === "awb_coletado") {
@@ -948,7 +958,7 @@ export function Expedicao({ onBack }: Props) {
             if (!gaiolaCheiaRef.current) setGaiolaCheia({ job: { ...j, bloqueadoPorGaiola: true }, detalhes: r.gaiolaCheia ?? null });
           } else if (r.tipo === "definitivo") {
             setQueue(semEle);
-            showNotice(`Expedição de ${rotulo} recusada: ${shipErrorMessage(r.code ?? "")} Confira no Nexus.`, 15000);
+            showNotice(`Expedição de ${rotulo} recusada: ${recusaMsg(r)} Confira no Nexus.`, 15000);
           } else if (r.tipo === "conferencia") {
             // Só marca "já reapertei" se de fato foi com leituras; sem elas
             // (nuvem fora) fica elegível de novo quando ela voltar.
