@@ -47,6 +47,7 @@ import {
   getQueueDates,
   iniciarSeparacao,
   leituraDe,
+  limiteListasAbertas,
   releaseSeparacao,
   type AwbJaColetadoAviso,
   type EpcLookupItem,
@@ -239,9 +240,54 @@ function ordenarDatas(porDia: Map<string, number>): { date: string; count: numbe
  * pedido da vez sem tirar do lote dela. Pular não fala com o servidor: o pedido
  * continua reservado, só muda de lugar na fila local.
  */
+/** Marcador interno: `claimLote` com `novaLista` voltou sem `novos` (nexus sem a feature). */
+const NEXUS_SEM_NOVA_LISTA = "nexus_sem_nova_lista";
+
 function ordenarLote(lote: Order[], pulados: Set<string>): Order[] {
-  if (pulados.size === 0) return lote;
-  return [...lote.filter((o) => !pulados.has(o.id)), ...lote.filter((o) => pulados.has(o.id))];
+  const porLista = ordenarPorLista(lote);
+  if (pulados.size === 0) return porLista;
+  return [...porLista.filter((o) => !pulados.has(o.id)), ...porLista.filter((o) => pulados.has(o.id))];
+}
+
+/**
+ * Pipeline de listas nos mistos (15/10): com duas listas na mesa, a lista
+ * MAIS ANTIGA vem primeiro (ela confere a lista 1 inteira antes da 2) e o que
+ * ainda não tem lista impressa fica por último. Ordenação ESTÁVEL: dentro da
+ * mesma lista a ordem do servidor é mantida. Sem `listaEm` em ninguém (puros,
+ * lote sem folha) devolve o array como veio.
+ */
+function ordenarPorLista(lote: Order[]): Order[] {
+  if (!lote.some((o) => !!o.listaEm)) return lote;
+  const chave = (o: Order) => (o.listaEm ? Date.parse(o.listaEm) || 0 : Number.POSITIVE_INFINITY);
+  return lote
+    .map((o, i) => ({ o, i, k: chave(o) }))
+    .sort((a, b) => a.k - b.k || a.i - b.i)
+    .map((x) => x.o);
+}
+
+/**
+ * Número humano de cada lista impressa no lote dela ("Lista 1", "Lista 2"),
+ * pela ordem de `listaEm` distinto (agrupa por `listaId` quando existe, senão
+ * pelo carimbo). Só tem sentido com DUAS ou mais listas: com uma, o chip
+ * "lista impressa" de sempre já diz tudo.
+ */
+function numerarListas(lote: Order[]): Map<string, number> {
+  const chaves = new Map<string, number>(); // chave da lista → menor listaEm
+  for (const o of lote) {
+    if (!o.listaEm) continue;
+    const chave = o.listaId ?? o.listaEm;
+    const t = Date.parse(o.listaEm) || 0;
+    const atual = chaves.get(chave);
+    if (atual === undefined || t < atual) chaves.set(chave, t);
+  }
+  const ordem = [...chaves.entries()].sort((a, b) => a[1] - b[1]).map(([chave]) => chave);
+  const numero = new Map<string, number>();
+  if (ordem.length < 2) return numero;
+  for (const o of lote) {
+    if (!o.listaEm) continue;
+    numero.set(o.id, ordem.indexOf(o.listaId ?? o.listaEm) + 1);
+  }
+  return numero;
 }
 
 /** A lista que a sidebar mostra e que o "próximo" percorre. */
@@ -486,7 +532,7 @@ export function SeparacaoRunner({
    * tinham feito (relato do 1º dia na 0.9.4).
    */
   const puxarLote = useCallback(
-    async (opts?: { preservarAtual?: boolean; depoisDe?: string }) => {
+    async (opts?: { preservarAtual?: boolean; depoisDe?: string; novaLista?: boolean }): Promise<Order[] | undefined> => {
       // Reposição em background (push do WS, troca de filtro) cede a vez: o
       // caminho do complete já vai repor, e duas chamadas em voo trocariam o
       // pedido da mesa no meio da conferência.
@@ -508,14 +554,30 @@ export function SeparacaoRunner({
         // números; completar o lote até o alvo colocaria peça na mesa sem
         // ninguém ter ido buscar. Volta ao normal sozinho quando o último
         // pedido da lista sair (concluído ou devolvido).
+        // Exceção (15/10, pipeline de listas nos mistos): `novaLista` é a ÚNICA
+        // porta pra pedido novo com lista na mesa — o botão "Tirar nova lista".
+        // O servidor completa só a lista em montagem e devolve os ids dela em
+        // `novos`; a lista impressa continua presa, igual.
         const presaEmLista = presaNaListaRef.current || loteRef.current.some((o) => !!o.listaEm);
-        const { orders, fila } = presaEmLista
-          ? { ...(await getMeusPedidos()), fila: undefined }
-          : await claimLote({
-              mode: queue.mode,
-              sizes: queue.sizes,
-              filters: filtersRef.current,
-            });
+        const { orders, fila, novos } =
+          presaEmLista && !opts?.novaLista
+            ? { ...(await getMeusPedidos()), fila: undefined, novos: undefined }
+            : await claimLote({
+                mode: queue.mode,
+                sizes: queue.sizes,
+                filters: filtersRef.current,
+                ...(opts?.novaLista ? { novaLista: true } : {}),
+              });
+        // Nexus com `/lote` mas SEM `novaLista` (responde sem `novos`): ele
+        // ignorou o campo e completou o lote contando a lista impressa — pode
+        // ter posto pedido NOVO sem folha na mesa, que é o que `presaEmLista`
+        // existe pra impedir. Devolve o que entrou agora e não aplica nada.
+        if (opts?.novaLista && novos === undefined) {
+          const antes = new Set(loteRef.current.map((o) => o.id));
+          const entraram = orders.filter((o) => !antes.has(o.id) && !o.listaEm).map((o) => o.id);
+          if (entraram.length > 0) await devolverLote(entraram).catch(() => undefined);
+          throw new Error(NEXUS_SEM_NOVA_LISTA);
+        }
         // Entrou pelo tile (sem "Retomar") com lista de ontem/hoje na mesa: a
         // partir daqui é `meus-pedidos`, sem completar o lote com a fila.
         if (orders.some((o) => !!o.listaEm)) presaNaListaRef.current = true;
@@ -564,7 +626,19 @@ export function SeparacaoRunner({
         if (proximo?.id !== atual?.id) resetLeitura();
         setOrder(proximo);
         setPhase(proximo ? "separating" : "empty");
+        // A lista em montagem, na ordem do lote. Nexus antigo: sem `novos` =
+        // nada novo (o alvo já estava cheio) — quem chamou avisa.
+        if (opts?.novaLista) {
+          const idsNovos = new Set(novos ?? []);
+          return orders.filter((o) => idsNovos.has(o.id) && !o.listaEm);
+        }
+        return undefined;
       } catch (e) {
+        // "Tirar nova lista" trata o próprio erro (409 do limite tem mensagem própria).
+        if (opts?.novaLista) {
+          if (!atual) setPhase("empty"); // sem pedido na mesa a fase tinha ido pra "loading"
+          throw e;
+        }
         const msg = e instanceof Error ? e.message : String(e);
         // Com pedido na mesa a falha é só aviso: o lote dela continua válido.
         if (atual) {
@@ -573,12 +647,14 @@ export function SeparacaoRunner({
         }
         setError(msg);
         setPhase("error");
+        return undefined;
       } finally {
         puxandoRef.current = false;
       }
     },
     [queue.mode, queue.sizes, resetLeitura, showNotice, candidatosDepoisDe],
   );
+
 
   // Entrar na fila = puxar o lote.
   useEffect(() => {
@@ -1222,6 +1298,44 @@ export function SeparacaoRunner({
   }, [lote.length, vigiarListas]);
   const [filtersOpen, setFiltersOpen] = useState(false);
   const [pickingOpen, setPickingOpen] = useState(false);
+  /**
+   * NOVA LISTA de mistos (Roger, CD, 15/10): a lista 1 está na coleta (~2 h)
+   * e a operadora já quer "tirar" a lista 2, pra coleta e conferência
+   * andarem em paralelo. Puxa só a lista em montagem (`novaLista`), mantém o
+   * pedido da mesa, e abre o Picking Geral num escopo que agrega SÓ esses
+   * pedidos — "Imprimir Tudo" carimba e imprime só eles, nunca a lista 1.
+   */
+  const [novaLista, setNovaLista] = useState<Order[] | null>(null);
+  const [tirandoLista, setTirandoLista] = useState(false);
+  const tirarNovaLista = useCallback(async () => {
+    if (puxandoRef.current || completingRef.current || imprimindoRef.current) {
+      showNotice("Aguarde terminar a operação atual pra tirar a lista nova.");
+      return;
+    }
+    setTirandoLista(true);
+    try {
+      const novos = await puxarLote({ preservarAtual: true, novaLista: true });
+      if (!novos || novos.length === 0) {
+        showNotice("Fila sem pedidos novos. Nada pra tirar agora.");
+        return;
+      }
+      setNovaLista(novos);
+      setPickingOpen(true);
+    } catch (e) {
+      const limite = limiteListasAbertas(e);
+      if (limite) {
+        showReject(limite.message);
+        return;
+      }
+      if (e instanceof Error && e.message === NEXUS_SEM_NOVA_LISTA) {
+        showReject("O servidor ainda não sabe tirar lista nova. Peça pra atualizar o Nexus.");
+        return;
+      }
+      showNotice(`Não deu pra tirar a lista nova: ${e instanceof Error ? e.message : String(e)}`);
+    } finally {
+      setTirandoLista(false);
+    }
+  }, [puxarLote, showNotice, showReject]);
   const [faltantesOpen, setFaltantesOpen] = useState(false);
   // Confirmação in-app do "concluir com faltantes" (K / botão) — substitui o
   // window.confirm, que no WebView do Tauri volta false calado.
@@ -1498,6 +1612,16 @@ export function SeparacaoRunner({
         <button style={topBarBtn} onClick={() => setPickingOpen(true)}>
           🖨 Picking Geral
         </button>
+        {queue.mode === "total" && comLista.length > 0 && (
+          <button
+            style={topBarBtn}
+            onClick={() => void tirarNovaLista()}
+            disabled={tirandoLista}
+            title="Puxa pedidos novos da fila e imprime só a lista nova; a lista que está na coleta continua na mesa"
+          >
+            {tirandoLista ? "Puxando…" : "➕ Tirar nova lista"}
+          </button>
+        )}
         <button style={topBarBtn} onClick={() => setFiltersOpen(true)}>
           Filtros{filtrosAtivos > 0 ? ` (${filtrosAtivos})` : ""}
         </button>
@@ -1719,15 +1843,21 @@ export function SeparacaoRunner({
         <PickingGeralModal
           queue={queue}
           filters={filters}
-          lote={visiveis}
-          emConferencia={emConferenciaForaDoFiltro}
+          // Nova lista: só a lista em montagem (sem o recorte de exibição —
+          // o servidor já aplicou os filtros no claim). Senão, o lote visível.
+          lote={novaLista ?? visiveis}
+          emConferencia={novaLista ? null : emConferenciaForaDoFiltro}
           operadora={operadora}
           onListaImpressa={marcarLotePresoLocalmente}
           onImprimindo={(v) => {
             imprimindoRef.current = v;
           }}
           onLimparFiltros={() => aplicarFiltros(emptyFilters())}
-          onClose={() => setPickingOpen(false)}
+          rotuloLote={novaLista ? `Nova lista (${novaLista.length})` : undefined}
+          onClose={() => {
+            setPickingOpen(false);
+            setNovaLista(null);
+          }}
         />
       )}
       {faltantesOpen && order && (
@@ -1976,6 +2106,8 @@ function LoteSidebar({
   // com um recorte antigo escondendo (04/09).
   const visiveis = termo.length === 0 ? lote : todos.filter((o) => casaBusca(o, termo));
   const comLista = todos.filter((o) => !!o.listaEm).length; // lote inteiro, não o recorte
+  // "Lista 1"/"Lista 2" só com duas ou mais listas na mesa (pipeline dos mistos).
+  const numeroDaLista = numerarListas(todos);
   const { largura, alca } = useLarguraSidebar();
 
   return (
@@ -2043,6 +2175,9 @@ function LoteSidebar({
         {visiveis.map((o, i) => (
           <div key={o.id} style={cardSlot}>
             {pulados.has(o.id) && <span style={puladoChip}>pulado</span>}
+            {!pulados.has(o.id) && numeroDaLista.has(o.id) && (
+              <span style={numeroListaChip}>Lista {numeroDaLista.get(o.id)}</span>
+            )}
             <QueueCard
               item={queueItemFromOrder(o, i + 1)}
               pinned={o.id === atualId}
@@ -3122,6 +3257,25 @@ const cardSlot: CSSProperties = {
   contentVisibility: "auto",
   containIntrinsicSize: "auto 92px",
   position: "relative",
+};
+
+/** "Lista 1"/"Lista 2" no card — mesmo lugar do "pulado", tom neutro. */
+const numeroListaChip: CSSProperties = {
+  position: "absolute",
+  top: 4,
+  right: 6,
+  zIndex: 1,
+  fontFamily: "var(--font-mono)",
+  fontSize: 9,
+  fontWeight: 800,
+  letterSpacing: 0.4,
+  textTransform: "uppercase",
+  padding: "1px 6px",
+  borderRadius: 999,
+  background: "var(--bg-card)",
+  border: "1px solid var(--border)",
+  color: "var(--text-secondary)",
+  pointerEvents: "none",
 };
 
 /** Marca do pedido PULADO (fim do lote) — o card em si não muda de forma. */

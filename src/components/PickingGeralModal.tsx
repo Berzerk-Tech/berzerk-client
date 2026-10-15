@@ -79,6 +79,13 @@ type Props = {
   onImprimindo?: (v: boolean) => void;
   /** Zera data + filtros de produto da estação (o banner "recorte ativo"). */
   onLimparFiltros?: () => void;
+  /**
+   * NOVA LISTA de mistos (15/10): o runner passa em `lote` SÓ os pedidos da
+   * lista em montagem (sem `listaEm`) e este rótulo no lugar de "Meu lote".
+   * "Imprimir Tudo" carimba e imprime só eles; a lista anterior, que ainda
+   * está na coleta, nunca é reimpressa nem carimbada de novo.
+   */
+  rotuloLote?: string;
   onClose: () => void;
 };
 
@@ -91,8 +98,10 @@ export function PickingGeralModal({
   onListaImpressa,
   onImprimindo,
   onLimparFiltros,
+  rotuloLote,
   onClose,
 }: Props) {
+  const nomeDoLote = rotuloLote ?? `Meu lote (${lote.length})`;
   // O LOTE é o padrão: é a folha que a operadora leva pra prateleira. "Fila
   // inteira" continua a um clique, pra quem quer ver o que ainda vem.
   const [escopo, setEscopo] = useState<Escopo>("lote");
@@ -262,7 +271,7 @@ export function PickingGeralModal({
   }, [resumoApi, recortando, visiveis, secaoEmConferencia]);
 
   const dataLabel = labelRecorte(filters.dateFrom, filters.dateTo) ?? "todas as datas";
-  const escopoLabel = escopo === "lote" ? "Meu lote" : "Fila inteira";
+  const escopoLabel = escopo === "lote" ? (rotuloLote ?? "Meu lote") : "Fila inteira";
   const semBancada = bancada ? `sem ${bancada} (bancada)` : null;
   const filaLabel = `Fila ${queue.size} · ${queue.mode === "total" ? "Mistos" : "Puros"}`;
   const subtitulo =
@@ -315,7 +324,7 @@ export function PickingGeralModal({
       const base64 = gerarPickingPdf({
         operadora,
         fila: filaLabel,
-        escopo: `${escopo === "lote" ? `Meu lote (${lote.length})` : "Fila inteira"} · ${dataLabel}`,
+        escopo: `${escopo === "lote" ? nomeDoLote : "Fila inteira"} · ${dataLabel}`,
         observacao: semBancada,
         secoes: alvo.map<PickingSecao>((s) => ({
           tamanho: s.tamanho,
@@ -367,7 +376,7 @@ export function PickingGeralModal({
                 onClick={() => setEscopo(e)}
                 disabled={imprimindo}
               >
-                {e === "lote" ? `Meu lote (${lote.length})` : "Fila inteira"}
+                {e === "lote" ? nomeDoLote : "Fila inteira"}
               </button>
             ))}
           </div>
