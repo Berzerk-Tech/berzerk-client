@@ -795,6 +795,19 @@ export function SeparacaoRunner({
     [resolveEpcs],
   );
 
+  /**
+   * Entrega em mãos: o complete já encerrou o pedido (`shipped`) — não passa
+   * pela embalagem, não tem etiqueta J&T. Diz isso pra ela não procurar o
+   * pacote na expedição. Nos DOIS caminhos de complete (normal e com PIN).
+   */
+  const avisarEntregaEmMaos = useCallback(
+    (ord: Order, res: Order | null | undefined) => {
+      if (!(ord.entregaEmMaos || res?.entregaEmMaos)) return;
+      showNotice(`Pedido #${ord.numero ?? ord.tinyOrderId ?? ""} concluído como entrega em mãos. Ele não vai pra expedição: entregue as peças direto.`);
+    },
+    [showNotice],
+  );
+
   const finish = useCallback(async () => {
     const ord = orderRef.current;
     // Sobressalente na mesa TRAVA o complete — senão iria peça a mais.
@@ -810,12 +823,7 @@ export function SeparacaoRunner({
       // embalagem, sem segurar a conclusão nem sumir sozinho (ver `avisoAwb`).
       const aviso = avisoAwbColetado(res);
       if (aviso) setAvisoAwb(aviso);
-      // Entrega em mãos: o complete já encerrou o pedido (`shipped`) — não
-      // passa pela embalagem, não tem etiqueta J&T. Diz isso pra ela não
-      // procurar o pacote na expedição.
-      if (ord.entregaEmMaos || res?.entregaEmMaos) {
-        showNotice(`Pedido #${ord.numero ?? ord.tinyOrderId ?? ""} concluído como entrega em mãos. Ele não vai pra expedição: entregue as peças direto.`);
-      }
+      avisarEntregaEmMaos(ord, res);
       // Reposição: o lote volta a ter 10 (ou o que a fila ainda tiver) e a mesa
       // abre o pedido SEGUINTE a este, não o primeiro card.
       await puxarLote({ depoisDe: ord.id });
@@ -873,7 +881,7 @@ export function SeparacaoRunner({
       completingRef.current = false;
       setCompleting(false);
     }
-  }, [completing, collectedTags, puxarLote, showNotice, leiturasPayload]);
+  }, [completing, collectedTags, puxarLote, showNotice, leiturasPayload, avisarEntregaEmMaos]);
 
   /**
    * Reinicia a conferência do pedido atual: a operadora tirou a peça errada da
@@ -1087,6 +1095,7 @@ export function SeparacaoRunner({
       // de supervisor não é motivo pra perder o aviso de AWB já coletado.
       const aviso = avisoAwbColetado(res);
       if (aviso) setAvisoAwb(aviso);
+      avisarEntregaEmMaos(ord, res);
       setSupervisorOpen(false);
       setServerFaltantes(null);
       await puxarLote({ depoisDe: ord.id });
@@ -1559,7 +1568,9 @@ export function SeparacaoRunner({
   const aplicarFiltros = (f: QueueFilters) => {
     setFilters(f);
     filtersRef.current = f;
-    saveFilters(queue.mode, queue.size, f);
+    // Sessão de entrega em mãos não grava: a chave seria a da fila real
+    // derivada do pedido, e o recorte apareceria lá depois (filtro fantasma).
+    if (!pedidoInicial) saveFilters(queue.mode, queue.size, f);
     // O pedido da mesa saiu do filtro? Se ela ainda não leu nada, a mesa segue
     // pro primeiro VISÍVEL (era isso que ela pediu ao filtrar). Se já tem
     // leitura, o pedido FICA — jogar fora a conferência dela seria pior — e o
@@ -1645,7 +1656,7 @@ export function SeparacaoRunner({
         <button style={topBarBtn} onClick={() => setPickingOpen(true)}>
           🖨 Picking Geral
         </button>
-        {queue.mode === "total" && comLista.length > 0 && (
+        {queue.mode === "total" && comLista.length > 0 && !pedidoInicial && (
           <button
             style={topBarBtn}
             onClick={() => void tirarNovaLista()}

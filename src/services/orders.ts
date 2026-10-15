@@ -473,7 +473,11 @@ export function getMeusPedidos(): Promise<{ orders: Order[] }> {
 // pessoalmente. Ficam fora da fila automática; a mesa pega um pelo clique.
 // ---------------------------------------------------------------------------
 
-export type EntregaEmMaosStatus = "ready" | "separating" | "shipped";
+/** Qualquer status do pedido: marcado antes de faturar aparece na lista
+ *  (`invoiced`, `received`, `processing`, `on_hold`…) esperando o Tiny. Só
+ *  `ready` tem o botão "Separar". `string` de propósito: o nexus pode mandar
+ *  status que este app ainda não conhece. */
+export type EntregaEmMaosStatus = OrderStatus | (string & {});
 
 export type EntregaEmMaosPedido = {
   orderId: string;
