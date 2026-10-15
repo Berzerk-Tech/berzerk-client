@@ -45,6 +45,9 @@ export function Separacao({ onBack }: Props) {
     /** Entrou pela aba "Entrega em mãos": o pedido pego pelo clique abre na mesa. */
     pedidoInicial?: Order;
   } | null>(null);
+  /** Espelho síncrono de `confirmed` pra callbacks assíncronos (ver `separarEmMaos`). */
+  const confirmedRef = useRef(confirmed);
+  confirmedRef.current = confirmed;
   const [counts, setCounts] = useState<QueueCounts | null>(null);
   const [authError, setAuthError] = useState<string | null>(null);
   /**
@@ -289,15 +292,16 @@ export function Separacao({ onBack }: Props) {
       const sizes = Array.from(new Set([q, ...(real ? [real] : [])]));
       // Corrida com "Entrar"/"Retomar" (rede lenta): se a mesa já abriu outra
       // fila, NÃO troca as props do runner no meio — devolve o pedido e avisa.
-      let entrou = false;
-      setConfirmed((prev) => {
-        if (prev) return prev;
-        entrou = true;
-        return { size: q, mode: m, sizes, retomandoLista: true, pedidoInicial: order };
-      });
-      if (!entrou && !meu) {
-        await devolverLote([order.id]).catch(() => undefined);
+      // Checa pela REF, nunca por variável setada dentro do updater do
+      // setState: o React pode adiar o updater pro render, e a 0.9.51
+      // devolvia o pedido logo depois do claim (a mesa abria e "fechava
+      // sozinha", relato da Luana 15/10).
+      if (confirmedRef.current) {
+        if (!meu) await devolverLote([order.id]).catch(() => undefined);
+        setAvisoEmMaos("A mesa já abriu outra fila. Volte e clique em Separar de novo.");
+        return;
       }
+      setConfirmed({ size: q, mode: m, sizes, retomandoLista: true, pedidoInicial: order });
     } catch (e) {
       const ind = pedidoIndisponivel(e);
       const msg = e instanceof Error ? e.message : String(e);
