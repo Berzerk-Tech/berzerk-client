@@ -11,6 +11,7 @@
 
 import type { LeituraResolvida } from "./orders";
 import { apiRequest, ApiError } from "../lib/api";
+import { getStationId } from "../lib/station";
 import { isExpedicaoSimulacao } from "./expedicaoMode";
 import type { Me, OrderChannel, OrderItem, OrderStatus } from "./orders";
 
@@ -383,17 +384,36 @@ export function gaiolaCheiaDetails(e: unknown): GaiolaCheiaDetails | null {
 }
 
 /** Contador da gaiola aberta. 404 = nexus anterior (esconder o widget; nunca bloquear o ship por isso). */
+/**
+ * Id da ESTAÇÃO (instalação, `berzerk_station_id` de Configurações). Gaiola é
+ * POR MÁQUINA (15/10): vai no body do ship/fechar e na query do GET; o nexus
+ * escopa a gaiola aberta por ele. Vai como campo, não header: o CORS do API
+ * Gateway só libera os headers listados no berzerk-infra. Nexus antigo ignora.
+ */
+function estacaoId(): string | null {
+  try {
+    return getStationId();
+  } catch {
+    return null;
+  }
+}
+
 export function getGaiola(): Promise<GaiolaStatus> {
   if (isExpedicaoSimulacao()) return Promise.resolve(mockGaiolaStatus());
-  return apiRequest<GaiolaStatus>("/expedicao/gaiola");
+  const estacao = estacaoId();
+  return apiRequest<GaiolaStatus>("/expedicao/gaiola", estacao ? { query: { estacaoId: estacao } } : undefined);
 }
 
 /** Fecha a gaiola aberta e congela o romaneio dela. 409 `gaiola_vazia` sem pedido. Não abre a próxima. */
 export function fecharGaiola(notes?: string | null): Promise<{ gaiola: Gaiola; romaneio: Manifest }> {
   if (isExpedicaoSimulacao()) return Promise.resolve(mockFecharGaiola(notes ?? null));
+  const estacao = estacaoId();
   return apiRequest<{ gaiola: Gaiola; romaneio: Manifest }>("/expedicao/gaiola/fechar", {
     method: "POST",
-    body: notes && notes.trim() ? { notes: notes.trim() } : {},
+    body: {
+      ...(notes && notes.trim() ? { notes: notes.trim() } : {}),
+      ...(estacao ? { estacaoId: estacao } : {}),
+    },
   });
 }
 
@@ -513,6 +533,8 @@ export function shipOrder(
       ...(override ? { override } : {}),
       ...(leituras && leituras.length > 0 ? { leituras } : {}),
       ...(liberacaoAwbColetado ? { liberacaoAwbColetado } : {}),
+      // Gaiola por máquina (15/10) — ver `estacaoId`.
+      ...(estacaoId() ? { estacaoId: estacaoId() } : {}),
     },
   });
 }

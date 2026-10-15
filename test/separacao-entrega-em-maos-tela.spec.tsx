@@ -111,6 +111,8 @@ describe("Tela de filas: Entrega em mãos", () => {
     fireEvent.click(screen.getByText("Separar"));
     await flush();
     expect(claimOrder).toHaveBeenCalledWith("ord-1");
+    // Regressão 0.9.51: o pedido era devolvido logo depois do claim.
+    expect(devolverLote).not.toHaveBeenCalled();
     expect(screen.getByTestId("runner").textContent).toBe("Entrega em mãos");
     const props = runnerProps.at(-1)!;
     expect(props.retomandoLista).toBe(true);
@@ -125,6 +127,23 @@ describe("Tela de filas: Entrega em mãos", () => {
     await flush();
     const props = runnerProps.at(-1)!;
     expect(props.queue).toEqual({ mode: "total", size: SEM_TAMANHO, sizes: [SEM_TAMANHO] });
+  });
+
+  it("Separar com update pendente na tela não devolve o pedido (o claim vale)", async () => {
+    // Deixa a resposta do claim coincidir com um update de estado da tela
+    // (contagem das filas chegando): o updater do setState é adiado pro render.
+    let resolver: (v: { order: Order }) => void = () => {};
+    claimOrder.mockImplementation(() => new Promise<{ order: Order }>((r) => { resolver = r; }));
+    await montar();
+    fireEvent.click(screen.getByText("Separar"));
+    await act(async () => {
+      getEntregaEmMaos.mockResolvedValue({ pedidos: [marcado(1), marcado(2)], pendentes: [] });
+      resolver({ order: order(1) });
+      await Promise.resolve();
+    });
+    await flush();
+    expect(devolverLote).not.toHaveBeenCalled();
+    expect(screen.getByTestId("runner")).toBeTruthy();
   });
 
   it("409 pedido_indisponivel vira aviso com a mensagem do servidor e recarrega a lista", async () => {
