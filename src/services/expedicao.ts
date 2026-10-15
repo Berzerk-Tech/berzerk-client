@@ -234,8 +234,9 @@ export function expedicaoErrorCode(e: unknown): string | null {
  * `message` do servidor em vez do texto genérico. Null = outro erro.
  */
 export function motivoRecusa(e: unknown): { motivo: string; message: string } | null {
-  if (!(e instanceof ApiError) || !e.body || typeof e.body !== "object") return null;
+  if (!(e instanceof ApiError) || e.status !== 409 || !e.body || typeof e.body !== "object") return null;
   const b = e.body as Record<string, unknown>;
+  if (b.error !== EXP_ERR.INVALID_STATUS) return null;
   if (typeof b.motivo !== "string" || !b.motivo || typeof b.message !== "string" || !b.message.trim()) return null;
   return { motivo: b.motivo, message: b.message };
 }

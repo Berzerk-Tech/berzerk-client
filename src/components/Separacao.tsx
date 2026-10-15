@@ -6,6 +6,7 @@ import { SeparacaoRunner } from "./SeparacaoRunner";
 import { SupervisorModal } from "./SupervisorModal";
 import { useRfid } from "../contexts/RfidContext";
 import { ApiError } from "../lib/api";
+import { getSessaoSync } from "../lib/cognito";
 import { QUEUES, SEM_TAMANHO, queueFor, type Queue } from "../lib/filas";
 import { subscribeQueueChanged } from "../lib/realtime";
 import {
@@ -164,6 +165,9 @@ export function Separacao({ onBack }: Props) {
     const emMaos = !!confirmed.pedidoInicial;
     return (
       <SeparacaoRunner
+        // Instância nova por sessão: refs lidas na montagem (`pedidoInicial`,
+        // `retomandoLista`, filtros) não podem sobreviver a uma troca de fila.
+        key={confirmed.pedidoInicial?.id ?? `${confirmed.mode}-${confirmed.size}`}
         title={emMaos ? "Separação — Entrega em mãos" : isMixed ? "Separação — Mistos" : "Separação"}
         kicker={emMaos ? "Entrega em mãos" : `Fila ${confirmed.size} — ${isMixed ? "Mistos" : "Puro"}`}
         emptyHint={
@@ -238,6 +242,13 @@ export function Separacao({ onBack }: Props) {
    */
   const comLista = emAberto.filter((o) => !!o.listaEm);
   const listaDeOutroDia = comLista.find((o) => o.listaDeOutroDia);
+  /**
+   * Entrega em mãos em aberto (app fechou no meio): o "Retomar" entra no
+   * `meus-pedidos` (`retomandoLista`) com ele aberto — pelo `/lote` da fila
+   * do 1º pedido ele não viria (o servidor filtra por modo/tamanho) e ficaria
+   * preso com ela, invisível.
+   */
+  const emMaosEmAberto = emAberto.find((o) => o.entregaEmMaos) ?? null;
 
   // Banner "em aberto": devolve só o que NÃO tem lista impressa. A lista fica
   // presa com quem imprimiu (04/09: 73 pedidos da Nicole voltaram pra fila por
@@ -262,17 +273,31 @@ export function Separacao({ onBack }: Props) {
     setSeparandoEmMaos(p.orderId);
     setAvisoEmMaos(null);
     try {
-      const { order } = await claimOrder(p.orderId);
+      // "Continuar" no pedido que JÁ é dela: sem claim de novo — usa o Order
+      // do `meus-pedidos`; se ainda não chegou, o claim-order resolve.
+      const meu = p.status === "separating" ? emAberto.find((o) => o.id === p.orderId) : undefined;
+      const order = meu ?? (await claimOrder(p.orderId)).order;
       if (!order) {
         setAvisoEmMaos(`O pedido #${p.numero ?? ""} não veio do servidor. Tente de novo.`);
         recarregarEmMaosRef.current();
         return;
       }
       const m: QueueMode = order.separationMode === "total" ? "mistos" : "puro";
-      const q = queueFor(order.predominantSize ?? "") ?? "XG";
       const real = (order.predominantSize ?? "").trim().toUpperCase();
+      // Sem tamanho → fila "Sem tamanho", não XG (`queueFor("")` cai em XG).
+      const q: Queue = real ? queueFor(real) : SEM_TAMANHO;
       const sizes = Array.from(new Set([q, ...(real ? [real] : [])]));
-      setConfirmed({ size: q, mode: m, sizes, retomandoLista: true, pedidoInicial: order });
+      // Corrida com "Entrar"/"Retomar" (rede lenta): se a mesa já abriu outra
+      // fila, NÃO troca as props do runner no meio — devolve o pedido e avisa.
+      let entrou = false;
+      setConfirmed((prev) => {
+        if (prev) return prev;
+        entrou = true;
+        return { size: q, mode: m, sizes, retomandoLista: true, pedidoInicial: order };
+      });
+      if (!entrou && !meu) {
+        await devolverLote([order.id]).catch(() => undefined);
+      }
     } catch (e) {
       const ind = pedidoIndisponivel(e);
       const msg = e instanceof Error ? e.message : String(e);
@@ -374,8 +399,13 @@ export function Separacao({ onBack }: Props) {
           )}
           <button
             style={retomarBtn}
+            disabled={separandoEmMaos !== null}
             onClick={() =>
-              setConfirmed({ ...filaEmAberto, retomandoLista: comLista.length > 0 })
+              setConfirmed({
+                ...filaEmAberto,
+                retomandoLista: comLista.length > 0 || !!emMaosEmAberto,
+                pedidoInicial: emMaosEmAberto ?? undefined,
+              })
             }
           >
             Retomar
@@ -465,8 +495,8 @@ export function Separacao({ onBack }: Props) {
               sizes: sizesForQueue(effectiveSelected, mode),
             })
           }
-          disabled={!effectiveSelected}
-          style={!effectiveSelected ? startBtnDisabled : startBtn}
+          disabled={!effectiveSelected || separandoEmMaos !== null}
+          style={!effectiveSelected || separandoEmMaos !== null ? startBtnDisabled : startBtn}
         >
           Começar a separar
           {effectiveSelected
@@ -517,7 +547,9 @@ function EntregaEmMaosSecao({
   aviso: string | null;
   onSeparar: (p: EntregaEmMaosPedido) => void;
 }) {
-  const abertos = dados.pedidos.filter((p) => p.status !== "shipped").length;
+  const meuSub = getSessaoSync()?.sub ?? null;
+  const abertos = dados.pedidos.filter((p) => p.status === "ready" || p.status === "separating").length;
+  const aguardando = dados.pedidos.filter((p) => p.status !== "ready" && p.status !== "separating" && p.status !== "shipped").length;
   const pendentes = dados.pendentes?.length ?? 0;
   if (dados.pedidos.length === 0 && pendentes === 0) return null;
   return (
@@ -526,6 +558,7 @@ function EntregaEmMaosSecao({
         <span style={emMaosTitulo}>🤝 Entrega em mãos</span>
         <span style={emMaosSub}>
           {abertos === 0 ? "nenhum pedido aberto" : `${abertos} ${abertos === 1 ? "pedido aberto" : "pedidos abertos"}`}
+          {aguardando > 0 && ` · ${aguardando} ${aguardando === 1 ? "aguardando faturar" : "aguardando faturar"}`}
           {pendentes > 0 && ` · ${pendentes} ${pendentes === 1 ? "número ainda não entrou" : "números ainda não entraram"} do Tiny`}
         </span>
       </div>
@@ -553,8 +586,18 @@ function EntregaEmMaosSecao({
                   {separando === p.orderId ? "pegando…" : "Separar"}
                 </button>
               )}
-              {p.status === "separating" && (
+              {p.status === "separating" && meuSub !== null && p.claimedBy === meuSub && (
+                <button style={emMaosBtn} disabled={separando !== null} onClick={() => onSeparar(p)}>
+                  {separando === p.orderId ? "abrindo…" : "Continuar"}
+                </button>
+              )}
+              {p.status === "separating" && !(meuSub !== null && p.claimedBy === meuSub) && (
                 <span style={emMaosStatus}>separando: {p.claimedPorNome ?? "outra mesa"}</span>
+              )}
+              {p.status !== "ready" && p.status !== "separating" && !done && (
+                <span style={emMaosStatus}>
+                  {p.status === "on_hold" ? "em espera (ruptura)" : "aguardando faturar / entrar na fila"}
+                </span>
               )}
               {done && (
                 <span style={emMaosStatus}>

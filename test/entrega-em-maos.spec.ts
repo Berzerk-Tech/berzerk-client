@@ -69,6 +69,9 @@ describe("entrega em mãos: expedição recusa com invalid_status + motivo", () 
     expect(motivoRecusa(new ApiError(409, "x", { error: "invalid_status", message: "sem motivo" }))).toBeNull();
     expect(motivoRecusa(new ApiError(409, "x", { error: "invalid_status", motivo: "expedicao_manual" }))).toBeNull();
     expect(motivoRecusa(new Error("rede"))).toBeNull();
+    // Só 409 invalid_status: um 422 com `motivo` ecoado (liberação) não sequestra a mensagem.
+    expect(motivoRecusa(new ApiError(422, "x", CORPO))).toBeNull();
+    expect(motivoRecusa(new ApiError(409, "x", { ...CORPO, error: "tags_incompletas" }))).toBeNull();
   });
 
   it("invalid_status continua definitivo (sem retry) e carrega a message do servidor", () => {
