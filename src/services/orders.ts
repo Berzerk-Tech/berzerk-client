@@ -74,6 +74,14 @@ export type Order = {
    * nexus antigo não manda o campo. Ausente/vazio = nenhum aviso pendente.
    */
   avisos?: Aviso[];
+  /**
+   * ENTREGA EM MÃOS (15/10): pedido de influencer que a Luana entrega
+   * pessoalmente. Nunca entra na fila automática nem sai pela expedição: é
+   * separado por quem clicar nele na aba "Entrega em mãos", e o `complete`
+   * já o encerra como `shipped` (sem etiqueta J&T, sem WhatsApp). Ausente =
+   * nexus antigo = false.
+   */
+  entregaEmMaos?: boolean;
 };
 
 /** Ver `Order.avisos` — hoje só existe o de AWB já coletado (§8); a união
@@ -458,6 +466,75 @@ export function iniciarSeparacao(orderId: string): Promise<{ id: string; iniciad
  */
 export function getMeusPedidos(): Promise<{ orders: Order[] }> {
   return apiRequest<{ orders: Order[] }>("/separacao/meus-pedidos");
+}
+
+// ---------------------------------------------------------------------------
+// Entrega em mãos (15/10) — pedidos marcados no Nexus que a Luana entrega
+// pessoalmente. Ficam fora da fila automática; a mesa pega um pelo clique.
+// ---------------------------------------------------------------------------
+
+export type EntregaEmMaosStatus = "ready" | "separating" | "shipped";
+
+export type EntregaEmMaosPedido = {
+  orderId: string;
+  numero: string | null;
+  clienteNome: string | null;
+  yampiOrderNumber: string | null;
+  status: EntregaEmMaosStatus;
+  itens: { nome: string | null; tamanho: string | null; quantidade: number }[];
+  totalPecas: number;
+  /** `sub` de quem está separando (status `separating`). */
+  claimedBy: string | null;
+  claimedPorNome: string | null;
+  separadoEm: string | null;
+  separadoPorNome: string | null;
+  marcadoEm: string;
+  marcadoPorNome: string | null;
+};
+
+export type EntregaEmMaosResponse = {
+  /** Marcados em aberto (ready/separating) + os concluídos de HOJE, por `marcadoEm`. */
+  pedidos: EntregaEmMaosPedido[];
+  /** Números marcados que ainda não entraram do Tiny (o app só mostra a contagem). */
+  pendentes?: unknown[];
+};
+
+/**
+ * Lista da aba "Entrega em mãos". `null` = nexus sem a rota (404): a tela
+ * esconde a seção, mesmo padrão do widget da gaiola na expedição.
+ */
+export function getEntregaEmMaos(): Promise<EntregaEmMaosResponse | null> {
+  return apiRequest<EntregaEmMaosResponse>("/separacao/entrega-em-maos").catch((e: unknown) => {
+    if (e instanceof ApiError && e.status === 404) return null;
+    throw e;
+  });
+}
+
+/**
+ * Pega UM pedido específico pra mesa da conta logada (`POST /separacao/claim-order`).
+ * É o único jeito de pegar um pedido de entrega em mãos: o `/lote` nunca o
+ * puxa. O pedido fica `separating` com ela e passa a vir no `meus-pedidos`;
+ * no `/lote` só vem se a mesa estiver no mesmo modo/tamanho dele, por isso a
+ * tela usa o `order` desta resposta direto. 409 `pedido_indisponivel` quando
+ * outra estação levou (ver `pedidoIndisponivel`).
+ */
+export function claimOrder(orderId: string): Promise<ClaimResponse> {
+  return apiRequest<ClaimResponse>("/separacao/claim-order", { method: "POST", body: { orderId } });
+}
+
+/** Corpo do 409 `pedido_indisponivel` do `claimOrder` (null se é outro erro). */
+export function pedidoIndisponivel(e: unknown): { message: string; status: string | null; motivo: string | null } | null {
+  if (!(e instanceof ApiError) || !e.body || typeof e.body !== "object") return null;
+  const b = e.body as Record<string, unknown>;
+  if (b.error !== "pedido_indisponivel") return null;
+  return {
+    message:
+      typeof b.message === "string" && b.message.trim()
+        ? b.message
+        : "Esse pedido não está mais disponível: outra mesa pegou ou ele saiu da lista.",
+    status: typeof b.status === "string" ? b.status : null,
+    motivo: typeof b.motivo === "string" ? b.motivo : null,
+  };
 }
 
 /**

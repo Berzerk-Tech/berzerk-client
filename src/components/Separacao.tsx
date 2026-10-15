@@ -9,9 +9,14 @@ import { ApiError } from "../lib/api";
 import { QUEUES, SEM_TAMANHO, queueFor, type Queue } from "../lib/filas";
 import { subscribeQueueChanged } from "../lib/realtime";
 import {
+  claimOrder,
   devolverLote,
+  getEntregaEmMaos,
   getMeusPedidos,
   getQueueCounts,
+  pedidoIndisponivel,
+  type EntregaEmMaosPedido,
+  type EntregaEmMaosResponse,
   type LiberacaoSupervisor,
   type Order,
   type QueueCounts,
@@ -36,6 +41,8 @@ export function Separacao({ onBack }: Props) {
     sizes: string[];
     /** Entrou por "Retomar" com uma lista de picking já impressa na mão. */
     retomandoLista?: boolean;
+    /** Entrou pela aba "Entrega em mãos": o pedido pego pelo clique abre na mesa. */
+    pedidoInicial?: Order;
   } | null>(null);
   const [counts, setCounts] = useState<QueueCounts | null>(null);
   const [authError, setAuthError] = useState<string | null>(null);
@@ -55,6 +62,15 @@ export function Separacao({ onBack }: Props) {
   const [avisoLista, setAvisoLista] = useState<string | null>(null);
   /** Modal do PIN pra devolver lista impressa (declarado aqui: há return condicional abaixo). */
   const [devolverListaOpen, setDevolverListaOpen] = useState(false);
+  /**
+   * Aba "Entrega em mãos" (15/10): pedidos de influencer que a Luana entrega
+   * pessoalmente. `null` = nexus sem a rota (404) ou ainda carregando — a
+   * seção não aparece. Pegar um é `claimOrder` (o `/lote` nunca os puxa).
+   */
+  const [entregaEmMaos, setEntregaEmMaos] = useState<EntregaEmMaosResponse | null>(null);
+  const [separandoEmMaos, setSeparandoEmMaos] = useState<string | null>(null);
+  const [avisoEmMaos, setAvisoEmMaos] = useState<string | null>(null);
+  const recarregarEmMaosRef = useRef<() => void>(() => {});
 
   // Contagem das filas: o WS do nexus empurra `queue.changed` (tiny-sync,
   // claim, complete, release) e cada evento refaz o fetch; o intervalo de 60s
@@ -119,16 +135,43 @@ export function Separacao({ onBack }: Props) {
     };
   }, [confirmed]);
 
+  // Lista da aba "Entrega em mãos": mesma cadência das filas (WS + 60 s).
+  // 404 = nexus antigo → `null` → seção escondida. Outros erros não derrubam
+  // a tela: a última lista boa fica.
+  useEffect(() => {
+    if (confirmed) return;
+    let alive = true;
+    const load = () => {
+      getEntregaEmMaos()
+        .then((r) => alive && setEntregaEmMaos(r))
+        .catch(() => {
+          /* fica a última lista */
+        });
+    };
+    recarregarEmMaosRef.current = load;
+    load();
+    const unsubscribe = subscribeQueueChanged(load);
+    const id = setInterval(load, 60_000);
+    return () => {
+      alive = false;
+      clearInterval(id);
+      unsubscribe();
+    };
+  }, [confirmed]);
+
   if (confirmed) {
     const isMixed = confirmed.mode === "mistos";
+    const emMaos = !!confirmed.pedidoInicial;
     return (
       <SeparacaoRunner
-        title={isMixed ? "Separação — Mistos" : "Separação"}
-        kicker={`Fila ${confirmed.size} — ${isMixed ? "Mistos" : "Puro"}`}
+        title={emMaos ? "Separação — Entrega em mãos" : isMixed ? "Separação — Mistos" : "Separação"}
+        kicker={emMaos ? "Entrega em mãos" : `Fila ${confirmed.size} — ${isMixed ? "Mistos" : "Puro"}`}
         emptyHint={
-          isMixed
-            ? "Nenhum pedido misto pronto nesse tamanho. Tente outra aba ou aguarde a sincronização."
-            : "Nenhum pedido pronto nessa fila. Tente outra ou aguarde a sincronização."
+          emMaos
+            ? "Nenhum pedido de entrega em mãos na sua mesa. Volte e pegue outro na lista."
+            : isMixed
+              ? "Nenhum pedido misto pronto nesse tamanho. Tente outra aba ou aguarde a sincronização."
+              : "Nenhum pedido pronto nessa fila. Tente outra ou aguarde a sincronização."
         }
         queue={{
           mode: isMixed ? "total" : "normal",
@@ -136,6 +179,7 @@ export function Separacao({ onBack }: Props) {
           sizes: confirmed.sizes,
         }}
         retomandoLista={confirmed.retomandoLista}
+        pedidoInicial={confirmed.pedidoInicial}
         onBack={() => setConfirmed(null)}
       />
     );
@@ -204,6 +248,39 @@ export function Separacao({ onBack }: Props) {
     setDevolverListaOpen(false);
     setEmAberto([]);
     setAvisoLista(null);
+  };
+
+  /**
+   * "Separar" na aba de entrega em mãos: reserva o pedido pra ela
+   * (`claimOrder`) e entra na mesa com ELE aberto. `retomandoLista: true`
+   * segura o lote no `meus-pedidos`: pegar um avulso não pode puxar a fila
+   * automática pra mesa dela. O `order` da resposta vai direto pro runner —
+   * o `/lote` filtra por modo/tamanho e podia não devolvê-lo.
+   */
+  const separarEmMaos = async (p: EntregaEmMaosPedido) => {
+    if (separandoEmMaos) return;
+    setSeparandoEmMaos(p.orderId);
+    setAvisoEmMaos(null);
+    try {
+      const { order } = await claimOrder(p.orderId);
+      if (!order) {
+        setAvisoEmMaos(`O pedido #${p.numero ?? ""} não veio do servidor. Tente de novo.`);
+        recarregarEmMaosRef.current();
+        return;
+      }
+      const m: QueueMode = order.separationMode === "total" ? "mistos" : "puro";
+      const q = queueFor(order.predominantSize ?? "") ?? "XG";
+      const real = (order.predominantSize ?? "").trim().toUpperCase();
+      const sizes = Array.from(new Set([q, ...(real ? [real] : [])]));
+      setConfirmed({ size: q, mode: m, sizes, retomandoLista: true, pedidoInicial: order });
+    } catch (e) {
+      const ind = pedidoIndisponivel(e);
+      const msg = e instanceof Error ? e.message : String(e);
+      setAvisoEmMaos(ind ? ind.message : `Não deu pra pegar o pedido: ${msg}`);
+      recarregarEmMaosRef.current();
+    } finally {
+      setSeparandoEmMaos(null);
+    }
   };
 
   const devolverEmAberto = async () => {
@@ -396,6 +473,15 @@ export function Separacao({ onBack }: Props) {
             ? ` — ${effectiveSelected} ${mode === "mistos" ? "Mistos" : "Puro"}`
             : ""}
         </button>
+
+        {entregaEmMaos && (
+          <EntregaEmMaosSecao
+            dados={entregaEmMaos}
+            separando={separandoEmMaos}
+            aviso={avisoEmMaos}
+            onSeparar={(p) => void separarEmMaos(p)}
+          />
+        )}
       </main>
     </div>
   );
@@ -413,6 +499,83 @@ function fmtDia(iso: string): string {
         month: "2-digit",
         timeZone: "America/Sao_Paulo",
       });
+}
+
+/**
+ * Seção "Entrega em mãos" da tela de filas: os pedidos marcados no Nexus,
+ * fora da fila automática. `ready` tem o botão "Separar"; `separating` de
+ * outra pessoa mostra quem está nele; `shipped` (de hoje) mostra quem fez.
+ */
+function EntregaEmMaosSecao({
+  dados,
+  separando,
+  aviso,
+  onSeparar,
+}: {
+  dados: EntregaEmMaosResponse;
+  separando: string | null;
+  aviso: string | null;
+  onSeparar: (p: EntregaEmMaosPedido) => void;
+}) {
+  const abertos = dados.pedidos.filter((p) => p.status !== "shipped").length;
+  const pendentes = dados.pendentes?.length ?? 0;
+  if (dados.pedidos.length === 0 && pendentes === 0) return null;
+  return (
+    <section style={emMaosWrap}>
+      <div style={emMaosHeader}>
+        <span style={emMaosTitulo}>🤝 Entrega em mãos</span>
+        <span style={emMaosSub}>
+          {abertos === 0 ? "nenhum pedido aberto" : `${abertos} ${abertos === 1 ? "pedido aberto" : "pedidos abertos"}`}
+          {pendentes > 0 && ` · ${pendentes} ${pendentes === 1 ? "número ainda não entrou" : "números ainda não entraram"} do Tiny`}
+        </span>
+      </div>
+      <p style={emMaosHint}>
+        Pedidos que a Luana entrega pessoalmente: fora da fila, sem etiqueta J&T e sem expedição. Quem clicar em
+        Separar pega o pedido pra sua mesa.
+      </p>
+      {aviso && <div style={emMaosAviso}>{aviso}</div>}
+      <div style={emMaosLista}>
+        {dados.pedidos.map((p) => {
+          const done = p.status === "shipped";
+          return (
+            <div key={p.orderId} style={done ? emMaosRowDone : emMaosRow}>
+              <div style={emMaosRowBody}>
+                <span style={emMaosNumero}>
+                  #{p.numero ?? p.yampiOrderNumber ?? "—"}
+                  {p.yampiOrderNumber && p.numero && <span style={emMaosYampi}> · Yampi {p.yampiOrderNumber}</span>}
+                </span>
+                <span style={emMaosCliente}>
+                  {p.clienteNome ?? "sem nome"} · {p.totalPecas} {p.totalPecas === 1 ? "peça" : "peças"}
+                </span>
+              </div>
+              {p.status === "ready" && (
+                <button style={emMaosBtn} disabled={separando !== null} onClick={() => onSeparar(p)}>
+                  {separando === p.orderId ? "pegando…" : "Separar"}
+                </button>
+              )}
+              {p.status === "separating" && (
+                <span style={emMaosStatus}>separando: {p.claimedPorNome ?? "outra mesa"}</span>
+              )}
+              {done && (
+                <span style={emMaosStatus}>
+                  Separado por {p.separadoPorNome ?? "—"}
+                  {p.separadoEm ? ` às ${fmtHora(p.separadoEm)}` : ""}
+                </span>
+              )}
+            </div>
+          );
+        })}
+      </div>
+    </section>
+  );
+}
+
+/** ISO → `HH:MM` no fuso de SP. */
+function fmtHora(iso: string): string {
+  const d = new Date(iso);
+  return Number.isNaN(d.getTime())
+    ? iso
+    : d.toLocaleTimeString("pt-BR", { hour: "2-digit", minute: "2-digit", timeZone: "America/Sao_Paulo" });
 }
 
 function QueueTile({
@@ -532,6 +695,83 @@ const devolverBtn: CSSProperties = {
   fontSize: 12,
   fontWeight: 600,
 };
+
+const emMaosWrap: CSSProperties = {
+  marginTop: 28,
+  padding: "14px 18px 16px",
+  borderRadius: 12,
+  border: "1px solid var(--border)",
+  background: "var(--bg-card)",
+  display: "flex",
+  flexDirection: "column",
+  gap: 8,
+};
+
+const emMaosHeader: CSSProperties = {
+  display: "flex",
+  alignItems: "baseline",
+  justifyContent: "space-between",
+  flexWrap: "wrap",
+  gap: 8,
+};
+
+const emMaosTitulo: CSSProperties = { fontSize: 16, fontWeight: 800 };
+
+const emMaosSub: CSSProperties = { fontSize: 12, color: "var(--text-secondary)" };
+
+const emMaosHint: CSSProperties = { margin: 0, fontSize: 12, color: "var(--text-secondary)", lineHeight: 1.4 };
+
+const emMaosAviso: CSSProperties = {
+  padding: "6px 10px",
+  borderRadius: 8,
+  background: "var(--warning-bg)",
+  color: "var(--warning-text)",
+  fontSize: 12,
+  fontWeight: 600,
+};
+
+const emMaosLista: CSSProperties = { display: "flex", flexDirection: "column", gap: 6 };
+
+const emMaosRow: CSSProperties = {
+  display: "flex",
+  alignItems: "center",
+  justifyContent: "space-between",
+  gap: 12,
+  padding: "8px 12px",
+  borderRadius: 10,
+  border: "1px solid var(--border)",
+  background: "var(--bg)",
+};
+
+const emMaosRowDone: CSSProperties = { ...emMaosRow, opacity: 0.6 };
+
+const emMaosRowBody: CSSProperties = { display: "flex", flexDirection: "column", gap: 2, minWidth: 0 };
+
+const emMaosNumero: CSSProperties = { fontFamily: "var(--font-mono)", fontSize: 14, fontWeight: 800 };
+
+const emMaosYampi: CSSProperties = { fontWeight: 600, color: "var(--text-secondary)" };
+
+const emMaosCliente: CSSProperties = {
+  fontSize: 12,
+  color: "var(--text-secondary)",
+  whiteSpace: "nowrap",
+  overflow: "hidden",
+  textOverflow: "ellipsis",
+};
+
+const emMaosBtn: CSSProperties = {
+  padding: "6px 16px",
+  background: "var(--info-text)",
+  border: "1px solid var(--info-text)",
+  borderRadius: 8,
+  color: "var(--bg)",
+  fontSize: 13,
+  fontWeight: 800,
+  cursor: "pointer",
+  flexShrink: 0,
+};
+
+const emMaosStatus: CSSProperties = { fontSize: 12, fontWeight: 600, color: "var(--text-secondary)", flexShrink: 0 };
 
 const inlineReconnect: CSSProperties = {
   background: "transparent",

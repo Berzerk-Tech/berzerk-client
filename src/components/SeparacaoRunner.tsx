@@ -244,7 +244,11 @@ function ordenarDatas(porDia: Map<string, number>): { date: string; count: numbe
 const NEXUS_SEM_NOVA_LISTA = "nexus_sem_nova_lista";
 
 function ordenarLote(lote: Order[], pulados: Set<string>): Order[] {
-  const porLista = ordenarPorLista(lote);
+  // Entrega em mãos vem primeiro: ela veio separar ESSE pedido, antes da lista.
+  const base = ordenarPorLista(lote);
+  const porLista = base.some((o) => o.entregaEmMaos)
+    ? [...base.filter((o) => o.entregaEmMaos), ...base.filter((o) => !o.entregaEmMaos)]
+    : base;
   if (pulados.size === 0) return porLista;
   return [...porLista.filter((o) => !pulados.has(o.id)), ...porLista.filter((o) => pulados.has(o.id))];
 }
@@ -389,6 +393,14 @@ type Props = {
    * completar o lote até o alvo colocaria na mesa pedido que não está nela.
    */
   retomandoLista?: boolean;
+  /**
+   * ENTREGA EM MÃOS (15/10): o pedido que ela acabou de pegar pelo
+   * `claimOrder` na aba "Entrega em mãos". Abre direto na mesa, por cima de
+   * filtro salvo, e entra no lote mesmo que o `meus-pedidos` ainda não o
+   * liste. Vem sempre com `retomandoLista: true`: a mesa NÃO pode completar o
+   * lote com a fila automática só porque ela veio separar um pedido avulso.
+   */
+  pedidoInicial?: Order;
   onBack: () => void;
 };
 
@@ -398,6 +410,7 @@ export function SeparacaoRunner({
   emptyHint,
   queue,
   retomandoLista,
+  pedidoInicial,
   onBack,
 }: Props) {
   const rfid = useRfid();
@@ -428,6 +441,8 @@ export function SeparacaoRunner({
    * tela, sem puxar pedido novo nenhum.
    */
   const presaNaListaRef = useRef(retomandoLista === true);
+  /** Consumido no primeiro `puxarLote` (ver `Props.pedidoInicial`). */
+  const pedidoInicialRef = useRef<Order | null>(pedidoInicial ?? null);
   const [error, setError] = useState<string | null>(null);
   const [completing, setCompleting] = useState(false);
   const completingRef = useRef(false);
@@ -453,8 +468,10 @@ export function SeparacaoRunner({
   // Filtros de picking (data + produtos) — por estação E por fila (mode+size),
   // sobrevivem a reload. Ver comentário em PickingFiltersModal.tsx sobre o
   // filtro fantasma que a chave global (v1) causava entre filas diferentes.
+  // Entrega em mãos: começa SEM filtro (o salvo da fila esconderia o pedido
+  // que ela veio separar); nada é gravado até ela aplicar um.
   const [filters, setFilters] = useState<QueueFilters>(() =>
-    loadFilters(queue.mode, queue.size),
+    pedidoInicial ? emptyFilters() : loadFilters(queue.mode, queue.size),
   );
   const filtersRef = useRef(filters);
   filtersRef.current = filters;
@@ -559,7 +576,7 @@ export function SeparacaoRunner({
         // O servidor completa só a lista em montagem e devolve os ids dela em
         // `novos`; a lista impressa continua presa, igual.
         const presaEmLista = presaNaListaRef.current || loteRef.current.some((o) => !!o.listaEm);
-        const { orders, fila, novos } =
+        const resposta =
           presaEmLista && !opts?.novaLista
             ? { ...(await getMeusPedidos()), fila: undefined, novos: undefined }
             : await claimLote({
@@ -568,6 +585,14 @@ export function SeparacaoRunner({
                 filters: filtersRef.current,
                 ...(opts?.novaLista ? { novaLista: true } : {}),
               });
+        const { fila, novos } = resposta;
+        let orders = resposta.orders;
+        // Pedido pego pelo clique (entrega em mãos): garante que está no lote
+        // — o `claim-order` já o reservou pra ela, mesmo que a listagem ainda
+        // não o traga — e abre ele na mesa, não o primeiro card.
+        const inicial = pedidoInicialRef.current;
+        pedidoInicialRef.current = null;
+        if (inicial && !orders.some((o) => o.id === inicial.id)) orders = [inicial, ...orders];
         // Nexus com `/lote` mas SEM `novaLista` (responde sem `novos`): ele
         // ignorou o campo e completou o lote contando a lista impressa — pode
         // ter posto pedido NOVO sem folha na mesa, que é o que `presaEmLista`
@@ -619,6 +644,7 @@ export function SeparacaoRunner({
         const temLeitura = Array.from(progressRef.current.values()).some((pr) => pr.count > 0);
         const mantemAtual = aindaMeu && (passaNosFiltros(aindaMeu, filtrosDaVez) || temLeitura);
         const proximo =
+          (inicial ? orders.find((o) => o.id === inicial.id) : undefined) ??
           (mantemAtual ? aindaMeu : undefined) ??
           candidatos.map((id) => visiveisAgora.find((o) => o.id === id)).find(Boolean) ??
           visiveisAgora[0] ??
@@ -630,7 +656,8 @@ export function SeparacaoRunner({
         // nada novo (o alvo já estava cheio) — quem chamou avisa.
         if (opts?.novaLista) {
           const idsNovos = new Set(novos ?? []);
-          return orders.filter((o) => idsNovos.has(o.id) && !o.listaEm);
+          // Entrega em mãos não tem folha: ela separa pessoalmente, fora da lista.
+          return orders.filter((o) => idsNovos.has(o.id) && !o.listaEm && !o.entregaEmMaos);
         }
         return undefined;
       } catch (e) {
@@ -783,6 +810,12 @@ export function SeparacaoRunner({
       // embalagem, sem segurar a conclusão nem sumir sozinho (ver `avisoAwb`).
       const aviso = avisoAwbColetado(res);
       if (aviso) setAvisoAwb(aviso);
+      // Entrega em mãos: o complete já encerrou o pedido (`shipped`) — não
+      // passa pela embalagem, não tem etiqueta J&T. Diz isso pra ela não
+      // procurar o pacote na expedição.
+      if (ord.entregaEmMaos || res?.entregaEmMaos) {
+        showNotice(`Pedido #${ord.numero ?? ord.tinyOrderId ?? ""} concluído como entrega em mãos. Ele não vai pra expedição: entregue as peças direto.`);
+      }
       // Reposição: o lote volta a ter 10 (ou o que a fila ainda tiver) e a mesa
       // abre o pedido SEGUINTE a este, não o primeiro card.
       await puxarLote({ depoisDe: ord.id });
@@ -1845,8 +1878,10 @@ export function SeparacaoRunner({
           filters={filters}
           // Nova lista: só a lista em montagem (sem o recorte de exibição —
           // o servidor já aplicou os filtros no claim). Senão, o lote visível.
-          lote={novaLista ?? visiveis}
-          emConferencia={novaLista ? null : emConferenciaForaDoFiltro}
+          // Entrega em mãos fica fora da folha (ela separa pessoalmente) e,
+          // por tabela, fora do carimbo `marcarListaImpressa`.
+          lote={novaLista ?? visiveis.filter((o) => !o.entregaEmMaos)}
+          emConferencia={novaLista || emConferenciaForaDoFiltro?.entregaEmMaos ? null : emConferenciaForaDoFiltro}
           operadora={operadora}
           onListaImpressa={marcarLotePresoLocalmente}
           onImprimindo={(v) => {
@@ -2175,7 +2210,8 @@ function LoteSidebar({
         {visiveis.map((o, i) => (
           <div key={o.id} style={cardSlot}>
             {pulados.has(o.id) && <span style={puladoChip}>pulado</span>}
-            {!pulados.has(o.id) && numeroDaLista.has(o.id) && (
+            {!pulados.has(o.id) && o.entregaEmMaos && <span style={entregaChip}>Entrega em mãos</span>}
+            {!pulados.has(o.id) && !o.entregaEmMaos && numeroDaLista.has(o.id) && (
               <span style={numeroListaChip}>Lista {numeroDaLista.get(o.id)}</span>
             )}
             <QueueCard
@@ -2695,6 +2731,7 @@ function OrderView({
           </div>
         </div>
         <div style={orderMeta}>
+          {order.entregaEmMaos && <span style={badgeEntrega}>Entrega em mãos</span>}
           {order.prioritario && <span style={badgePrio}>Prioritário</span>}
           {order.channel && <span style={badge}>{order.channel}</span>}
           {order.dataEmissao && <span style={badge}>{fmtData(order.dataEmissao)}</span>}
@@ -3278,6 +3315,25 @@ const numeroListaChip: CSSProperties = {
   pointerEvents: "none",
 };
 
+/** "Entrega em mãos" no card — mesmo lugar do "pulado", tom de destaque. */
+const entregaChip: CSSProperties = {
+  position: "absolute",
+  top: 4,
+  right: 6,
+  zIndex: 1,
+  fontFamily: "var(--font-mono)",
+  fontSize: 9,
+  fontWeight: 800,
+  letterSpacing: 0.4,
+  textTransform: "uppercase",
+  padding: "1px 6px",
+  borderRadius: 999,
+  background: "var(--info-bg)",
+  border: "1px solid var(--info-text)",
+  color: "var(--info-text)",
+  pointerEvents: "none",
+};
+
 /** Marca do pedido PULADO (fim do lote) — o card em si não muda de forma. */
 const puladoChip: CSSProperties = {
   position: "absolute",
@@ -3581,6 +3637,12 @@ const badgePrio: CSSProperties = {
   color: "var(--danger-text)",
   background: "var(--danger-bg)",
   border: "1px solid var(--danger-border)",
+};
+const badgeEntrega: CSSProperties = {
+  ...badge,
+  color: "var(--info-text)",
+  background: "var(--info-bg)",
+  border: "1px solid var(--info-text)",
 };
 
 const clienteNomeStyle: CSSProperties = {

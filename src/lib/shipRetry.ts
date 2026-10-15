@@ -116,6 +116,9 @@ export type ShipTentativa =
       awbColetado?: AwbJaColetadoDetails;
       /** Só em `tipo: "gaiola_cheia"` — mensagem do servidor e números pro modal. */
       gaiolaCheia?: GaiolaCheiaDetails;
+      /** Só em `tipo: "definitivo"` — `message` do servidor quando o 409 trouxe
+       *  `motivo` (entrega em mãos, Mercado Livre); senão o texto fica com `shipErrorMessage`. */
+      mensagem?: string;
     };
 
 /**
@@ -138,6 +141,7 @@ export function classificarCodigoShip(
   code: string,
   awbColetado: AwbJaColetadoDetails | null,
   gaiolaCheia?: GaiolaCheiaDetails | null,
+  mensagem?: string | null,
 ): ShipTentativa {
   if (code === EXP_ERR.AWB_JA_COLETADO) {
     return { ok: false, tipo: "awb_coletado", code, awbColetado: awbColetado ?? undefined };
@@ -148,7 +152,7 @@ export function classificarCodigoShip(
     return { ok: false, tipo: "gaiola_cheia", code, gaiolaCheia: gaiolaCheia ?? undefined };
   }
   if (CODIGOS_CONFERENCIA.has(code)) return { ok: false, tipo: "conferencia", code };
-  if (CODIGOS_DEFINITIVOS.has(code)) return { ok: false, tipo: "definitivo", code };
+  if (CODIGOS_DEFINITIVOS.has(code)) return { ok: false, tipo: "definitivo", code, ...(mensagem ? { mensagem } : {}) };
   return { ok: false, tipo: "aguardar", code };
 }
 
