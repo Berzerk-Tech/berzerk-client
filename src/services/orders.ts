@@ -344,6 +344,13 @@ export type LoteResponse = {
   orders: Order[];
   /** Ausente no modo degradado (nexus sem `/separacao/lote`). */
   fila?: { restantes: number };
+  /**
+   * Ids de TODO pedido SEM `listaEm` no lote dela depois da chamada (nexus
+   * 15/10): a "lista em montagem", o que entrou agora mais o que já estava
+   * sem lista. Com `novaLista` é exatamente o recorte que vira a folha nova.
+   * Ausente = nexus anterior; nunca assumir que veio.
+   */
+  novos?: string[];
 };
 
 /**
@@ -367,6 +374,15 @@ export function claimLote(params: {
   mode: SeparationMode;
   sizes: string[];
   filters?: QueueFilters;
+  /**
+   * NOVA LISTA de mistos (15/10): só vale em `mode: "total"`. O alvo do lote
+   * passa a contar SÓ os pedidos sem `listaEm` (a lista em montagem), então o
+   * servidor puxa até o alvo de pedidos NOVOS mesmo com a lista anterior
+   * ainda na mesa, e devolve os ids deles em `novos`. 409
+   * `limite_listas_abertas` quando ela já tem o máximo de listas impressas em
+   * aberto. Nexus antigo ignora o campo: volta sem `novos` e sem pedido novo.
+   */
+  novaLista?: boolean;
 }): Promise<LoteResponse> {
   return comModo(params.mode, (mode) =>
     apiRequest<LoteResponse>("/separacao/lote", {
@@ -376,12 +392,25 @@ export function claimLote(params: {
         mode,
         sizes: params.sizes,
         ...filtersBody(params.filters),
+        ...(params.novaLista ? { novaLista: true } : {}),
       },
     }),
   ).catch((e: unknown) => {
     if (e instanceof ApiError && e.status === 404) return loteDegradado(params);
     throw e;
   });
+}
+
+/** Corpo do 409 `limite_listas_abertas` do `claimLote` com `novaLista` (null se é outro erro). */
+export function limiteListasAbertas(e: unknown): { message: string; listasAbertas: number | null; limite: number | null } | null {
+  if (!(e instanceof ApiError) || !e.body || typeof e.body !== "object") return null;
+  const b = e.body as Record<string, unknown>;
+  if (b.error !== "limite_listas_abertas") return null;
+  return {
+    message: typeof b.message === "string" && b.message.trim() ? b.message : "Você já tem o máximo de listas impressas em aberto. Confira ou devolva uma antes de tirar outra.",
+    listasAbertas: typeof b.listasAbertas === "number" ? b.listasAbertas : null,
+    limite: typeof b.limite === "number" ? b.limite : null,
+  };
 }
 
 /**

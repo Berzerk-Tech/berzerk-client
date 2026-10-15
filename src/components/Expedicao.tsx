@@ -13,7 +13,10 @@ import { OperatorChip } from "./OperatorChip";
 import { useRfid } from "../contexts/RfidContext";
 import { beepError, beepOk } from "../lib/beep";
 import { LARGURA_PICKING, imagemLeve, miniaturaLeve } from "../lib/imagens";
-import { printEngineStatus } from "../lib/printer";
+import { listPrinters, printEngineStatus, printPdfBase64 } from "../lib/printer";
+import { gerarRomaneioPdf } from "../lib/romaneioPdf";
+import { getRomaneioPrinter, setRomaneioPrinter } from "../services/printerConfig";
+import { useDialogo } from "../lib/useDialogo";
 import {
   documentoDaConta,
   imprimirDocumentoDoPedido,
@@ -26,7 +29,11 @@ import {
   awbJaColetadoDetails,
   epcMatch,
   expedicaoErrorCode,
+  fecharGaiola,
+  gaiolaCheiaDetails,
   getDocumentos,
+  getGaiola,
+  getManifest,
   isEndpointMissing,
   markLabelPrinted,
   shipErrorMessage,
@@ -35,7 +42,11 @@ import {
   type Documentos,
   type EpcMatch,
   type ExpedicaoOrder,
+  type GaiolaCheiaDetails,
+  type GaiolaDoShip,
+  type GaiolaStatus,
   type JaExpedido,
+  type Manifest,
 } from "../services/expedicao";
 import {
   getExpedicaoMode,
@@ -47,6 +58,7 @@ import { fmtDataHora } from "../lib/datas";
 import {
   CODIGOS_DEFINITIVOS,
   classificarCodigoShip,
+  destravarGaiola,
   loadShipRetry,
   proximoJobDaFila,
   rotuloPedido,
@@ -120,8 +132,9 @@ const BUFFER_WARN = 12;
  */
 async function expedirEmbalado(job: ShipRetryJob, segundaVez = false): Promise<ShipTentativa> {
   try {
-    await shipOrder(job.orderId, job.lidas, job.override ? { motivo: job.override } : undefined, job.leituras);
-    return { ok: true };
+    const dto = await shipOrder(job.orderId, job.lidas, job.override ? { motivo: job.override } : undefined, job.leituras);
+    // `gaiola` só vem no ship pela mesa com nexus ≥ 15/10 — a fonte mais fresca do contador.
+    return { ok: true, gaiola: dto?.gaiola };
   } catch (e) {
     const code = expedicaoErrorCode(e);
     if (!code) return { ok: false, tipo: "rede", code: null };
@@ -133,7 +146,7 @@ async function expedirEmbalado(job: ShipRetryJob, segundaVez = false): Promise<S
       }
       return expedirEmbalado(job, true);
     }
-    return classificarCodigoShip(code, awbJaColetadoDetails(e));
+    return classificarCodigoShip(code, awbJaColetadoDetails(e), gaiolaCheiaDetails(e));
   }
 }
 
@@ -634,6 +647,55 @@ export function Expedicao({ onBack }: Props) {
   const leiturasRef = useRef(leiturasDaMesa);
   leiturasRef.current = leiturasDaMesa;
 
+  // ---- GAIOLA da embalagem (15/10) ----
+  // Contador vem do SERVIDOR (`GET /expedicao/gaiola` ao montar e a cada 30 s;
+  // a resposta de cada ship é a fonte mais fresca). Nexus anterior responde
+  // 404: o widget some e NADA aqui bloqueia o ship. No teto o ship leva 409
+  // `gaiola_cheia` e o job fica preso na fila até alguém fechar a gaiola.
+  const [gaiola, setGaiola] = useState<GaiolaStatus | null>(null);
+  const gaiolaRef = useRef<GaiolaStatus | null>(null);
+  gaiolaRef.current = gaiola;
+  const [gaiolaDisponivel, setGaiolaDisponivel] = useState(true);
+  /** Modal do 409 `gaiola_cheia`: o job recusado e a mensagem do servidor. */
+  const [gaiolaCheia, setGaiolaCheia] = useState<{ job: ShipRetryJob; detalhes: GaiolaCheiaDetails | null } | null>(null);
+  const gaiolaCheiaRef = useRef<typeof gaiolaCheia>(null);
+  gaiolaCheiaRef.current = gaiolaCheia;
+  const [fechandoGaiola, setFechandoGaiola] = useState(false);
+  const fechandoGaiolaRef = useRef(false);
+  /** Sobe a cada 409 `gaiola_cheia`: um poll que saiu ANTES do 409 não pode destravar a fila com estado velho. */
+  const seq409Ref = useRef(0);
+  /** Romaneio pra imprimir (recém-fechado ou reimpressão). */
+  const [romaneio, setRomaneio] = useState<{ manifest: Manifest; gaiolaNumero: number | null } | null>(null);
+  const { confirmar, avisar, dialogo } = useDialogo();
+
+  /** Atualiza o widget com o `gaiola` que veio no DTO do ship (contagem já inclui o pedido). */
+  const aplicarGaiolaDoShip = useCallback((g: GaiolaDoShip | undefined) => {
+    if (!g) return;
+    setGaiola((prev) => ({
+      aberta: {
+        id: g.id,
+        numero: g.numero,
+        abertaEm: prev?.aberta?.id === g.id ? prev.aberta.abertaEm : new Date().toISOString(),
+        fechadaEm: null,
+        contagem: g.contagem,
+        romaneioId: null,
+      },
+      limite: g.limite,
+      travada: g.limite > 0 && g.contagem >= g.limite,
+      ultimaFechada: prev?.ultimaFechada ?? null,
+    }));
+    setGaiolaDisponivel(true);
+  }, []);
+  /** Marca o widget como no teto depois de um 409 (sem esperar o próximo poll). */
+  const marcarGaiolaCheia = useCallback((d: GaiolaCheiaDetails | null) => {
+    seq409Ref.current += 1;
+    setGaiola((prev) => {
+      if (!prev) return prev;
+      const aberta = prev.aberta && d?.contagem != null ? { ...prev.aberta, contagem: d.contagem } : prev.aberta;
+      return { ...prev, aberta, travada: true, limite: d?.limite ?? prev.limite };
+    });
+  }, []);
+
   const concluirCiclo = useCallback(async () => {
     const f = flowRef.current;
     if (f.kind !== "packing") return;
@@ -674,11 +736,20 @@ export function Expedicao({ onBack }: Props) {
     };
     const r = await expedirEmbalado(job);
     if (r.ok) {
+      aplicarGaiolaDoShip(r.gaiola);
       registra(false);
       return;
     }
     const num = rotuloPedido(order.numero);
     switch (r.tipo) {
+      case "gaiola_cheia":
+        // Nada foi gravado no servidor. O job fica na fila TRAVADO (não
+        // reenvia a cada 15 s, só bateria no mesmo 409) e o modal oferece
+        // fechar a gaiola — ao fechar, a fila destrava e reaperta na hora.
+        enqueueRetry({ ...job, bloqueadoPorGaiola: true });
+        marcarGaiolaCheia(r.gaiolaCheia ?? null);
+        setGaiolaCheia({ job: { ...job, bloqueadoPorGaiola: true }, detalhes: r.gaiolaCheia ?? null });
+        break;
       case "rede":
         enqueueRetry(job);
         showNotice(`Sem confirmar a expedição de ${num} (rede). Enfileirado pra reenvio — a mesa segue.`);
@@ -703,7 +774,7 @@ export function Expedicao({ onBack }: Props) {
     }
     registra(true);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [showNotice]);
+  }, [showNotice, aplicarGaiolaDoShip, marcarGaiolaCheia]);
 
   // ---- fila de retry do ship ----
   // Sobrevive a fechar/reabrir o app (localStorage) — ver `lib/shipRetry.ts`.
@@ -729,16 +800,17 @@ export function Expedicao({ onBack }: Props) {
   const liberacaoAwbRef = useRef<ShipRetryJob | null>(null);
   liberacaoAwbRef.current = liberacaoAwb;
   const pendentesAwbColetado = retryQueue.current.filter((j) => j.bloqueadoPorAwb);
-  const pendentesDeMotivo = retryQueue.current.filter((j) => j.precisaMotivo && !j.bloqueadoPorAwb);
-  const pendentesAguardando = retryQueue.current.filter((j) => !j.precisaMotivo && !j.bloqueadoPorAwb);
+  const pendentesGaiola = retryQueue.current.filter((j) => j.bloqueadoPorGaiola && !j.bloqueadoPorAwb);
+  const pendentesDeMotivo = retryQueue.current.filter((j) => j.precisaMotivo && !j.bloqueadoPorAwb && !j.bloqueadoPorGaiola);
+  const pendentesAguardando = retryQueue.current.filter((j) => !j.precisaMotivo && !j.bloqueadoPorAwb && !j.bloqueadoPorGaiola);
   // Foco no campo de bipagem — NUNCA com um modal aberto: o efeito do filho
   // (foco no modal) roda antes deste, e o input roubava as teclas 1–6/Enter.
   useEffect(() => {
-    if (overrideOpen || liberacao || liberacaoAwb) return;
+    if (overrideOpen || liberacao || liberacaoAwb || gaiolaCheia || romaneio) return;
     if (flow.kind === "idle" || flow.kind === "identified" || flow.kind === "packing" || flow.kind === "done") {
       inputRef.current?.focus();
     }
-  }, [flow.kind, overrideOpen, liberacao, liberacaoAwb]);
+  }, [flow.kind, overrideOpen, liberacao, liberacaoAwb, gaiolaCheia, romaneio]);
   /**
    * Reenvia o `ship` com a liberação de supervisor (PIN validado server-side)
    * depois de um `awb_ja_coletado`. Chama `shipOrder` DIRETO (não passa por
@@ -759,13 +831,19 @@ export function Expedicao({ onBack }: Props) {
       }
       const num = rotuloPedido(job.numero);
       try {
-        await shipOrder(job.orderId, job.lidas, job.override ? { motivo: job.override } : undefined, job.leituras, {
+        const dto = await shipOrder(job.orderId, job.lidas, job.override ? { motivo: job.override } : undefined, job.leituras, {
           supervisorId: liberacaoSupervisor.supervisorId,
           pin: liberacaoSupervisor.pin,
           motivo: liberacaoSupervisor.motivo,
         });
+        aplicarGaiolaDoShip(dto?.gaiola);
       } catch (e) {
         const code = expedicaoErrorCode(e);
+        if (code === EXP_ERR.GAIOLA_CHEIA) {
+          // O PIN não fica guardado: fecha a gaiola pelo botão do topo e libera de novo.
+          marcarGaiolaCheia(gaiolaCheiaDetails(e));
+          throw new Error(`${gaiolaCheiaDetails(e)?.message ?? "A gaiola está cheia."} Feche a gaiola (botão no topo) e libere de novo.`);
+        }
         if (code && CODIGOS_DEFINITIVOS.has(code)) {
           setQueue(retryQueue.current.filter((j) => j.orderId !== job.orderId));
           setLiberacaoAwb(null);
@@ -778,7 +856,7 @@ export function Expedicao({ onBack }: Props) {
       setLiberacaoAwb(null);
       showNotice(`Expedição de ${num} liberada com PIN.`);
     },
-    [liberacaoAwb, setQueue, showNotice],
+    [liberacaoAwb, setQueue, showNotice, aplicarGaiolaDoShip, marcarGaiolaCheia],
   );
   const confirmarLiberacao = useCallback(
     async (motivo: string) => {
@@ -795,7 +873,15 @@ export function Expedicao({ onBack }: Props) {
       const r = await expedirEmbalado(comMotivo);
       if (r.ok) {
         setQueue(retryQueue.current.filter((j) => j.orderId !== job.orderId));
+        aplicarGaiolaDoShip(r.gaiola);
         showNotice(`Expedição de ${num} confirmada com liberação: ${motivo}.`);
+        return;
+      }
+      if (r.tipo === "gaiola_cheia") {
+        const preso: ShipRetryJob = { ...comMotivo, precisaMotivo: false, bloqueadoPorGaiola: true };
+        enqueueRetry(preso);
+        marcarGaiolaCheia(r.gaiolaCheia ?? null);
+        setGaiolaCheia({ job: preso, detalhes: r.gaiolaCheia ?? null });
         return;
       }
       if (r.tipo === "definitivo") {
@@ -816,19 +902,17 @@ export function Expedicao({ onBack }: Props) {
       enqueueRetry({ ...comMotivo, precisaMotivo: r.tipo === "conferencia" });
       showNotice(`Expedição de ${num} ainda não passou (${shipErrorMessage(r.code ?? "")}). Vai tentar de novo sozinho.`);
     },
-    [liberacao, setQueue, enqueueRetry, showNotice],
+    [liberacao, setQueue, enqueueRetry, showNotice, aplicarGaiolaDoShip, marcarGaiolaCheia],
   );
   const retryBusyRef = useRef(false);
-  useEffect(() => {
-    // Bloqueado por AWB não "reenvia sozinho" — não entra na contagem do
-    // aviso de mount (só some pelo "Liberar com PIN" ou recusa definitiva).
-    const pendentes = retryQueue.current.filter((j) => !j.bloqueadoPorAwb).length;
-    if (pendentes > 0) {
-      showNotice(`${pendentes} expedição(ões) pendente(s) de sessão anterior — reenviando em segundo plano.`);
-    }
-    const id = setInterval(() => {
-      if (retryQueue.current.length === 0 || modoRef.current !== "oficial") return;
-      if (retryBusyRef.current) return; // não empilha requests se a rede está lenta
+  /**
+   * Uma rodada do reenvio automático: pega o próximo job elegível e tenta.
+   * Chamada pelo loop de 15 s e, na hora, logo depois de fechar a gaiola (o
+   * pedido que levou o 409 é o primeiro da fila destravada).
+   */
+  const reapertarProximo = useCallback((): Promise<"nenhum" | "ocupado" | "ok" | "falhou"> => {
+      if (retryQueue.current.length === 0 || modoRef.current !== "oficial") return Promise.resolve("nenhum");
+      if (retryBusyRef.current) return Promise.resolve("ocupado"); // não empilha requests se a rede está lenta
       retryBusyRef.current = true;
       // Quem precisa de motivo humano não é reapertado às cegas — exceto UMA
       // vez com `leituras` preenchidas, se ainda não tinha: pedido que caiu no
@@ -839,23 +923,29 @@ export function Expedicao({ onBack }: Props) {
       const job = proximoJobDaFila(retryQueue.current, emLiberacao);
       if (!job) {
         retryBusyRef.current = false;
-        return;
+        return Promise.resolve("nenhum");
       }
       const rotulo = rotuloPedido(job.numero);
       // Sem leituras (nuvem iTAG fora na hora): tenta resolver de novo agora.
       const tentativa = temLeituras(job)
         ? Promise.resolve(job)
         : leiturasRef.current(job.lidas).then((leituras) => ({ ...job, leituras }));
-      void tentativa
+      return tentativa
         .then((j) => expedirEmbalado(j).then((r) => [j, r] as const))
-        .then(([j, r]) => {
+        .then(([j, r]): "ok" | "falhou" => {
           // Reconcilia por orderId: se o supervisor liberou pelo modal nesse
           // meio tempo, o job já saiu da fila e não pode voltar.
-          if (!retryQueue.current.some((x) => x.orderId === job.orderId)) return;
+          if (!retryQueue.current.some((x) => x.orderId === job.orderId)) return "ok";
           const semEle = retryQueue.current.filter((x) => x.orderId !== job.orderId);
           if (r.ok) {
             setQueue(semEle);
+            aplicarGaiolaDoShip(r.gaiola);
             showNotice(`Expedição de ${rotulo} foi confirmada.`);
+          } else if (r.tipo === "gaiola_cheia") {
+            // Trava este e, se ninguém está olhando o modal, mostra-o.
+            setQueue([...semEle, { ...j, bloqueadoPorGaiola: true }]);
+            marcarGaiolaCheia(r.gaiolaCheia ?? null);
+            if (!gaiolaCheiaRef.current) setGaiolaCheia({ job: { ...j, bloqueadoPorGaiola: true }, detalhes: r.gaiolaCheia ?? null });
           } else if (r.tipo === "definitivo") {
             setQueue(semEle);
             showNotice(`Expedição de ${rotulo} recusada: ${shipErrorMessage(r.code ?? "")} Confira no Nexus.`, 15000);
@@ -872,13 +962,141 @@ export function Expedicao({ onBack }: Props) {
           } else {
             setQueue([...semEle, j]);
           }
+          return r.ok ? "ok" : "falhou";
         })
+        .catch((): "falhou" => "falhou")
         .finally(() => {
           retryBusyRef.current = false;
         });
-    }, 15000);
+  }, [showNotice, setQueue, aplicarGaiolaDoShip, marcarGaiolaCheia]);
+  /** Depois de fechar a gaiola: expede em sequência tudo que estava preso, sem esperar o loop de 15 s. */
+  const drenarFila = useCallback(async () => {
+    for (let i = 0; i < 100; i++) {
+      const r = await reapertarProximo();
+      if (r !== "ok") break;
+      if (!retryQueue.current.some((j) => !j.bloqueadoPorAwb && !j.bloqueadoPorGaiola && !j.precisaMotivo)) break;
+    }
+  }, [reapertarProximo]);
+  useEffect(() => {
+    // Bloqueado por AWB ou por gaiola cheia não "reenvia sozinho" — não entra
+    // na contagem do aviso de mount.
+    const pendentes = retryQueue.current.filter((j) => !j.bloqueadoPorAwb && !j.bloqueadoPorGaiola).length;
+    if (pendentes > 0) {
+      showNotice(`${pendentes} expedição(ões) pendente(s) de sessão anterior — reenviando em segundo plano.`);
+    }
+    const id = setInterval(() => void reapertarProximo(), 15000);
     return () => clearInterval(id);
-  }, [showNotice, setQueue]);
+  }, [showNotice, reapertarProximo]);
+
+  /** Contador da gaiola: ao montar e a cada 30 s. 404 = nexus anterior, widget some. */
+  const carregarGaiola = useCallback(async () => {
+    const seqNoInicio = seq409Ref.current;
+    try {
+      const st = await getGaiola();
+      if (seq409Ref.current !== seqNoInicio) return; // resposta de antes do 409: estado velho
+      setGaiola(st);
+      setGaiolaDisponivel(true);
+      // Alguém fechou a gaiola em outra mesa (ou o teto foi desligado): solta a fila.
+      if (!st.travada && retryQueue.current.some((j) => j.bloqueadoPorGaiola)) {
+        setQueue(destravarGaiola(retryQueue.current));
+        setGaiolaCheia(null);
+      }
+    } catch (e) {
+      if (isEndpointMissing(e)) {
+        // Nexus sem a gaiola (rollback/rollout pela metade): o widget some e
+        // nada pode ficar preso por ela — o ship volta ao fluxo normal.
+        setGaiolaDisponivel(false);
+        if (retryQueue.current.some((j) => j.bloqueadoPorGaiola)) {
+          setQueue(destravarGaiola(retryQueue.current));
+          setGaiolaCheia(null);
+        }
+      }
+      // Outros erros (rede): mantém o último estado conhecido.
+    }
+  }, [setQueue]);
+  useEffect(() => {
+    void carregarGaiola();
+    const id = setInterval(() => void carregarGaiola(), 30000);
+    return () => clearInterval(id);
+  }, [carregarGaiola]);
+
+  /**
+   * Fecha a gaiola aberta: congela o romaneio dela no servidor, abre a
+   * impressão, destrava a fila presa por `gaiola_cheia` e reaperta o ship na
+   * hora. `semConfirmar` quando a pessoa já confirmou no modal do 409.
+   */
+  const fecharGaiolaAgora = useCallback(
+    async (opts?: { semConfirmar?: boolean }) => {
+      if (fechandoGaiolaRef.current) return;
+      const st = gaiolaRef.current;
+      const d = gaiolaCheiaRef.current?.detalhes;
+      const numero = st?.aberta?.numero ?? d?.gaiolaNumero ?? null;
+      const contagem = st?.aberta?.contagem ?? d?.contagem ?? null;
+      if (!opts?.semConfirmar) {
+        const ok = await confirmar({
+          titulo: `Fechar a gaiola${numero != null ? ` ${numero}` : ""}${contagem != null ? ` com ${contagem} pedidos` : ""}?`,
+          mensagem: "O romaneio dela é impresso agora. A próxima gaiola abre sozinha no próximo pedido expedido.",
+          confirmarLabel: "Fechar gaiola",
+        });
+        if (!ok) return;
+        if (fechandoGaiolaRef.current) return; // o modal do 409 disparou enquanto o diálogo estava aberto
+      }
+      fechandoGaiolaRef.current = true;
+      setFechandoGaiola(true);
+      try {
+        // O `fechar` NÃO leva id: fecha a que estiver aberta AGORA. Com 3 ou 4
+        // mesas levando o mesmo 409, a segunda a apertar Enter fecharia a
+        // gaiola NOVA (com 1 pedido). Reconfere antes: se a gaiola que a
+        // pessoa viu já não é a aberta, alguém fechou — só destrava e segue.
+        const agora = await getGaiola().catch(() => null);
+        if (agora && (!agora.aberta || (numero != null && agora.aberta.numero !== numero) || (opts?.semConfirmar && !agora.travada))) {
+          setGaiola(agora);
+          setGaiolaCheia(null);
+          setQueue(destravarGaiola(retryQueue.current));
+          showNotice(
+            numero != null && agora.aberta && agora.aberta.numero !== numero
+              ? `A gaiola ${numero} já foi fechada em outra mesa. A aberta agora é a ${agora.aberta.numero}.`
+              : `A gaiola${numero != null ? ` ${numero}` : ""} já foi fechada. Seguindo com a próxima.`,
+            10000,
+          );
+          void drenarFila();
+          return;
+        }
+        const { gaiola: fechada, romaneio: manifest } = await fecharGaiola();
+        setGaiola((prev) => ({ aberta: null, limite: prev?.limite ?? 0, travada: false, ultimaFechada: fechada }));
+        setGaiolaCheia(null);
+        setQueue(destravarGaiola(retryQueue.current));
+        setRomaneio({ manifest, gaiolaNumero: fechada.numero });
+        showNotice(`Gaiola ${fechada.numero} fechada com ${fechada.contagem} pedidos. A próxima abre no próximo pedido.`, 10000);
+        void drenarFila();
+      } catch (e) {
+        const code = expedicaoErrorCode(e);
+        if (code === EXP_ERR.GAIOLA_VAZIA) {
+          await avisar({ titulo: "Nada pra fechar", mensagem: "Não há gaiola aberta com pedidos. Ela nasce no próximo pedido expedido." });
+          await carregarGaiola();
+          return;
+        }
+        await avisar({ titulo: "Não deu pra fechar a gaiola", mensagem: e instanceof Error ? e.message : String(e) });
+      } finally {
+        fechandoGaiolaRef.current = false;
+        setFechandoGaiola(false);
+      }
+    },
+    [confirmar, avisar, setQueue, showNotice, drenarFila, carregarGaiola],
+  );
+  const reimprimirRomaneio = useCallback(async () => {
+    const ultima = gaiolaRef.current?.ultimaFechada;
+    if (!ultima?.romaneioId) {
+      await avisar({ titulo: "Sem romaneio", mensagem: "Nenhuma gaiola foi fechada ainda." });
+      return;
+    }
+    try {
+      const manifest = await getManifest(ultima.romaneioId);
+      setRomaneio({ manifest, gaiolaNumero: ultima.numero });
+    } catch (e) {
+      await avisar({ titulo: "Não deu pra buscar o romaneio", mensagem: e instanceof Error ? e.message : String(e) });
+    }
+  }, [avisar]);
 
   // ---- PRESENÇA: recebe o conjunto ATUAL na mesa a cada poll ----
   // Reflete a mesa o tempo todo (Leitura ao vivo sempre mostra o que está lá),
@@ -1001,6 +1219,14 @@ export function Expedicao({ onBack }: Props) {
         </div>
         <h2 style={title}>Expedição</h2>
         <div style={hRight}>
+          {gaiolaDisponivel && (
+            <GaiolaWidget
+              status={gaiola}
+              fechando={fechandoGaiola}
+              onFechar={() => void fecharGaiolaAgora()}
+              onReimprimir={() => void reimprimirRomaneio()}
+            />
+          )}
           <button style={historicoBtn} onClick={() => setHistoryOpen(true)} title="O que a mesa expediu hoje — e reimpressão">
             🕐 Histórico
           </button>
@@ -1046,6 +1272,20 @@ export function Expedicao({ onBack }: Props) {
               </button>
             </div>
           ))}
+        </div>
+      )}
+      {pendentesGaiola.length > 0 && !gaiolaCheia && (
+        <div style={pendBar}>
+          <span>
+            ⛔{" "}
+            {pendentesGaiola.length === 1
+              ? `Pedido ${rotuloPedido(pendentesGaiola[0].numero)} embalado, esperando a gaiola fechar`
+              : `${pendentesGaiola.length} pedidos embalados esperando a gaiola fechar`}
+            {" "}— a gaiola está no teto. Eles são expedidos sozinhos assim que ela fechar.
+          </span>
+          <button type="button" style={pendBtn} onClick={() => void fecharGaiolaAgora()} disabled={fechandoGaiola}>
+            Fechar gaiola
+          </button>
         </div>
       )}
       {pendentesDeMotivo.length > 0 && !liberacao && (
@@ -1151,6 +1391,19 @@ export function Expedicao({ onBack }: Props) {
       )}
 
       {historyOpen && <ExpedicaoHistoryModal onClose={() => setHistoryOpen(false)} />}
+      {gaiolaCheia && (
+        <GaiolaCheiaModal
+          detalhes={gaiolaCheia.detalhes}
+          numeroPedido={rotuloPedido(gaiolaCheia.job.numero)}
+          fechando={fechandoGaiola}
+          onFechar={() => void fecharGaiolaAgora({ semConfirmar: true })}
+          onCancel={() => setGaiolaCheia(null)}
+        />
+      )}
+      {romaneio && (
+        <RomaneioModal manifest={romaneio.manifest} gaiolaNumero={romaneio.gaiolaNumero} onClose={() => setRomaneio(null)} />
+      )}
+      {dialogo}
     </div>
   );
 }
@@ -1751,6 +2004,225 @@ function OverrideModal({
   );
 }
 
+/** "Gaiola 12 · 287/300" com barra; âmbar a partir de 90 %, vermelho no teto. */
+function GaiolaWidget({
+  status,
+  fechando,
+  onFechar,
+  onReimprimir,
+}: {
+  status: GaiolaStatus | null;
+  fechando: boolean;
+  onFechar: () => void;
+  onReimprimir: () => void;
+}) {
+  if (!status) return null;
+  const aberta = status.aberta;
+  const limite = status.limite;
+  const contagem = aberta?.contagem ?? 0;
+  const ratio = limite > 0 ? Math.min(1, contagem / limite) : 0;
+  const noTeto = status.travada || (limite > 0 && contagem >= limite);
+  const cor = noTeto ? "#dc2626" : ratio >= 0.9 ? "#f59e0b" : "#3b82f6";
+  const titulo = aberta
+    ? `Gaiola ${aberta.numero} · ${limite > 0 ? `${contagem}/${limite}` : contagem}`
+    : "Gaiola fechada";
+  const dica = aberta
+    ? limite > 0
+      ? `Pedidos expedidos nesta gaiola. Teto: ${limite}.`
+      : "Pedidos expedidos nesta gaiola (sem teto configurado)."
+    : "A próxima gaiola abre no próximo pedido expedido.";
+  return (
+    <div style={{ ...gaiolaWrap, ...(noTeto ? gaiolaWrapCheia : null) }} title={dica}>
+      <span style={{ display: "flex", flexDirection: "column", gap: 3, minWidth: 0 }}>
+        <span style={{ whiteSpace: "nowrap", color: noTeto ? "#dc2626" : undefined }}>
+          📦 {titulo}
+          {noTeto ? " · CHEIA" : ""}
+        </span>
+        {aberta && limite > 0 && (
+          <span style={gaiolaBar}>
+            <span style={{ display: "block", height: "100%", width: `${ratio * 100}%`, background: cor, transition: "width .3s" }} />
+          </span>
+        )}
+        {!aberta && <span style={{ fontSize: 10, fontWeight: 600, color: "var(--text-muted)" }}>abre no próximo pedido</span>}
+      </span>
+      {aberta && (
+        <button type="button" style={{ ...gaiolaBtn, ...(noTeto ? gaiolaBtnCheia : null) }} onClick={onFechar} disabled={fechando} title="Fecha a gaiola e imprime o romaneio dela">
+          {fechando ? "Fechando…" : "Fechar gaiola"}
+        </button>
+      )}
+      {status.ultimaFechada?.romaneioId && (
+        <button type="button" style={gaiolaBtn} onClick={onReimprimir} title={`Reimprimir o romaneio da gaiola ${status.ultimaFechada.numero}`}>
+          🖨 Romaneio {status.ultimaFechada.numero}
+        </button>
+      )}
+    </div>
+  );
+}
+
+/**
+ * O leitor de código de barras digita o código e manda Enter no fim. Com um
+ * modal aberto, esse Enter não pode "confirmar": só vale um Enter solto, sem
+ * caractere imprimível nos últimos 300 ms.
+ */
+function useEnterSemLeitor(): (e: KeyboardEvent) => boolean {
+  const ultimoCharRef = useRef(0);
+  return useCallback((e: KeyboardEvent) => {
+    if (e.key.length === 1) {
+      ultimoCharRef.current = Date.now();
+      return false;
+    }
+    return e.key === "Enter" && Date.now() - ultimoCharRef.current > 300;
+  }, []);
+}
+
+/** 409 `gaiola_cheia` no ship: Enter fecha a gaiola (e reaperta o ship), Esc deixa o pedido esperando na fila. */
+function GaiolaCheiaModal({
+  detalhes,
+  numeroPedido,
+  fechando,
+  onFechar,
+  onCancel,
+}: {
+  detalhes: GaiolaCheiaDetails | null;
+  numeroPedido: string;
+  fechando: boolean;
+  onFechar: () => void;
+  onCancel: () => void;
+}) {
+  const cardRef = useRef<HTMLDivElement>(null);
+  const enterSolto = useEnterSemLeitor();
+  useEffect(() => {
+    cardRef.current?.focus();
+  }, []);
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        onCancel();
+        return;
+      }
+      if (enterSolto(e) && !fechando) {
+        e.preventDefault();
+        onFechar();
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onCancel, onFechar, fechando, enterSolto]);
+  const numero = detalhes?.gaiolaNumero;
+  return (
+    <div style={modalOverlay} onClick={onCancel}>
+      <div ref={cardRef} tabIndex={-1} style={{ ...modalCard, outline: "none" }} onClick={(e) => e.stopPropagation()}>
+        <h3 style={{ margin: 0, fontSize: 18 }}>⛔ Gaiola{numero != null ? ` ${numero}` : ""} cheia</h3>
+        <p style={{ fontSize: 14, margin: 0 }}>
+          {detalhes?.message ?? "A gaiola está no teto configurado."}
+          {detalhes?.contagem != null && detalhes.limite != null ? ` (${detalhes.contagem}/${detalhes.limite})` : ""}
+        </p>
+        <p style={{ fontSize: 13, color: "var(--text-secondary)", margin: 0 }}>
+          O pedido {numeroPedido} já foi embalado e fica na fila. Ao fechar a gaiola, o romaneio é impresso e ele é expedido sozinho na gaiola seguinte.
+        </p>
+        <div style={{ display: "flex", gap: 10, justifyContent: "flex-end" }}>
+          <button style={ghostBtn} onClick={onCancel} disabled={fechando}>Cancelar (Esc)</button>
+          <button style={{ ...redBtn, opacity: fechando ? 0.6 : 1 }} disabled={fechando} onClick={onFechar}>
+            {fechando ? "Fechando…" : "Fechar gaiola (Enter)"}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/**
+ * Impressão do romaneio da gaiola (A4, uma linha por pedido). A impressora é
+ * escolhida aqui e fica guardada por estação (`getRomaneioPrinter`); NUNCA a
+ * térmica de etiquetas por padrão — cada página lá é um saco a mais na
+ * embalagem. Com impressora já guardada, imprime sozinho ao abrir.
+ */
+function RomaneioModal({ manifest, gaiolaNumero, onClose }: { manifest: Manifest; gaiolaNumero: number | null; onClose: () => void }) {
+  const [printers, setPrinters] = useState<string[] | null>(null);
+  const [printer, setPrinter] = useState<string>(() => getRomaneioPrinter() ?? "");
+  const [status, setStatus] = useState<string | null>(null);
+  const [imprimindo, setImprimindo] = useState(false);
+  /** Já saiu uma cópia: Enter passa a FECHAR, não reimprimir (romaneio tem 7+ páginas). */
+  const [impresso, setImpresso] = useState(false);
+  const imprimindoRef = useRef(false);
+  const cardRef = useRef<HTMLDivElement>(null);
+  const enterSolto = useEnterSemLeitor();
+  const titulo = gaiolaNumero != null ? `Romaneio J&T · Gaiola ${gaiolaNumero}` : "Romaneio J&T";
+
+  const imprimir = useCallback(async () => {
+    if (imprimindoRef.current) return;
+    imprimindoRef.current = true;
+    setImprimindo(true);
+    setStatus("Enviando pra impressora…");
+    try {
+      setRomaneioPrinter(printer || null);
+      const base64 = gerarRomaneioPdf({ gaiolaNumero, romaneio: manifest });
+      const out = await printPdfBase64(base64, { printer: printer || null, jobName: titulo });
+      if (out.ok) setImpresso(true);
+      setStatus(out.ok ? `Enviado pra ${out.printer ?? "impressora padrão"}. Enter fecha.` : `Falha ao imprimir: ${out.message ?? "motivo desconhecido"}`);
+    } catch (e) {
+      setStatus(`Falha ao imprimir: ${e instanceof Error ? e.message : String(e)}`);
+    } finally {
+      imprimindoRef.current = false;
+      setImprimindo(false);
+    }
+  }, [printer, gaiolaNumero, manifest, titulo]);
+
+  useEffect(() => {
+    cardRef.current?.focus();
+    listPrinters()
+      .then((p) => setPrinters(p))
+      .catch(() => setPrinters([]));
+    // Estação já configurada: sai sozinho, zero mouse.
+    if (getRomaneioPrinter()) void imprimir();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") onClose();
+      else if (enterSolto(e) && (e.target as HTMLElement | null)?.tagName !== "SELECT") {
+        e.preventDefault();
+        if (impresso) onClose();
+        else void imprimir();
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onClose, imprimir, impresso, enterSolto]);
+
+  return (
+    <div style={modalOverlay} onClick={onClose}>
+      <div ref={cardRef} tabIndex={-1} style={{ ...modalCard, outline: "none" }} onClick={(e) => e.stopPropagation()}>
+        <h3 style={{ margin: 0, fontSize: 18 }}>🖨 {titulo}</h3>
+        <p style={{ fontSize: 13, color: "var(--text-secondary)", margin: 0 }}>
+          Romaneio nº {manifest.manifestNumber ?? ""} · {manifest.orderCount} pedidos
+          {manifest.closedAt ? ` · fechado ${fmtDataHora(manifest.closedAt)}` : ""}
+          {manifest.closedByName ? ` por ${manifest.closedByName}` : ""}
+        </p>
+        <label style={{ display: "flex", flexDirection: "column", gap: 6, fontSize: 12, color: "var(--text-secondary)" }}>
+          Impressora do romaneio (A4). Não use a térmica de etiquetas.
+          <select value={printer} onChange={(e) => setPrinter(e.target.value)} style={romaneioSelect} disabled={imprimindo}>
+            <option value="">Padrão do Windows</option>
+            {(printers ?? []).map((p) => (
+              <option key={p} value={p}>
+                {p}
+              </option>
+            ))}
+            {printer && printers && !printers.includes(printer) && <option value={printer}>{printer}</option>}
+          </select>
+        </label>
+        {status && <p style={{ fontSize: 13, margin: 0 }}>{status}</p>}
+        <div style={{ display: "flex", gap: 10, justifyContent: "flex-end" }}>
+          <button style={ghostBtn} onClick={onClose}>Fechar (Esc)</button>
+          <button style={{ ...redBtn, background: "#2563eb", opacity: imprimindo ? 0.6 : 1 }} disabled={imprimindo} onClick={() => void imprimir()}>
+            {imprimindo ? "Imprimindo…" : impresso ? "Imprimir outra cópia" : "Imprimir (Enter)"}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function ScanIcon() {
   return (
     <svg width={28} height={28} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
@@ -1916,6 +2388,12 @@ const scanIconBox: CSSProperties = { display: "grid", placeItems: "center", widt
 const scanInput: CSSProperties = { flex: 1, padding: "14px 18px", fontSize: 16, fontFamily: "var(--font-mono)", background: "var(--bg-input)", color: "var(--text)", border: "1px solid var(--border)", borderRadius: 10, boxSizing: "border-box" };
 const restartBtn: CSSProperties = { padding: "13px 16px", fontSize: 13, fontWeight: 700, border: "1px solid var(--border)", borderRadius: 10, background: "var(--bg-card)", color: "var(--text-secondary)", cursor: "pointer", flexShrink: 0 };
 
+const gaiolaWrap: CSSProperties = { display: "flex", alignItems: "center", gap: 8, padding: "5px 8px 5px 12px", border: "1px solid var(--border)", borderRadius: 999, background: "var(--bg-card)", fontSize: 12, fontWeight: 700, color: "var(--text-secondary)" };
+const gaiolaWrapCheia: CSSProperties = { borderColor: "#dc2626", background: "var(--danger-bg)" };
+const gaiolaBar: CSSProperties = { display: "block", width: 72, height: 5, borderRadius: 999, background: "var(--bg-input)", overflow: "hidden" };
+const gaiolaBtn: CSSProperties = { padding: "5px 10px", fontSize: 11, fontWeight: 700, border: "1px solid var(--border)", borderRadius: 999, background: "var(--bg-input)", color: "var(--text)", cursor: "pointer", whiteSpace: "nowrap" };
+const gaiolaBtnCheia: CSSProperties = { background: "#dc2626", borderColor: "#dc2626", color: "white" };
+const romaneioSelect: CSSProperties = { padding: "10px 12px", background: "var(--bg-input)", border: "1px solid var(--border)", borderRadius: 10, color: "var(--text)", fontSize: 14, fontFamily: "inherit" };
 const modalOverlay: CSSProperties = { position: "fixed", inset: 0, background: "rgba(0,0,0,.5)", display: "grid", placeItems: "center", zIndex: 50, padding: 24 };
 const modalCard: CSSProperties = { display: "flex", flexDirection: "column", gap: 14, background: "var(--bg-elevated)", border: "1px solid var(--border)", borderRadius: 16, padding: 24, width: 460, maxWidth: "100%" };
 const modalTextarea: CSSProperties = { minHeight: 80, padding: "10px 12px", background: "var(--bg-input)", border: "1px solid var(--border)", borderRadius: 10, color: "var(--text)", fontSize: 14, resize: "vertical", fontFamily: "inherit" };

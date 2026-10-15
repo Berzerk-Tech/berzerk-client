@@ -8,7 +8,7 @@
 // mesmo código uma segunda vez).
 
 import type { LeituraResolvida } from "../services/orders";
-import { EXP_ERR, type AwbJaColetadoDetails } from "../services/expedicao";
+import { EXP_ERR, type AwbJaColetadoDetails, type GaiolaCheiaDetails, type GaiolaDoShip } from "../services/expedicao";
 
 /**
  * Fila de `ship` pendente (falha de rede ao fechar o pacote) — PERSISTIDA por
@@ -40,6 +40,13 @@ export type ShipRetryJob = {
   bloqueadoPorAwb?: boolean;
   /** Detalhes do 409 só pra montar a mensagem da barra — opcional mesmo com `bloqueadoPorAwb`. */
   awbColetado?: AwbJaColetadoDetails;
+  /**
+   * 409 `gaiola_cheia` (15/10): a gaiola aberta está no teto. O job fica na
+   * fila SEM reenvio automático até alguém fechar a gaiola (modal/widget), e
+   * aí a fila inteira é destravada de uma vez e reaperta na ordem. Repetir a
+   * cada 15 s só bateria no mesmo 409.
+   */
+  bloqueadoPorGaiola?: boolean;
 };
 
 export function loadShipRetry(): ShipRetryJob[] {
@@ -76,11 +83,18 @@ export function saveShipRetry(jobs: ShipRetryJob[]): void {
  *   falta de leituras (nuvem iTAG fora) passa sozinho quando elas voltarem.
  */
 export function proximoJobDaFila(queue: ShipRetryJob[], emAberto?: string | null): ShipRetryJob | null {
+  const livre = (j: ShipRetryJob) => !j.bloqueadoPorAwb && !j.bloqueadoPorGaiola && j.orderId !== emAberto;
   return (
-    queue.find((j) => !j.precisaMotivo && !j.bloqueadoPorAwb && j.orderId !== emAberto) ??
-    queue.find((j) => j.precisaMotivo && !j.bloqueadoPorAwb && !j.reapertadoComLeituras && j.orderId !== emAberto) ??
+    queue.find((j) => !j.precisaMotivo && livre(j)) ??
+    queue.find((j) => j.precisaMotivo && !j.reapertadoComLeituras && livre(j)) ??
     null
   );
+}
+
+/** Depois que a gaiola foi fechada: solta todos os jobs presos por `gaiola_cheia` (a fila reaperta na ordem). */
+export function destravarGaiola(queue: ShipRetryJob[]): ShipRetryJob[] {
+  if (!queue.some((j) => j.bloqueadoPorGaiola)) return queue;
+  return queue.map((j) => (j.bloqueadoPorGaiola ? { ...j, bloqueadoPorGaiola: false } : j));
 }
 
 /** Códigos em que o servidor discorda da conferência da mesa — precisam de motivo HUMANO (trava de supervisor). */
@@ -89,13 +103,19 @@ export const CODIGOS_CONFERENCIA = new Set<string>(["tags_incompletas", "pecas_i
 export const CODIGOS_DEFINITIVOS = new Set<string>([EXP_ERR.INVALID_STATUS, EXP_ERR.ORDER_NOT_FOUND]);
 
 export type ShipTentativa =
-  | { ok: true }
+  | {
+      ok: true;
+      /** Gaiola em que o pedido entrou, com a contagem já incluindo ele (ausente no nexus anterior). */
+      gaiola?: GaiolaDoShip;
+    }
   | {
       ok: false;
-      tipo: "rede" | "aguardar" | "conferencia" | "definitivo" | "awb_coletado";
+      tipo: "rede" | "aguardar" | "conferencia" | "definitivo" | "awb_coletado" | "gaiola_cheia";
       code: string | null;
       /** Só em `tipo: "awb_coletado"` — o AWB/data pra mostrar na barra vermelha; pode faltar (ver `bloqueadoPorAwb`). */
       awbColetado?: AwbJaColetadoDetails;
+      /** Só em `tipo: "gaiola_cheia"` — mensagem do servidor e números pro modal. */
+      gaiolaCheia?: GaiolaCheiaDetails;
     };
 
 /**
@@ -110,11 +130,22 @@ export type ShipTentativa =
  * - `tags_incompletas` & cia → NUNCA override automático: a trava de supervisor
  *                              existe pra um humano decidir — abre o modal de motivo;
  * - `invalid_status` / `order_not_found` → desiste e avisa (alguém mexeu no Nexus);
+ * - `gaiola_cheia`           → `tipo: "gaiola_cheia"`: fica na fila TRAVADO
+ *                              (`bloqueadoPorGaiola`) até a gaiola ser fechada;
  * - qualquer outro código    → fila, tenta de novo sozinho (rastreio/etiqueta chegam).
  */
-export function classificarCodigoShip(code: string, awbColetado: AwbJaColetadoDetails | null): ShipTentativa {
+export function classificarCodigoShip(
+  code: string,
+  awbColetado: AwbJaColetadoDetails | null,
+  gaiolaCheia?: GaiolaCheiaDetails | null,
+): ShipTentativa {
   if (code === EXP_ERR.AWB_JA_COLETADO) {
     return { ok: false, tipo: "awb_coletado", code, awbColetado: awbColetado ?? undefined };
+  }
+  // Gaiola no teto: nada foi gravado, e repetir só bate no mesmo 409. Fica na
+  // fila travado até fechar a gaiola; o reenvio é disparado pelo fechamento.
+  if (code === EXP_ERR.GAIOLA_CHEIA) {
+    return { ok: false, tipo: "gaiola_cheia", code, gaiolaCheia: gaiolaCheia ?? undefined };
   }
   if (CODIGOS_CONFERENCIA.has(code)) return { ok: false, tipo: "conferencia", code };
   if (CODIGOS_DEFINITIVOS.has(code)) return { ok: false, tipo: "definitivo", code };

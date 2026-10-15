@@ -47,6 +47,12 @@ export type ExpedicaoOrder = {
   items: OrderItem[];
   createdAt: string;
   updatedAt: string;
+  /**
+   * Só na resposta do `ship` pela MESA (nexus 15/10): a gaiola em que o
+   * pedido acabou de entrar, com a contagem JÁ incluindo ele. Ausente nas
+   * listagens, no ship sem tags e no nexus anterior.
+   */
+  gaiola?: GaiolaDoShip;
 };
 
 // ---------------------------------------------------------------------------
@@ -204,6 +210,10 @@ export const EXP_ERR = {
   /** Ver NEXUS_EXPEDICAO.md §8 — pedido devolvido pra fila com o MESMO AWB de
    *  um pacote que a J&T já coletou antes desta separação (duplicado). */
   AWB_JA_COLETADO: "awb_ja_coletado",
+  /** 409 do ship: a gaiola aberta está no teto (`expedicao_gaiola_limite_pedidos`). Nada foi gravado. */
+  GAIOLA_CHEIA: "gaiola_cheia",
+  /** 409 do `fecharGaiola`: sem gaiola aberta ou com zero pedidos. */
+  GAIOLA_VAZIA: "gaiola_vazia",
 } as const;
 
 /** Extrai o `{ error: 'CODIGO' }` de um ApiError (ou null se não for de negócio). */
@@ -238,6 +248,10 @@ export function shipErrorMessage(code: string | null): string {
       return "o pedido não foi encontrado.";
     case EXP_ERR.AWB_JA_COLETADO:
       return "esse AWB já foi coletado pela J&T antes desta separação (pacote duplicado).";
+    case EXP_ERR.GAIOLA_CHEIA:
+      return "a gaiola está cheia. Feche a gaiola pra continuar.";
+    case EXP_ERR.GAIOLA_VAZIA:
+      return "não há gaiola aberta com pedidos pra fechar.";
     default:
       return "erro no servidor de expedição.";
   }
@@ -272,6 +286,105 @@ export function awbJaColetadoDetails(e: unknown): AwbJaColetadoDetails | null {
     primeiroScanEm: b.primeiroScanEm,
     ultimoEvento: typeof b.ultimoEvento === "string" ? b.ultimoEvento : null,
   };
+}
+
+// ---------------------------------------------------------------------------
+// Gaiola da embalagem (nexus 15/10, `docs/expedicao-gaiola.md` no nexus)
+//
+// A gaiola é o contêiner que a J&T leva (~300 a 400 pedidos). Cada ship pela
+// mesa entra na gaiola aberta e o contador sobe no SERVIDOR (a embaladora
+// contava, mas duplicava). No teto o ship responde 409 `gaiola_cheia` até
+// alguém fechar a gaiola; o fechamento congela o romaneio dela.
+// ---------------------------------------------------------------------------
+
+/** Resumo que vem dentro do DTO do ship. */
+export type GaiolaDoShip = { id: string; numero: number; contagem: number; limite: number };
+
+export type Gaiola = {
+  id: string;
+  /** Número humano sequencial ("Gaiola 12"). */
+  numero: number;
+  abertaEm: string;
+  fechadaEm: string | null;
+  /** Pedidos na gaiola (ao vivo enquanto aberta; congelado no fechamento). */
+  contagem: number;
+  /** Romaneio congelado no fechamento (`getManifest`); nulo enquanto aberta. */
+  romaneioId: string | null;
+};
+
+/** `GET /expedicao/gaiola`: o contador da mesa. */
+export type GaiolaStatus = {
+  /** Gaiola aberta agora; `null` logo depois de um fechamento (a próxima nasce no próximo ship). */
+  aberta: Gaiola | null;
+  /** `expedicao_gaiola_limite_pedidos` vigente (0 = só conta, nunca trava). */
+  limite: number;
+  /** `limite > 0` e a aberta já está no teto: o próximo ship leva 409 `gaiola_cheia`. */
+  travada: boolean;
+  /** A última fechada, pra reimprimir o romaneio. */
+  ultimaFechada: Gaiola | null;
+};
+
+export type ManifestOrder = {
+  orderId: string;
+  tinyOrderNumber: string | null;
+  tinyAccount: string | null;
+  cliente: string | null;
+  trackingCode: string | null;
+  /** No romaneio da gaiola: a hora em que o pedido passou pela mesa. */
+  printedAt: string | null;
+};
+
+/** `ManifestDto` do nexus (romaneio diário e romaneio da gaiola, mesmo shape). */
+export type Manifest = {
+  id: string;
+  manifestNumber: string | number | null;
+  manifestDate: string | null;
+  orderCount: number;
+  closedAt: string | null;
+  closedByName: string | null;
+  notes: string | null;
+  orders: ManifestOrder[];
+};
+
+/** Corpo extra do 409 `gaiola_cheia` (além do `error`). */
+export type GaiolaCheiaDetails = {
+  message: string;
+  gaiolaNumero: number | null;
+  contagem: number | null;
+  limite: number | null;
+};
+
+/** Extrai os detalhes de um 409 `gaiola_cheia` (null se é outro erro). Corpo incompleto ainda conta: o código basta pra travar. */
+export function gaiolaCheiaDetails(e: unknown): GaiolaCheiaDetails | null {
+  if (expedicaoErrorCode(e) !== EXP_ERR.GAIOLA_CHEIA) return null;
+  const b = (e as ApiError).body as Record<string, unknown>;
+  return {
+    message: typeof b.message === "string" && b.message.trim() ? b.message : "A gaiola está cheia. Feche a gaiola pra continuar expedindo.",
+    gaiolaNumero: typeof b.gaiolaNumero === "number" ? b.gaiolaNumero : null,
+    contagem: typeof b.contagem === "number" ? b.contagem : null,
+    limite: typeof b.limite === "number" ? b.limite : null,
+  };
+}
+
+/** Contador da gaiola aberta. 404 = nexus anterior (esconder o widget; nunca bloquear o ship por isso). */
+export function getGaiola(): Promise<GaiolaStatus> {
+  if (isExpedicaoSimulacao()) return Promise.resolve(mockGaiolaStatus());
+  return apiRequest<GaiolaStatus>("/expedicao/gaiola");
+}
+
+/** Fecha a gaiola aberta e congela o romaneio dela. 409 `gaiola_vazia` sem pedido. Não abre a próxima. */
+export function fecharGaiola(notes?: string | null): Promise<{ gaiola: Gaiola; romaneio: Manifest }> {
+  if (isExpedicaoSimulacao()) return Promise.resolve(mockFecharGaiola(notes ?? null));
+  return apiRequest<{ gaiola: Gaiola; romaneio: Manifest }>("/expedicao/gaiola/fechar", {
+    method: "POST",
+    body: notes && notes.trim() ? { notes: notes.trim() } : {},
+  });
+}
+
+/** Romaneio já fechado (reimpressão). */
+export function getManifest(id: string): Promise<Manifest> {
+  if (isExpedicaoSimulacao()) return Promise.resolve(mockManifest(id));
+  return apiRequest<Manifest>(`/expedicao/manifests/${id}`);
 }
 
 // ---------------------------------------------------------------------------
@@ -370,7 +483,8 @@ export function shipOrder(
    *  server-side). Aditivo — sem ela o corpo do `ship` fica como sempre foi. */
   liberacaoAwbColetado?: LiberacaoAwbColetado,
 ): Promise<ExpedicaoOrder> {
-  if (isExpedicaoSimulacao()) return Promise.resolve(mockShip(orderId));
+  // `new Promise`: o 409 `gaiola_cheia` simulado vira rejeição, como na rede.
+  if (isExpedicaoSimulacao()) return new Promise((resolve) => resolve(mockShip(orderId)));
   // `leituras` = resolução EPC→peça que a mesa fez pela nuvem iTAG (mesmo
   // shape do `complete` da separação). Sem ela o nexus casa as peças SÓ pela
   // réplica rfid_epc_inventory e todo EPC fora da réplica vira "peça
@@ -558,5 +672,74 @@ function mockDocumentos(orderId: string): Documentos {
 
 function mockShip(orderId: string): ExpedicaoOrder {
   const o = mockOrderFor([orderId]);
-  return { ...o, status: "shipped", shippedAt: new Date().toISOString(), updatedAt: new Date().toISOString() };
+  const gaiola = mockGaiolaShip(); // lança o 409 `gaiola_cheia` no teto da simulação
+  return { ...o, status: "shipped", shippedAt: new Date().toISOString(), updatedAt: new Date().toISOString(), gaiola };
+}
+
+// ---- simulação da gaiola (sem servidor) ----
+let mockGaiola: { numero: number; contagem: number; abertaEm: string } | null = null;
+let mockUltima: Gaiola | null = null;
+const MOCK_GAIOLA_LIMITE = 5;
+
+function mockGaiolaStatus(): GaiolaStatus {
+  const aberta: Gaiola | null = mockGaiola
+    ? { id: `gaiola-${mockGaiola.numero}`, numero: mockGaiola.numero, abertaEm: mockGaiola.abertaEm, fechadaEm: null, contagem: mockGaiola.contagem, romaneioId: null }
+    : null;
+  return { aberta, limite: MOCK_GAIOLA_LIMITE, travada: !!aberta && aberta.contagem >= MOCK_GAIOLA_LIMITE, ultimaFechada: mockUltima };
+}
+
+/** Sobe o contador da simulação; devolve o resumo do ship ou lança o 409 `gaiola_cheia`. */
+function mockGaiolaShip(): GaiolaDoShip {
+  if (mockGaiola && mockGaiola.contagem >= MOCK_GAIOLA_LIMITE) {
+    throw new ApiError(409, "A gaiola está cheia (simulação).", {
+      error: EXP_ERR.GAIOLA_CHEIA,
+      message: `Gaiola ${mockGaiola.numero} está cheia (${mockGaiola.contagem}/${MOCK_GAIOLA_LIMITE}). Feche a gaiola pra continuar.`,
+      gaiolaNumero: mockGaiola.numero,
+      contagem: mockGaiola.contagem,
+      limite: MOCK_GAIOLA_LIMITE,
+    });
+  }
+  if (!mockGaiola) mockGaiola = { numero: (mockUltima?.numero ?? 0) + 1, contagem: 0, abertaEm: new Date().toISOString() };
+  mockGaiola.contagem += 1;
+  return { id: `gaiola-${mockGaiola.numero}`, numero: mockGaiola.numero, contagem: mockGaiola.contagem, limite: MOCK_GAIOLA_LIMITE };
+}
+
+function mockFecharGaiola(notes: string | null): { gaiola: Gaiola; romaneio: Manifest } {
+  if (!mockGaiola || mockGaiola.contagem === 0) {
+    throw new ApiError(409, "Sem gaiola aberta.", { error: EXP_ERR.GAIOLA_VAZIA, message: "Não há gaiola aberta com pedidos pra fechar." });
+  }
+  const agora = new Date().toISOString();
+  const romaneioId = `romaneio-${mockGaiola.numero}`;
+  const gaiola: Gaiola = { id: `gaiola-${mockGaiola.numero}`, numero: mockGaiola.numero, abertaEm: mockGaiola.abertaEm, fechadaEm: agora, contagem: mockGaiola.contagem, romaneioId };
+  const romaneio: Manifest = {
+    ...mockManifest(romaneioId),
+    manifestNumber: mockGaiola.numero,
+    orderCount: mockGaiola.contagem,
+    closedAt: agora,
+    notes: `Gaiola ${mockGaiola.numero}${notes ? ` · ${notes}` : ""}`,
+    orders: Array.from({ length: mockGaiola.contagem }, (_, i) => ({
+      orderId: `sim-${i + 1}`,
+      tinyOrderNumber: `${900000 + i + 1}`,
+      tinyAccount: i % 2 ? "FM" : "JT",
+      cliente: `Cliente simulado ${i + 1}`,
+      trackingCode: `BR${String(100000 + i).padStart(9, "0")}JT`,
+      printedAt: agora,
+    })),
+  };
+  mockUltima = gaiola;
+  mockGaiola = null;
+  return { gaiola, romaneio };
+}
+
+function mockManifest(id: string): Manifest {
+  return {
+    id,
+    manifestNumber: mockUltima?.numero ?? 1,
+    manifestDate: new Date().toISOString().slice(0, 10),
+    orderCount: mockUltima?.contagem ?? 0,
+    closedAt: mockUltima?.fechadaEm ?? new Date().toISOString(),
+    closedByName: "Simulação",
+    notes: mockUltima ? `Gaiola ${mockUltima.numero}` : null,
+    orders: [],
+  };
 }
