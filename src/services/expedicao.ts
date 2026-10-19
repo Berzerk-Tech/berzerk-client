@@ -55,7 +55,8 @@ export type ExpedicaoOrder = {
    * pedido acabou de entrar, com a contagem JÁ incluindo ele. Ausente nas
    * listagens, no ship sem tags e no nexus anterior.
    */
-  gaiola?: GaiolaDoShip;
+  /** `null` no pedido do Mercado Livre (a API não o põe em gaiola J&T). */
+  gaiola?: GaiolaDoShip | null;
 };
 
 // ---------------------------------------------------------------------------
