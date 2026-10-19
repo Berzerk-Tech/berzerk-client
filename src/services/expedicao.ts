@@ -32,6 +32,8 @@ export type ExpedicaoOrder = {
   clienteNome: string | null;
   dataEmissao: string | null;
   prioritario: boolean;
+  /** Canal do pedido (nexus 19/10). Ausente = e-commerce. */
+  canal?: "ecommerce" | "mercado_livre";
   /** Nome real do rastreio (não "trackingCode"). */
   trackingNumber: string | null;
   rfidTags: string[] | null;

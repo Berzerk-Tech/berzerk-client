@@ -17,6 +17,7 @@ import { miniatura } from "../lib/imagens";
 import { agregarLote, mesclarProdutos } from "../lib/agregarLote";
 import {
   getQueueProducts,
+  type CanalSeparacao,
   type Order,
   type QueueFilters,
   type QueueProduct,
@@ -33,20 +34,21 @@ import {
 // pior caso é a operadora reaplicar um filtro que já tinha marcado.
 const STORAGE_KEY = "berzerk_picking_filters_v2";
 
-function queueKey(mode: SeparationMode, size: string): string {
-  return `${mode}:${size}`;
+function queueKey(mode: SeparationMode, size: string, canal?: CanalSeparacao): string {
+  // Fila do Mercado Livre tem chave própria (`ml:mode:size`): não mistura com o e-commerce.
+  return canal === "mercado_livre" ? `ml:${mode}:${size}` : `${mode}:${size}`;
 }
 
 export function emptyFilters(): QueueFilters {
   return {};
 }
 
-export function loadFilters(mode: SeparationMode, size: string): QueueFilters {
+export function loadFilters(mode: SeparationMode, size: string, canal?: CanalSeparacao): QueueFilters {
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
     if (!raw) return {};
     const all = JSON.parse(raw) as Record<string, QueueFilters | undefined>;
-    const f = all[queueKey(mode, size)];
+    const f = all[queueKey(mode, size, canal)];
     if (!f) return {};
     // Janela de data salva por uma versão anterior (dateFrom ≠ dateTo) é
     // DESCARTADA: o seletor novo é de dia único e não teria como mostrar a
@@ -64,11 +66,11 @@ export function loadFilters(mode: SeparationMode, size: string): QueueFilters {
   }
 }
 
-export function saveFilters(mode: SeparationMode, size: string, f: QueueFilters): void {
+export function saveFilters(mode: SeparationMode, size: string, f: QueueFilters, canal?: CanalSeparacao): void {
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
     const all = raw ? (JSON.parse(raw) as Record<string, QueueFilters | undefined>) : {};
-    all[queueKey(mode, size)] = f;
+    all[queueKey(mode, size, canal)] = f;
     localStorage.setItem(STORAGE_KEY, JSON.stringify(all));
   } catch {
     /* localStorage indisponível ou corrompido: filtros valem só na sessão */
@@ -83,7 +85,7 @@ type Props = {
    *  `sizes` é o BUCKET real (XG cobre XXG/G1/G2/G3; P cobre PP — ver
    *  `src/lib/filas.ts` e o comentário em `src/services/orders.ts`); sem ele
    *  a lista de produtos do filtro fica incompleta em filas P/XG. */
-  queue?: { mode: SeparationMode; size: string; sizes?: string[] };
+  queue?: { mode: SeparationMode; size: string; sizes?: string[]; canal?: CanalSeparacao };
   /** Lote da operadora (memória). O `queue-products` do nexus só enxerga a
    *  FILA (pedidos sem dono); o que ela já puxou só aparece por aqui. */
   lote?: Order[];
@@ -123,6 +125,7 @@ export function PickingFiltersModal({ filters, queue, lote, onApply, onClear, on
       sizes: queue.sizes,
       dateFrom: dataSel,
       dateTo: dataSel,
+      canal: queue.canal,
     })
       .then((d) => alive && setDaFila(d.products))
       .catch((e) => {

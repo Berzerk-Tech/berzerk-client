@@ -1605,6 +1605,7 @@ function OrderPanel({
         <span style={{ ...orderKicker, color: accent }}>― {headline} ―</span>
         <span style={orderAccount}>{order.tinyAccount}</span>
       </div>
+      {order.canal === "mercado_livre" && <div style={seloMercadoLivre}>MERCADO LIVRE</div>}
       <div style={orderPanelMain}>
         <div style={orderCol}>
           <span style={orderLabel}>Pedido</span>
@@ -1625,6 +1626,19 @@ function OrderPanel({
     </div>
   );
 }
+
+// Selo grande: a etiqueta do Mercado Livre é outra e vai pra outro lugar.
+const seloMercadoLivre: CSSProperties = {
+  alignSelf: "flex-start",
+  padding: "8px 18px",
+  fontSize: 24,
+  fontWeight: 800,
+  letterSpacing: 2,
+  color: "var(--info-text)",
+  background: "var(--info-bg)",
+  border: "2px solid var(--info-text)",
+  borderRadius: 8,
+};
 
 function Meta({ label, value, mono }: { label: string; value: string; mono?: boolean }) {
   return (

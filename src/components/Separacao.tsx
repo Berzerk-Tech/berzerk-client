@@ -12,10 +12,12 @@ import { subscribeQueueChanged } from "../lib/realtime";
 import {
   claimOrder,
   devolverLote,
+  filaMercadoLivreDesligada,
   getEntregaEmMaos,
   getMeusPedidos,
   getQueueCounts,
   pedidoIndisponivel,
+  type CanalSeparacao,
   type EntregaEmMaosPedido,
   type EntregaEmMaosResponse,
   type LiberacaoSupervisor,
@@ -34,12 +36,18 @@ type Selected = string | null;
 export function Separacao({ onBack }: Props) {
   const rfid = useRfid();
   const [mode, setMode] = useState<QueueMode>("puro");
+  /** Canal da fila: e-commerce (padrão) ou a aba do Mercado Livre. */
+  const [canal, setCanal] = useState<CanalSeparacao>("ecommerce");
+  /** Trava do Nexus desligada: 409 `fila_mercado_livre_desligada` nas contagens do canal ML. */
+  const [mlDesligada, setMlDesligada] = useState(false);
   const [selected, setSelected] = useState<Selected>(null);
   const [confirmed, setConfirmed] = useState<{
     size: Queue;
     mode: QueueMode;
     /** Tamanhos REAIS do bucket no momento do confirm (o claim usa esta lista). */
     sizes: string[];
+    /** Canal da fila (ausente = e-commerce). */
+    canal?: CanalSeparacao;
     /** Entrou por "Retomar" com uma lista de picking já impressa na mão. */
     retomandoLista?: boolean;
     /** Entrou pela aba "Entrega em mãos": o pedido pego pelo clique abre na mesa. */
@@ -83,16 +91,27 @@ export function Separacao({ onBack }: Props) {
   // (banner próprio), mas mantém a última contagem boa na tela.
   useEffect(() => {
     let alive = true;
+    // Troca de canal: a contagem do outro canal não vale, e o aviso da trava recomeça.
+    setCounts(null);
+    setMlDesligada(false);
     const load = () => {
-      getQueueCounts()
+      getQueueCounts(undefined, canal)
         .then((c) => {
           if (!alive) return;
           setCounts(c);
+          setMlDesligada(false);
           setAuthError(null);
           setRedeError(null);
         })
         .catch((err) => {
           if (!alive) return;
+          if (canal === "mercado_livre" && filaMercadoLivreDesligada(err)) {
+            setCounts(null);
+            setMlDesligada(true);
+            setAuthError(null);
+            setRedeError(null);
+            return;
+          }
           if (!(err instanceof ApiError)) {
             setRedeError(
               "Sem resposta da API do Nexus (rede ou servidor fora). As filas abaixo podem estar desatualizadas.",
@@ -121,7 +140,7 @@ export function Separacao({ onBack }: Props) {
       clearInterval(id);
       unsubscribe();
     };
-  }, []);
+  }, [canal]);
 
   // Lote em aberto de antes: app fechado no meio do turno, troca de estação,
   // sessão derrubada. Sem isto os pedidos ficariam reservados e invisíveis pra
@@ -170,9 +189,21 @@ export function Separacao({ onBack }: Props) {
       <SeparacaoRunner
         // Instância nova por sessão: refs lidas na montagem (`pedidoInicial`,
         // `retomandoLista`, filtros) não podem sobreviver a uma troca de fila.
-        key={confirmed.pedidoInicial?.id ?? `${confirmed.mode}-${confirmed.size}`}
-        title={emMaos ? "Separação — Entrega em mãos" : isMixed ? "Separação — Mistos" : "Separação"}
-        kicker={emMaos ? "Entrega em mãos" : `Fila ${confirmed.size} — ${isMixed ? "Mistos" : "Puro"}`}
+        key={confirmed.pedidoInicial?.id ?? `${confirmed.canal ?? "ecommerce"}-${confirmed.mode}-${confirmed.size}`}
+        title={
+          emMaos
+            ? "Separação — Entrega em mãos"
+            : confirmed.canal === "mercado_livre"
+              ? `Separação Mercado Livre${isMixed ? " — Mistos" : ""}`
+              : isMixed
+                ? "Separação — Mistos"
+                : "Separação"
+        }
+        kicker={
+          emMaos
+            ? "Entrega em mãos"
+            : `Fila ${confirmed.size} — ${isMixed ? "Mistos" : "Puro"}${confirmed.canal === "mercado_livre" ? " · Mercado Livre" : ""}`
+        }
         emptyHint={
           emMaos
             ? "Nenhum pedido de entrega em mãos na sua mesa. Volte e pegue outro na lista."
@@ -184,6 +215,7 @@ export function Separacao({ onBack }: Props) {
           mode: isMixed ? "total" : "normal",
           size: confirmed.size,
           sizes: confirmed.sizes,
+          canal: confirmed.canal,
         }}
         retomandoLista={confirmed.retomandoLista}
         pedidoInicial={confirmed.pedidoInicial}
@@ -235,7 +267,7 @@ export function Separacao({ onBack }: Props) {
           .filter((t) => t.length > 0),
       ]),
     );
-    return { size: q, mode: m, sizes };
+    return { size: q, mode: m, sizes, canal: primeiro.canal === "mercado_livre" ? ("mercado_livre" as const) : undefined };
   })();
 
   /**
@@ -397,6 +429,7 @@ export function Separacao({ onBack }: Props) {
               {emAberto.length === 1 ? "pedido em aberto" : "pedidos em aberto"} na fila{" "}
               <strong>
                 {filaEmAberto.size} {filaEmAberto.mode === "mistos" ? "Mistos" : "Puro"}
+                {filaEmAberto.canal === "mercado_livre" ? " · Mercado Livre" : ""}
               </strong>
               .{" "}
             </>
@@ -444,6 +477,24 @@ export function Separacao({ onBack }: Props) {
 
         <div style={tabsRow}>
           <div style={modeTabs}>
+            {(["ecommerce", "mercado_livre"] as const).map((c) => (
+              <button
+                key={c}
+                onClick={() => {
+                  if (c === canal) return;
+                  setCanal(c);
+                  setSelected(null);
+                }}
+                style={canal === c ? modeTabOn : modeTab}
+              >
+                {c === "ecommerce" ? "E-commerce" : "Mercado Livre"}
+              </button>
+            ))}
+          </div>
+        </div>
+
+        <div style={tabsRow}>
+          <div style={modeTabs}>
             {(["puro", "mistos"] as const).map((m) => (
               <button
                 key={m}
@@ -464,6 +515,10 @@ export function Separacao({ onBack }: Props) {
           )}
         </div>
 
+        {mlDesligada ? (
+          <div style={mesaDownBanner}>Fila Mercado Livre ainda não liberada no Nexus</div>
+        ) : (
+        <>
         <div style={grid}>
           {QUEUES.map((q) => (
             <QueueTile
@@ -489,6 +544,8 @@ export function Separacao({ onBack }: Props) {
             </span>
           </div>
         )}
+        </>
+        )}
 
         <button
           onClick={() =>
@@ -497,14 +554,15 @@ export function Separacao({ onBack }: Props) {
               size: effectiveSelected,
               mode,
               sizes: sizesForQueue(effectiveSelected, mode),
+              canal,
             })
           }
-          disabled={!effectiveSelected || separandoEmMaos !== null}
-          style={!effectiveSelected || separandoEmMaos !== null ? startBtnDisabled : startBtn}
+          disabled={!effectiveSelected || mlDesligada || separandoEmMaos !== null}
+          style={!effectiveSelected || mlDesligada || separandoEmMaos !== null ? startBtnDisabled : startBtn}
         >
           Começar a separar
           {effectiveSelected
-            ? ` — ${effectiveSelected} ${mode === "mistos" ? "Mistos" : "Puro"}`
+            ? ` — ${effectiveSelected} ${mode === "mistos" ? "Mistos" : "Puro"}${canal === "mercado_livre" ? " · Mercado Livre" : ""}`
             : ""}
         </button>
 

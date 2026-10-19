@@ -56,6 +56,7 @@ import {
   type LiberacaoSupervisor,
   type Order,
   type OrderItem,
+  type CanalSeparacao,
   type QueueDatesResponse,
   type QueueFilters,
   type QueueListItem,
@@ -386,7 +387,7 @@ type Props = {
    * tamanhos REAIS do bucket — é a lista que vai no lote, pra XG cobrir
    * XXG/G1/G2/G3 e nenhum pedido ficar órfão.
    */
-  queue: { mode: SeparationMode; size: string; sizes: string[] };
+  queue: { mode: SeparationMode; size: string; sizes: string[]; canal?: CanalSeparacao };
   /**
    * Entrou RETOMANDO uma lista de picking já impressa. Nesse caso o app NÃO
    * puxa pedido novo: a folha na mão da coleta tem exatamente estes números, e
@@ -471,7 +472,7 @@ export function SeparacaoRunner({
   // Entrega em mãos: começa SEM filtro (o salvo da fila esconderia o pedido
   // que ela veio separar); nada é gravado até ela aplicar um.
   const [filters, setFilters] = useState<QueueFilters>(() =>
-    pedidoInicial ? emptyFilters() : loadFilters(queue.mode, queue.size),
+    pedidoInicial ? emptyFilters() : loadFilters(queue.mode, queue.size, queue.canal),
   );
   const filtersRef = useRef(filters);
   filtersRef.current = filters;
@@ -583,6 +584,7 @@ export function SeparacaoRunner({
                 mode: queue.mode,
                 sizes: queue.sizes,
                 filters: filtersRef.current,
+                canal: queue.canal,
                 ...(opts?.novaLista ? { novaLista: true } : {}),
               });
         const { fila, novos } = resposta;
@@ -1570,7 +1572,7 @@ export function SeparacaoRunner({
     filtersRef.current = f;
     // Sessão de entrega em mãos não grava: a chave seria a da fila real
     // derivada do pedido, e o recorte apareceria lá depois (filtro fantasma).
-    if (!pedidoInicial) saveFilters(queue.mode, queue.size, f);
+    if (!pedidoInicial) saveFilters(queue.mode, queue.size, f, queue.canal);
     // O pedido da mesa saiu do filtro? Se ela ainda não leu nada, a mesa segue
     // pro primeiro VISÍVEL (era isso que ela pediu ao filtrar). Se já tem
     // leitura, o pedido FICA — jogar fora a conferência dela seria pior — e o
@@ -2122,7 +2124,7 @@ function LoteSidebar({
   onEscolherData,
   onPickingGeral,
 }: {
-  queue: { mode: SeparationMode; size: string; sizes: string[] };
+  queue: { mode: SeparationMode; size: string; sizes: string[]; canal?: CanalSeparacao };
   /** JÁ na ordem local e JÁ filtrado — a sidebar não recorta nada por conta. */
   lote: Order[];
   /** Lote INTEIRO (sem os filtros de exibição): a busca olha aqui, senão pedido recuperado fora do recorte "some". */
@@ -2163,6 +2165,7 @@ function LoteSidebar({
         <div style={sidebarHeaderTop}>
           <span style={sidebarTitle}>
             Fila {queue.size} — {queue.mode === "total" ? "Mistos" : "Puro"}
+            {queue.canal === "mercado_livre" ? " · Mercado Livre" : ""}
           </span>
           <span style={sidebarCount}>
             {lote.length} {lote.length === 1 ? "pedido" : "pedidos"}
@@ -2289,7 +2292,7 @@ function DataMenu({
   valor,
   onEscolher,
 }: {
-  queue: { mode: SeparationMode; size: string; sizes: string[] };
+  queue: { mode: SeparationMode; size: string; sizes: string[]; canal?: CanalSeparacao };
   filters: QueueFilters;
   /** Datas do lote DELA — ver `datasDoLoteDela` em `SeparacaoRunner`. */
   doLote: QueueDatesResponse;
@@ -2305,7 +2308,7 @@ function DataMenu({
   const [ate, setAte] = useState(valor?.ate ?? "");
 
   // Troca de fila/filtro invalida a contagem — recarrega na próxima abertura.
-  useEffect(() => setDados(null), [queue.mode, queue.size, filters]);
+  useEffect(() => setDados(null), [queue.mode, queue.size, queue.canal, filters]);
 
   useEffect(() => {
     if (!aberto) return;
@@ -2314,7 +2317,7 @@ function DataMenu({
     let alive = true;
     // `sizes` é o BUCKET da fila (XG cobre XXG/G1/G2/G3): sem ele o seletor
     // contava só o tamanho-rótulo e mostrava menos pedidos do que a fila tem.
-    getQueueDates({ mode: queue.mode, size: queue.size, sizes: queue.sizes, filters })
+    getQueueDates({ mode: queue.mode, size: queue.size, sizes: queue.sizes, filters, canal: queue.canal })
       .then((d) => {
         if (!alive) return;
         setDados(d);
@@ -2328,7 +2331,7 @@ function DataMenu({
     return () => {
       alive = false;
     };
-  }, [aberto, queue.mode, queue.size, filters]);
+  }, [aberto, queue.mode, queue.size, queue.canal, filters]);
 
   useEffect(() => {
     if (!aberto) return;
@@ -2742,6 +2745,7 @@ function OrderView({
           </div>
         </div>
         <div style={orderMeta}>
+          {order.canal === "mercado_livre" && <span style={badgeMercadoLivre}>MERCADO LIVRE</span>}
           {order.entregaEmMaos && <span style={badgeEntrega}>Entrega em mãos</span>}
           {order.prioritario && <span style={badgePrio}>Prioritário</span>}
           {order.channel && <span style={badge}>{order.channel}</span>}
@@ -3654,6 +3658,15 @@ const badgeEntrega: CSSProperties = {
   color: "var(--info-text)",
   background: "var(--info-bg)",
   border: "1px solid var(--info-text)",
+};
+
+// Selo grande: a etiqueta do Mercado Livre é outra e vai pra outro lugar.
+const badgeMercadoLivre: CSSProperties = {
+  ...badgeEntrega,
+  fontSize: 16,
+  fontWeight: 800,
+  letterSpacing: 1,
+  padding: "6px 14px",
 };
 
 const clienteNomeStyle: CSSProperties = {
