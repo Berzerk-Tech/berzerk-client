@@ -21,6 +21,7 @@ import { getLabelPrinter } from "../services/printerConfig";
 import {
   getQueueProducts,
   marcarListaImpressa,
+  type CanalSeparacao,
   type Order,
   type QueueFilters,
   type QueueProduct,
@@ -55,7 +56,7 @@ const FORA_DO_FILTRO = "Em conferência (fora do filtro)";
 type Escopo = "lote" | "fila";
 
 type Props = {
-  queue: { mode: SeparationMode; size: string; sizes: string[] };
+  queue: { mode: SeparationMode; size: string; sizes: string[]; canal?: CanalSeparacao };
   /** Filtros ativos — data de emissão (recorte De/Até, pontas opcionais) e
    *  produto. O picking mostra exatamente o que a fila/sidebar mostram. */
   filters: QueueFilters;
@@ -145,6 +146,7 @@ export function PickingGeralModal({
       dateFrom: filters.dateFrom,
       dateTo: filters.dateTo,
       filters,
+      canal: queue.canal,
     })
       .then((d) => {
         if (!alive) return;
@@ -273,7 +275,7 @@ export function PickingGeralModal({
   const dataLabel = labelRecorte(filters.dateFrom, filters.dateTo) ?? "todas as datas";
   const escopoLabel = escopo === "lote" ? (rotuloLote ?? "Meu lote") : "Fila inteira";
   const semBancada = bancada ? `sem ${bancada} (bancada)` : null;
-  const filaLabel = `Fila ${queue.size} · ${queue.mode === "total" ? "Mistos" : "Puros"}`;
+  const filaLabel = `Fila ${queue.size} · ${queue.mode === "total" ? "Mistos" : "Puros"}${queue.canal === "mercado_livre" ? " · Mercado Livre" : ""}`;
   const subtitulo =
     `${escopoLabel} · ${dataLabel} · ${total.produtos} produtos • ${total.itens} itens • ${total.pedidos} pedidos` +
     (semBancada ? ` · ${semBancada}` : "");

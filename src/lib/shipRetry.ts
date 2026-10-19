@@ -24,6 +24,8 @@ export type ShipRetryJob = {
   override?: string;
   /** Conta Tiny — pra reapertar `markLabelPrinted` quando o ship devolve JT_LABEL_REQUIRED. */
   conta?: "FM" | "JT";
+  /** Canal do pedido: Mercado Livre não tem etiqueta J&T (não reaperta `markLabelPrinted`). */
+  canal?: "ecommerce" | "mercado_livre";
   /** O servidor apontou peça faltando e a trava de supervisor está ligada: só sai com motivo humano. */
   precisaMotivo?: boolean;
   /** Resolução EPC→peça das tags lidas (nuvem iTAG) — o nexus casa as peças por ela. */
@@ -106,7 +108,7 @@ export type ShipTentativa =
   | {
       ok: true;
       /** Gaiola em que o pedido entrou, com a contagem já incluindo ele (ausente no nexus anterior). */
-      gaiola?: GaiolaDoShip;
+      gaiola?: GaiolaDoShip | null;
     }
   | {
       ok: false;

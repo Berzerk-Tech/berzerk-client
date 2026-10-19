@@ -139,7 +139,7 @@ async function expedirEmbalado(job: ShipRetryJob, segundaVez = false): Promise<S
   } catch (e) {
     const code = expedicaoErrorCode(e);
     if (!code) return { ok: false, tipo: "rede", code: null };
-    if (code === EXP_ERR.JT_LABEL_REQUIRED && job.numero && job.conta && !segundaVez) {
+    if (code === EXP_ERR.JT_LABEL_REQUIRED && job.numero && job.conta && !segundaVez && job.canal !== "mercado_livre") {
       try {
         await markLabelPrinted(job.numero, job.conta);
       } catch {
@@ -492,8 +492,18 @@ export function Expedicao({ onBack }: Props) {
       // Invalida qualquer resolve/identifica em voo: a etiqueta vai sair, e um
       // resultado atrasado re-identificando o pedido imprimiria de novo (saco a mais).
       resolveGenRef.current++;
-      setFlow({ kind: "printing", order });
       const oficial = modoRef.current === "oficial";
+      // Mercado Livre (19/10, interino): a etiqueta NÃO sai pela API do Tiny, é
+      // impressa no Tiny / Mercado Livre. Sem rastreio J&T, sem documento, sem
+      // `markLabelPrinted`: vai direto pra embalagem e o `ship` normal.
+      if (order.canal === "mercado_livre") {
+        if (rastreioTimer.current) window.clearTimeout(rastreioTimer.current);
+        rastreioTimer.current = null;
+        rastreioTentativasRef.current = null;
+        setFlow({ kind: "packing", order, lidas, override });
+        return;
+      }
+      setFlow({ kind: "printing", order });
       let docs: Documentos;
       try {
         docs = await getDocumentos(order.id);
@@ -679,7 +689,7 @@ export function Expedicao({ onBack }: Props) {
   const { confirmar, avisar, dialogo } = useDialogo();
 
   /** Atualiza o widget com o `gaiola` que veio no DTO do ship (contagem já inclui o pedido). */
-  const aplicarGaiolaDoShip = useCallback((g: GaiolaDoShip | undefined) => {
+  const aplicarGaiolaDoShip = useCallback((g: GaiolaDoShip | null | undefined) => {
     if (!g) return;
     setGaiola((prev) => ({
       aberta: {
@@ -742,6 +752,7 @@ export function Expedicao({ onBack }: Props) {
       lidas,
       override,
       conta: order.tinyAccount,
+      canal: order.canal,
       leituras: await leiturasDaMesa(lidas),
     };
     const r = await expedirEmbalado(job);
@@ -1605,6 +1616,12 @@ function OrderPanel({
         <span style={{ ...orderKicker, color: accent }}>― {headline} ―</span>
         <span style={orderAccount}>{order.tinyAccount}</span>
       </div>
+      {order.canal === "mercado_livre" && (
+        <>
+          <div style={seloMercadoLivre}>MERCADO LIVRE</div>
+          <div style={etiquetaMlLinha}>Etiqueta: imprimir no Tiny / Mercado Livre</div>
+        </>
+      )}
       <div style={orderPanelMain}>
         <div style={orderCol}>
           <span style={orderLabel}>Pedido</span>
@@ -1625,6 +1642,21 @@ function OrderPanel({
     </div>
   );
 }
+
+// Selo grande: a etiqueta do Mercado Livre é outra e vai pra outro lugar.
+const etiquetaMlLinha: CSSProperties = { fontSize: 15, fontWeight: 700, color: "var(--text)" };
+
+const seloMercadoLivre: CSSProperties = {
+  alignSelf: "flex-start",
+  padding: "8px 18px",
+  fontSize: 24,
+  fontWeight: 800,
+  letterSpacing: 2,
+  color: "var(--info-text)",
+  background: "var(--info-bg)",
+  border: "2px solid var(--info-text)",
+  borderRadius: 8,
+};
 
 function Meta({ label, value, mono }: { label: string; value: string; mono?: boolean }) {
   return (

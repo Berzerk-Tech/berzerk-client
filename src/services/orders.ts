@@ -18,6 +18,32 @@ export type OrderStatus =
 export type SeparationMode = "normal" | "total";
 export type OrderChannel = "shopify" | "yampi" | "manual" | "tiny";
 
+/**
+ * Canal da fila de separação (nexus 19/10): `ecommerce` é a fila de sempre;
+ * `mercado_livre` é a aba dos pedidos de expedição manual, atrás da trava
+ * `separacao_fila_mercado_livre_ativa` (desligada = 409
+ * `fila_mercado_livre_desligada`, ver `filaMercadoLivreDesligada`). O client
+ * SEMPRE envia o campo na fila (inclusive `ecommerce`): a API usa o valor
+ * explícito pra separar a posse da operadora entre as abas.
+ */
+export type CanalSeparacao = "ecommerce" | "mercado_livre";
+
+/** Campo `canal` do body (default `ecommerce`). */
+function canalBody(canal?: CanalSeparacao): { canal: CanalSeparacao } {
+  return { canal: canal ?? "ecommerce" };
+}
+
+/** Valor de `canal` na query (sempre presente na fila). */
+function canalQuery(canal?: CanalSeparacao): CanalSeparacao {
+  return canal ?? "ecommerce";
+}
+
+/** 409 `fila_mercado_livre_desligada` (trava desligada no Nexus). */
+export function filaMercadoLivreDesligada(e: unknown): boolean {
+  if (!(e instanceof ApiError) || e.status !== 409 || !e.body || typeof e.body !== "object") return false;
+  return (e.body as Record<string, unknown>).error === "fila_mercado_livre_desligada";
+}
+
 export type OrderItem = {
   id: string;
   ean: string | null;
@@ -52,6 +78,8 @@ export type Order = {
   clienteNome?: string | null;
   dataEmissao?: string | null;
   prioritario?: boolean;
+  /** Canal do pedido (nexus 19/10). Ausente = e-commerce (API antiga). */
+  canal?: CanalSeparacao;
   /** Quando ELA abriu o card pra conferir (`POST /separacao/:id/iniciar`).
    *  null/ausente = o servidor ainda pode realocar este pedido pra outra
    *  estação quando a fila acabar — ver `iniciarSeparacao`. */
@@ -198,9 +226,10 @@ function filtersBody(f?: QueueFilters): Record<string, unknown> {
  * dizia "637 pedidos" e a fila filtrada entregava 55. Nexus antigo ignora os
  * campos extras (zod strip) e devolve a fila inteira, como antes.
  */
-export function getQueueCounts(filters?: QueueFilters): Promise<QueueCounts> {
+export function getQueueCounts(filters?: QueueFilters, canal?: CanalSeparacao): Promise<QueueCounts> {
   return apiRequest<QueueCounts>("/separacao/queues", {
     query: {
+      canal: canalQuery(canal),
       dateFrom: filters?.dateFrom || undefined,
       dateTo: filters?.dateTo || undefined,
       includeProducts: filters?.includeProducts?.length
@@ -218,18 +247,22 @@ export function getMe(): Promise<Me> {
 }
 
 /** Claim de UM pedido — desde a 0.9.0 só o caminho degradado do lote. */
-export function claimNext(sizes: string[], filters?: QueueFilters): Promise<ClaimResponse> {
+export function claimNext(sizes: string[], filters?: QueueFilters, canal?: CanalSeparacao): Promise<ClaimResponse> {
   return apiRequest<ClaimResponse>("/separacao/claim", {
     method: "POST",
-    body: { sizes, ...filtersBody(filters) },
+    body: { sizes, ...filtersBody(filters), ...canalBody(canal) },
   });
 }
 
 /** Claim de UM misto — desde a 0.9.0 só o caminho degradado do lote. */
-export function claimNextMixed(sizes?: string[], filters?: QueueFilters): Promise<ClaimResponse> {
+export function claimNextMixed(
+  sizes?: string[],
+  filters?: QueueFilters,
+  canal?: CanalSeparacao,
+): Promise<ClaimResponse> {
   return apiRequest<ClaimResponse>("/separacao/claim-mixed", {
     method: "POST",
-    body: { ...(sizes && sizes.length > 0 ? { sizes } : {}), ...filtersBody(filters) },
+    body: { ...(sizes && sizes.length > 0 ? { sizes } : {}), ...filtersBody(filters), ...canalBody(canal) },
   });
 }
 
@@ -269,12 +302,14 @@ export function getQueueProducts(params: {
   dateFrom?: string;
   dateTo?: string;
   filters?: QueueFilters;
+  canal?: CanalSeparacao;
 }): Promise<QueueProductsResponse> {
   const f = params.filters;
   return comModo(params.mode, (mode) =>
     apiRequest<QueueProductsResponse>("/separacao/queue-products", {
       query: {
         mode,
+        canal: canalQuery(params.canal),
         // `size` continua indo pra nexus antigo entender o recorte; `sizes`
         // (plural) é o que o nexus novo usa, e vence quando os dois chegam.
         size: params.size,
@@ -332,12 +367,14 @@ export function getQueueDates(params: {
   /** BUCKET da fila — mesma semântica do lote. */
   sizes?: string[];
   filters?: QueueFilters;
+  canal?: CanalSeparacao;
 }): Promise<QueueDatesResponse> {
   const f = params.filters;
   return comModo(params.mode, (mode) =>
     apiRequest<QueueDatesResponse>("/separacao/queue-dates", {
       query: {
         mode,
+        canal: canalQuery(params.canal),
         size: params.size,
         sizes: params.sizes?.length ? params.sizes.join(",") : undefined,
         includeProducts: f?.includeProducts?.length ? f.includeProducts.join(",") : undefined,
@@ -391,6 +428,8 @@ export function claimLote(params: {
    * aberto. Nexus antigo ignora o campo: volta sem `novos` e sem pedido novo.
    */
   novaLista?: boolean;
+  /** Canal da fila (só enviado quando `mercado_livre`). */
+  canal?: CanalSeparacao;
 }): Promise<LoteResponse> {
   return comModo(params.mode, (mode) =>
     apiRequest<LoteResponse>("/separacao/lote", {
@@ -401,6 +440,7 @@ export function claimLote(params: {
         sizes: params.sizes,
         ...filtersBody(params.filters),
         ...(params.novaLista ? { novaLista: true } : {}),
+        ...canalBody(params.canal),
       },
     }),
   ).catch((e: unknown) => {
@@ -431,11 +471,12 @@ async function loteDegradado(params: {
   mode: SeparationMode;
   sizes: string[];
   filters?: QueueFilters;
+  canal?: CanalSeparacao;
 }): Promise<LoteResponse> {
   const { order } =
     params.mode === "total"
-      ? await claimNextMixed(params.sizes, params.filters)
-      : await claimNext(params.sizes, params.filters);
+      ? await claimNextMixed(params.sizes, params.filters, params.canal)
+      : await claimNext(params.sizes, params.filters, params.canal);
   return { orders: order ? [order] : [] };
 }
 
@@ -522,8 +563,12 @@ export function getEntregaEmMaos(): Promise<EntregaEmMaosResponse | null> {
  * tela usa o `order` desta resposta direto. 409 `pedido_indisponivel` quando
  * outra estação levou (ver `pedidoIndisponivel`).
  */
-export function claimOrder(orderId: string): Promise<ClaimResponse> {
-  return apiRequest<ClaimResponse>("/separacao/claim-order", { method: "POST", body: { orderId } });
+export function claimOrder(orderId: string, canal?: CanalSeparacao): Promise<ClaimResponse> {
+  return apiRequest<ClaimResponse>("/separacao/claim-order", {
+    method: "POST",
+    // Só vai com canal explícito: `separarEmMaos` (entrega em mãos) não envia.
+    body: { orderId, ...(canal ? { canal } : {}) },
+  });
 }
 
 /** Corpo do 409 `pedido_indisponivel` do `claimOrder` (null se é outro erro). */

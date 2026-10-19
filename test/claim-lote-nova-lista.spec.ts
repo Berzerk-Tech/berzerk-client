@@ -28,13 +28,13 @@ describe("claimLote novaLista", () => {
     chamadas.length = 0;
   });
 
-  it("sem novaLista o body é o de sempre", async () => {
+  it("sem novaLista o body é o de sempre (com canal ecommerce)", async () => {
     resposta = () => Promise.resolve({ orders: [], fila: { restantes: 3 } });
     const r = await claimLote({ mode: "total", sizes: ["M"] });
     expect(r.novos).toBeUndefined();
     const [path, opts] = chamadas[0];
     expect(path).toBe("/separacao/lote");
-    expect(opts?.body).toEqual({ mode: "total", sizes: ["M"] });
+    expect(opts?.body).toEqual({ mode: "total", sizes: ["M"], canal: "ecommerce" });
   });
 
   it("com novaLista manda o campo e devolve novos", async () => {
