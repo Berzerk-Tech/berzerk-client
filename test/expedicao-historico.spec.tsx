@@ -33,7 +33,7 @@ vi.mock("../src/services/expedicao", async () => {
 vi.mock("@tauri-apps/api/core", () => ({ invoke: (...a: unknown[]) => invoke(...a) }));
 
 const { ExpedicaoHistoryModal } = await import("../src/components/ExpedicaoHistoryModal");
-const { imprimirDocumentoDoPedido, documentoDaConta } = await import("../src/lib/reimpressao");
+const { imprimirDocumentoDoPedido, documentoDoPedido } = await import("../src/lib/reimpressao");
 const { ETIQUETA_UNICA } = await import("../src/lib/printer");
 
 function pedido(
@@ -136,9 +136,34 @@ describe("um pedido = UMA página 100×150", () => {
     registrarReimpressao.mockClear();
   });
 
-  it("etiqueta J&T em qualquer conta — a FM também sai pela J&T (03/09)", () => {
-    expect(documentoDaConta("JT")).toBe("etiqueta");
-    expect(documentoDaConta("FM")).toBe("etiqueta");
+  it("documento pelo CANAL: e-commerce → etiqueta J&T em qualquer conta (03/09); Mercado Livre → DANFE (20/10)", () => {
+    expect(documentoDoPedido({})).toBe("etiqueta");
+    expect(documentoDoPedido({ canal: "ecommerce" })).toBe("etiqueta");
+    expect(documentoDoPedido({ canal: "mercado_livre" })).toBe("danfe");
+  });
+
+  it("pedido Mercado Livre imprime a DANFE (uma página) e NUNCA a etiqueta", async () => {
+    getDocumentos.mockResolvedValue({
+      danfe: { chave_acesso: "3525", numero: "1", emitente: {}, cliente: {}, itens: [] },
+      etiqueta: { base64: "QUJD", formato: "pdf" },
+      trackingNumber: null,
+    });
+    const r = await imprimirDocumentoDoPedido({ id: "ord-ml", numero: "9", canal: "mercado_livre" }, "mesa");
+    expect(r.ok).toBe(true);
+    expect(invoke).toHaveBeenCalledTimes(1);
+    const [comando, args] = invoke.mock.calls[0] as [string, { base64: string; jobName: string; printSettings: string }];
+    expect(comando).toBe("print_pdf_silent");
+    expect(args.base64).not.toBe("QUJD");
+    expect(args.jobName).toContain("DANFE");
+    expect(args.printSettings).toBe("1,fit");
+  });
+
+  it("pedido Mercado Livre sem NF: aviso, sem imprimir", async () => {
+    getDocumentos.mockResolvedValue({ danfe: null, etiqueta: { base64: "QUJD", formato: "pdf" }, trackingNumber: null });
+    const r = await imprimirDocumentoDoPedido({ id: "ord-ml", numero: "9", canal: "mercado_livre" }, "mesa");
+    expect(r.ok).toBe(false);
+    expect(r.mensagem).toContain("não tem nota fiscal");
+    expect(invoke).not.toHaveBeenCalled();
   });
 
   it("PDF de DUAS páginas da transportadora sai como UMA etiqueta só", async () => {

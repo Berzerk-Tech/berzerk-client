@@ -75,8 +75,9 @@ export type JaExpedido = {
   epc: string;
   orderId: string;
   numero: string | null;
-  /** Conta Tiny — decide QUAL documento reimprimir (JT: etiqueta; FM: DANFE). */
   tinyAccount: "FM" | "JT";
+  /** Decide QUAL documento reimprimir: Mercado Livre → DANFE; ausente/e-commerce → etiqueta J&T. */
+  canal?: "ecommerce" | "mercado_livre";
   shippedAt: string | null;
   shippedBy: string | null;
   shippedByEmail: string | null;
@@ -175,6 +176,8 @@ export type ExpedicaoHistoryOrder = {
   shippedByNome: string | null;
   trackingNumber: string | null;
   tinyAccount: "FM" | "JT";
+  /** Mercado Livre reimprime a DANFE; ausente/e-commerce, a etiqueta J&T. */
+  canal?: "ecommerce" | "mercado_livre";
   channel: OrderChannel | null;
   status: OrderStatus;
   itemCount: number;
