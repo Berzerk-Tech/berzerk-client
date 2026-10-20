@@ -5,9 +5,8 @@
 //
 //   **UM pedido = UM documento = UMA página 100×150.**
 //
-// Qual documento sai depende da CONTA TINY, nunca os dois:
-//   - `JT` → etiqueta da transportadora (o PDF que a J&T manda);
-//   - `FM` → DANFE simplificada, que É a etiqueta desses pedidos.
+// Qual documento sai depende do CANAL do pedido (`documentoDoPedido`), nunca
+// os dois: e-commerce → etiqueta da J&T; Mercado Livre → DANFE simplificada.
 //
 // Isso não é preferência estética: a máquina de embalagem solta UM SACO POR
 // ETIQUETA IMPRESSA. Duas páginas = dois sacos. Era exatamente o que estava
@@ -15,7 +14,7 @@
 // jobs pra mesma impressora térmica, e todo pedido JT saía com um saco a mais.
 //
 // A reimpressão pelo histórico usa o MESMO caminho e a MESMA escolha por
-// conta, e NUNCA muda status: só busca o documento (`documentos`, que não olha
+// canal, e NUNCA muda status: só busca o documento (`documentos`, que não olha
 // status) e manda pra impressora. O `registrarReimpressao` é trilha, não
 // transição de negócio.
 
@@ -35,23 +34,25 @@ export type ReimpressaoResultado = {
   mensagem: string;
 };
 
+/** Pedido com canal (nexus 19/10). Ausente = e-commerce. */
+export type PedidoComCanal = { canal?: "ecommerce" | "mercado_livre" };
+
 /**
- * Documento de expedição: SEMPRE a etiqueta da J&T, em qualquer conta.
- *
- * A regra antiga (JT → etiqueta, FM → DANFE) vinha do legado, de quando a
- * conta FM despachava pela FM Transportes e a DANFE simplificada era a
- * etiqueta desses pacotes. Hoje a conta FM também sai pela J&T (Frenet) e
- * a etiqueta existe pra ela — em 03/09, 1.030 dos 1.032 pedidos FM do dia
- * tinham etiqueta no Nexus e a mesa imprimia DANFE em todos. Decisão do
- * Leonardo (03/09): etiqueta J&T sempre; sem etiqueta, a mesa não expede
- * (`etiqueta_ausente`), não cai pra DANFE. O parâmetro fica só pra não
- * mexer nas chamadas.
+ * Documento de expedição, pelo CANAL do pedido (nunca pela conta Tiny):
+ *   - e-commerce → etiqueta da J&T, em qualquer conta. A regra antiga
+ *     (JT → etiqueta, FM → DANFE) vinha do legado, de quando a conta FM
+ *     despachava pela FM Transportes; hoje a FM também sai pela J&T e, sem
+ *     etiqueta, a mesa não expede (`etiqueta_ausente`) — decisão de 03/09;
+ *   - Mercado Livre → DANFE simplificada (20/10). A etiqueta do Mercado
+ *     Envios é impressa no Tiny / Mercado Livre, não existe no Nexus; a DANFE
+ *     é o que identifica o pacote na embalagem, como o legado fazia pra
+ *     pedido sem etiqueta J&T.
  */
-export function documentoDaConta(_tinyAccount: string): DocumentoReimpressao {
-  return "etiqueta";
+export function documentoDoPedido(pedido: PedidoComCanal): DocumentoReimpressao {
+  return pedido.canal === "mercado_livre" ? "danfe" : "etiqueta";
 }
 
-/** Rótulo do botão/aviso — segue a escolha por conta. */
+/** Rótulo do botão/aviso — segue a escolha por canal. */
 export function rotuloDocumento(documento: DocumentoReimpressao): string {
   return documento === "etiqueta" ? "etiqueta J&T" : "DANFE";
 }
@@ -66,11 +67,11 @@ export function rotuloDocumento(documento: DocumentoReimpressao): string {
  * (reimpressão).
  */
 export async function imprimirDocumentoDoPedido(
-  order: { id: string; numero: string | null; tinyAccount: string },
+  order: { id: string; numero: string | null } & PedidoComCanal,
   origem: "historico" | "ja_expedido" | "mesa",
   docs?: Documentos,
 ): Promise<ReimpressaoResultado> {
-  const documento = documentoDaConta(order.tinyAccount);
+  const documento = documentoDoPedido(order);
   const rotulo = rotuloDocumento(documento);
   const alvo = `#${order.numero ?? order.id.slice(0, 8)}`;
   const segundaVia = origem !== "mesa";

@@ -14,13 +14,13 @@
 //    está na mesa precisa reimprimir o que o colega expediu — por isso a lista
 //    mostra QUEM expediu, e não só a hora.
 //
-// A reimpressão é de UM documento só, escolhido pela CONTA do pedido (JT →
-// etiqueta J&T, FM → DANFE simplificada), igual à mesa e igual ao legado: a
-// máquina de embalagem solta um saco por etiqueta impressa.
+// A reimpressão é de UM documento só, escolhido pelo CANAL do pedido
+// (e-commerce → etiqueta J&T, Mercado Livre → DANFE simplificada), igual à
+// mesa: a máquina de embalagem solta um saco por etiqueta impressa.
 
 import { useCallback, useEffect, useState, type CSSProperties } from "react";
 import { ApiError } from "../lib/api";
-import { documentoDaConta, imprimirDocumentoDoPedido } from "../lib/reimpressao";
+import { documentoDoPedido, imprimirDocumentoDoPedido } from "../lib/reimpressao";
 import { getExpedicaoHistory, type ExpedicaoHistoryResponse } from "../services/expedicao";
 
 const PAGE_SIZE = 20;
@@ -129,7 +129,7 @@ export function ExpedicaoHistoryModal({ onClose }: { onClose: () => void }) {
   }, [q, periodo, manualFrom, manualTo, todos, page]);
 
   const reimprimir = useCallback(
-    async (order: { id: string; numero: string | null; tinyAccount: string }) => {
+    async (order: { id: string; numero: string | null; canal?: "ecommerce" | "mercado_livre" }) => {
       setImprimindo(order.id);
       setAviso(null);
       const r = await imprimirDocumentoDoPedido(order, "historico");
@@ -235,9 +235,8 @@ export function ExpedicaoHistoryModal({ onClose }: { onClose: () => void }) {
           )}
           {!erro &&
             data?.items.map((o) => {
-              // JT imprime a etiqueta da transportadora; FM imprime a DANFE
-              // simplificada — que É a etiqueta desses pedidos.
-              const documento = documentoDaConta(o.tinyAccount);
+              // E-commerce reimprime a etiqueta J&T; Mercado Livre, a DANFE.
+              const documento = documentoDoPedido(o);
               const disponivel = documento === "etiqueta" ? o.temEtiqueta : o.temDanfe;
               return (
                 <div key={o.id} style={pedidoCard}>

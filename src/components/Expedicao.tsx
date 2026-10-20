@@ -18,10 +18,18 @@ import { gerarRomaneioPdf } from "../lib/romaneioPdf";
 import { getRomaneioPrinter, setRomaneioPrinter } from "../services/printerConfig";
 import { useDialogo } from "../lib/useDialogo";
 import {
-  documentoDaConta,
+  documentoDoPedido,
   imprimirDocumentoDoPedido,
   rotuloDocumento,
 } from "../lib/reimpressao";
+import {
+  CANAIS_EXPEDICAO,
+  getCanalExpedicao,
+  pedidoDoCanal,
+  rotuloCanal,
+  setCanalExpedicao,
+  type CanalExpedicao,
+} from "../lib/canalExpedicao";
 import { ExpedicaoHistoryModal } from "./ExpedicaoHistoryModal";
 import { SupervisorModal } from "./SupervisorModal";
 import {
@@ -227,6 +235,10 @@ function statusOfStep(flow: Flow, step: Step): "active" | "done" | "pending" {
 export function Expedicao({ onBack }: Props) {
   const rfid = useRfid();
   const [modo] = useState<ExpedicaoMode>(() => getExpedicaoMode());
+  // Canal da mesa (J&T / Mercado Livre): só pedido do canal escolhido é aceito.
+  const [canal, setCanal] = useState<CanalExpedicao>(() => getCanalExpedicao());
+  const canalRef = useRef<CanalExpedicao>(canal);
+  canalRef.current = canal;
   const simulacao = isExpedicaoSimulacao();
   const [flow, setFlow] = useState<Flow>({ kind: "idle" });
   const flowRef = useRef<Flow>(flow);
@@ -342,6 +354,22 @@ export function Expedicao({ onBack }: Props) {
     return k === "printing" || k === "packing" || k === "done";
   };
 
+  /** Troca o canal da mesa e relê a mesa (o pedido na tela pode ser do outro canal). */
+  const trocarCanal = useCallback(
+    (novo: CanalExpedicao) => {
+      if (novo === canalRef.current) return;
+      if (mesaOcupada()) {
+        showNotice("Termine o pedido na mesa antes de trocar o canal.");
+        return;
+      }
+      setCanalExpedicao(novo);
+      setCanal(novo);
+      reiniciar();
+    },
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [reiniciar, showNotice],
+  );
+
   const doResolve = useCallback(async () => {
     // Modal de justificativa aberto: não re-identifica nem muda de estado.
     // A mesa é re-lida quando o modal fecha (cancelar → `doResolve`; forçar →
@@ -409,6 +437,12 @@ export function Expedicao({ onBack }: Props) {
         return;
       }
       const m = matches[0];
+      if (!pedidoDoCanal(m.order, canalRef.current)) {
+        if (!retrying) beepError();
+        setFlow(erroCanal(m.order, canalRef.current));
+        scheduleRetry();
+        return;
+      }
       // Apita só quando o pedido MUDA (ou é o primeiro); re-identificar o
       // mesmo pedido a cada tag lida virava apito contínuo.
       const f = flowRef.current;
@@ -461,6 +495,11 @@ export function Expedicao({ onBack }: Props) {
   const identifica = useCallback(
     async (m: EpcMatch, alheias: Set<string>, gen?: number) => {
       const order = m.order;
+      if (!pedidoDoCanal(order, canalRef.current)) {
+        beepError();
+        setFlow(erroCanal(order, canalRef.current));
+        return;
+      }
       const naMesa = Array.from(mesaRef.current);
       let resolved = new Map<string, EpcLookupItem>();
       try {
@@ -493,16 +532,12 @@ export function Expedicao({ onBack }: Props) {
       // resultado atrasado re-identificando o pedido imprimiria de novo (saco a mais).
       resolveGenRef.current++;
       const oficial = modoRef.current === "oficial";
-      // Mercado Livre (19/10, interino): a etiqueta NÃO sai pela API do Tiny, é
-      // impressa no Tiny / Mercado Livre. Sem rastreio J&T, sem documento, sem
-      // `markLabelPrinted`: vai direto pra embalagem e o `ship` normal.
-      if (order.canal === "mercado_livre") {
-        if (rastreioTimer.current) window.clearTimeout(rastreioTimer.current);
-        rastreioTimer.current = null;
-        rastreioTentativasRef.current = null;
-        setFlow({ kind: "packing", order, lidas, override });
-        return;
-      }
+      // UM documento por pedido, pelo canal: e-commerce → etiqueta J&T;
+      // Mercado Livre → DANFE simplificada (a etiqueta do Mercado Envios sai no
+      // Tiny / Mercado Livre, o Nexus não a tem — 20/10, como o legado fazia
+      // pra pedido sem etiqueta J&T).
+      const documento = documentoDoPedido(order);
+      const rotulo = rotuloDocumento(documento);
       setFlow({ kind: "printing", order });
       let docs: Documentos;
       try {
@@ -521,16 +556,15 @@ export function Expedicao({ onBack }: Props) {
         return;
       }
 
-      // UM documento, UMA página: a etiqueta da J&T, em qualquer conta (ver
-      // `documentoDaConta` — a DANFE deixou de ser a etiqueta da FM quando a
-      // conta passou a sair pela J&T). NUNCA os dois — a máquina de embalagem solta
-      // um saco por etiqueta impressa, então a segunda página vira um saco a
-      // mais no chão. Era esse o bug de produção: a mesa mandava etiqueta E
-      // DANFE como dois jobs pra mesma térmica.
-      // Sem rastreio o ship é recusado (TRACKING_REQUIRED) — então não
-      // imprime: a trava tem que pegar ANTES do saco sair da máquina.
+      // UMA página: NUNCA etiqueta E DANFE — a máquina de embalagem solta um
+      // saco por etiqueta impressa, então a segunda página vira um saco a mais
+      // no chão (era o bug de produção: a mesa mandava os dois jobs pra mesma
+      // térmica).
+      // Etiqueta J&T sem rastreio: o ship é recusado (TRACKING_REQUIRED), então
+      // não imprime — a trava tem que pegar ANTES do saco sair da máquina.
       // Tenta de novo sozinho; a etiqueta costuma voltar com o AWB em minutos.
-      if (oficial && !docs.trackingNumber) {
+      // Pedido ML não tem rastreio J&T (sai sem etiqueta): não passa por aqui.
+      if (oficial && documento === "etiqueta" && !docs.trackingNumber) {
         const prev = rastreioTentativasRef.current;
         const n = prev && prev.orderId === order.id ? prev.n + 1 : 1;
         rastreioTentativasRef.current = { orderId: order.id, n };
@@ -571,8 +605,6 @@ export function Expedicao({ onBack }: Props) {
       }
       rastreioTentativasRef.current = null;
 
-      const documento = documentoDaConta(order.tinyAccount);
-      const rotulo = rotuloDocumento(documento);
       const r = await imprimirDocumentoDoPedido(order, "mesa", docs);
 
       if (!r.ok) {
@@ -613,7 +645,7 @@ export function Expedicao({ onBack }: Props) {
    * sem tocar no status: reimprimir não é transição de negócio.
    */
   const reprint = useCallback(
-    async (order: { id: string; numero: string | null; tinyAccount: string }, origem: "historico" | "ja_expedido") => {
+    async (order: { id: string; numero: string | null; canal?: CanalExpedicao }, origem: "historico" | "ja_expedido") => {
       setReprintingId(order.id);
       const r = await imprimirDocumentoDoPedido(order, origem);
       setReprintingId(null);
@@ -1237,6 +1269,7 @@ export function Expedicao({ onBack }: Props) {
         <div style={hLeft}>
           <BackButton onClick={onBack} />
           <OperatorChip />
+          <CanalTabs canal={canal} onChange={trocarCanal} />
         </div>
         <h2 style={title}>Expedição</h2>
         <div style={hRight}>
@@ -1375,6 +1408,7 @@ export function Expedicao({ onBack }: Props) {
             onRestart={reiniciar}
             reprintingId={reprintingId}
             onReprint={(o) => void reprint(o, "ja_expedido")}
+            canalMesa={canal}
           />
         </main>
 
@@ -1444,25 +1478,27 @@ function StageCenter({
   onRestart,
   reprintingId,
   onReprint,
+  canalMesa,
 }: {
   flow: Flow;
   conf: Conferencia | null;
   packingProgress: number;
   autoPrint: boolean;
+  canalMesa: CanalExpedicao;
   onChoose: (m: EpcMatch) => void;
   onForce: () => void;
   onPrint: () => void;
   onSeal: () => void;
   onRestart: () => void;
   reprintingId: string | null;
-  onReprint: (o: { id: string; numero: string | null; tinyAccount: string }) => void;
+  onReprint: (o: { id: string; numero: string | null; canal?: CanalExpedicao }) => void;
 }) {
   if (flow.kind === "idle") {
     return (
       <div style={centerBlock}>
         <div style={{ ...heroDot, background: "var(--success-dot)" }} />
         <h1 style={heroDisplay}>PRONTO</h1>
-        <p style={heroHint}>Coloque o próximo pedido na mesa</p>
+        <p style={heroHint}>Coloque o próximo pedido {rotuloCanal(canalMesa)} na mesa</p>
       </div>
     );
   }
@@ -1497,7 +1533,7 @@ function StageCenter({
     // o papel não saiu, o embalador reimprime daqui mesmo — sem mandar o
     // pedido de volta pra separação, e sem mudar status nenhum.
     const ja = flow.jaExpedido;
-    const doc = ja ? documentoDaConta(ja.tinyAccount) : null;
+    const doc = ja ? documentoDoPedido(ja) : null;
     // Estado terminal "sem etiqueta": número do pedido em destaque pra
     // operadora separar o pacote e avisar o supervisor sem precisar reler.
     const semEtiqueta = flow.code === "sem_etiqueta";
@@ -1517,7 +1553,7 @@ function StageCenter({
               style={reimprimirGrandeBtn}
               disabled={reprintingId === ja.orderId}
               onClick={() =>
-                onReprint({ id: ja.orderId, numero: ja.numero, tinyAccount: ja.tinyAccount })
+                onReprint({ id: ja.orderId, numero: ja.numero, canal: ja.canal })
               }
             >
               {reprintingId === ja.orderId
@@ -1619,7 +1655,7 @@ function OrderPanel({
       {order.canal === "mercado_livre" && (
         <>
           <div style={seloMercadoLivre}>MERCADO LIVRE</div>
-          <div style={etiquetaMlLinha}>Etiqueta: imprimir no Tiny / Mercado Livre</div>
+          <div style={etiquetaMlLinha}>Sai a DANFE · a etiqueta do Mercado Envios é impressa no Tiny / Mercado Livre</div>
         </>
       )}
       <div style={orderPanelMain}>
@@ -1874,6 +1910,37 @@ function AutoToggle({ on, onToggle }: { on: boolean; onToggle: () => void }) {
       </span>
       Auto
     </button>
+  );
+}
+
+/** Pedido do outro canal na mesa: não identifica, não imprime, não embala. */
+function erroCanal(order: ExpedicaoOrder, canalMesa: CanalExpedicao): Flow {
+  const doPedido = rotuloCanal(order.canal);
+  return {
+    kind: "error",
+    code: "canal_errado",
+    message: `O pedido #${order.numero ?? ""} é ${doPedido}, e a mesa está no canal ${rotuloCanal(canalMesa)}. Troque pra aba ${doPedido} no topo da tela ou leve o pacote pra mesa certa.`,
+    order,
+  };
+}
+
+function CanalTabs({ canal, onChange }: { canal: CanalExpedicao; onChange: (c: CanalExpedicao) => void }) {
+  return (
+    <div style={canalTabs} role="tablist" aria-label="Canal da mesa">
+      {CANAIS_EXPEDICAO.map((c) => (
+        <button
+          key={c.id}
+          type="button"
+          role="tab"
+          aria-selected={canal === c.id}
+          style={canal === c.id ? canalTabOn : canalTab}
+          onClick={() => onChange(c.id)}
+          title={c.id === "mercado_livre" ? "Pedidos do Mercado Livre: sai a DANFE, etiqueta no Tiny / Mercado Livre" : "Pedidos do e-commerce: sai a etiqueta J&T"}
+        >
+          {c.rotulo}
+        </button>
+      ))}
+    </div>
   );
 }
 
@@ -2311,6 +2378,9 @@ const inlineBtn: CSSProperties = { background: "transparent", border: 0, color: 
 const autoToggle: CSSProperties = { display: "inline-flex", alignItems: "center", gap: 8, padding: "6px 12px 6px 8px", border: "1px solid", borderRadius: 999, cursor: "pointer", fontSize: 12, fontWeight: 700, letterSpacing: 0.5 };
 const autoSwitch: CSSProperties = { width: 30, height: 18, borderRadius: 999, padding: 2, display: "flex", alignItems: "center", transition: "background 140ms" };
 const autoKnob: CSSProperties = { width: 14, height: 14, borderRadius: "50%", background: "white" };
+const canalTabs: CSSProperties = { display: "inline-flex", gap: 4, padding: 4, background: "var(--bg-card)", border: "1px solid var(--border)", borderRadius: 12 };
+const canalTab: CSSProperties = { padding: "7px 16px", background: "transparent", border: 0, borderRadius: 9, color: "var(--text-secondary)", fontSize: 13, fontWeight: 700, cursor: "pointer", transition: "background 140ms, color 140ms" };
+const canalTabOn: CSSProperties = { ...canalTab, background: "var(--bg-input)", color: "var(--text)", boxShadow: "inset 0 0 0 1px var(--border-strong)" };
 const modoBadge: CSSProperties = { display: "inline-flex", alignItems: "center", gap: 7, padding: "7px 12px", border: "1px solid", borderRadius: 999, fontSize: 12, fontWeight: 800, letterSpacing: 1 };
 const modoDot: CSSProperties = { width: 8, height: 8, borderRadius: "50%" };
 const mesaChip: CSSProperties = { display: "inline-flex", alignItems: "center", gap: 8, padding: "7px 12px", background: "var(--bg-card)", border: "1px solid var(--border)", borderRadius: 999, cursor: "pointer", color: "var(--text-secondary)" };
