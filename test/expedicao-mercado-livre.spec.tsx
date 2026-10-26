@@ -14,6 +14,7 @@ const epcMatch = vi.fn();
 const getDocumentos = vi.fn();
 const markLabelPrinted = vi.fn();
 const shipOrder = vi.fn();
+const obterEtiquetaMl = vi.fn();
 const invoke = vi.fn();
 let presence: ((cur: string[]) => void) | null = null;
 
@@ -25,6 +26,7 @@ vi.mock("../src/services/expedicao", async () => {
     getDocumentos: (...a: unknown[]) => getDocumentos(...a),
     markLabelPrinted: (...a: unknown[]) => markLabelPrinted(...a),
     shipOrder: (...a: unknown[]) => shipOrder(...a),
+    obterEtiquetaMl: (...a: unknown[]) => obterEtiquetaMl(...a),
   };
 });
 vi.mock("../src/contexts/RfidContext", () => ({
@@ -102,6 +104,7 @@ describe("Expedição — pedido Mercado Livre", () => {
     getDocumentos.mockReset().mockResolvedValue({ danfe: DANFE, etiqueta: null, trackingNumber: null });
     markLabelPrinted.mockReset().mockResolvedValue(undefined);
     shipOrder.mockReset().mockResolvedValue({ gaiola: null });
+    obterEtiquetaMl.mockReset().mockResolvedValue({ ok: false, erro: { codigo: "x", mensagem: "Etiqueta ainda não disponível no Tiny." } });
     invoke.mockReset().mockImplementation(async (cmd: string) =>
       cmd === "print_engine_status" ? { ok: true, printer: null, message: null, engine: "sumatra" } : { ok: true },
     );

@@ -606,8 +606,11 @@ export function Expedicao({ onBack }: Props) {
       }
       rastreioTentativasRef.current = null;
 
-      const r = await imprimirDocumentoDoPedido(order, "mesa", docs);
+      const r = await imprimirDocumentoDoPedido(order, "mesa", docs, () =>
+        showNotice("Buscando etiqueta do Mercado Livre no Tiny…", 30000),
+      );
 
+      if (documento === "danfe") showNotice(null); // some o "Buscando etiqueta…"
       if (!r.ok) {
         // No oficial o documento é pré-requisito: sem papel, não expede.
         if (oficial) {

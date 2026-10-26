@@ -158,7 +158,11 @@ Devolve o que precisa ser impresso.
   (etiqueta do Mercado Envios emitida pelo Tiny; é o documento impresso, no lugar da DANFE),
   `etiquetaMlErro?: { codigo, mensagem } | null` (`mensagem` em pt-BR pra operadora) e
   `etiquetaMlObrigatoria?: boolean` (trava do servidor: `true` = sem etiqueta o app não imprime
-  nem embala; `false`/ausente = cai na DANFE simplificada com aviso). A rota `POST /expedicao/orders/:id/etiqueta-ml` (`{ refresh?: boolean }`) existe na API, mas o app não a chama: bipar de novo já refaz a busca no servidor.
+  nem embala; `false`/ausente = cai na DANFE simplificada com aviso). O `GET documentos` só LÊ o cache (`etiquetaMl` null = ainda não baixada). Quem busca no Tiny é
+  `POST /expedicao/orders/:id/etiqueta-ml` (`{ refresh?: boolean }` → `{ ok: true, etiqueta } |
+  { ok: false, erro: { codigo, mensagem } }`, 200 nos dois casos, até ~25 s): o app a chama
+  (timeout 35 s, um POST por pedido por vez) quando o `GET` vem com o campo `etiquetaMl` mas sem
+  etiqueta. Falha de rede/timeout vira "Tiny demorou, bipe de novo" e segue as regras da trava.
   O `ship` pode responder 409 `{ error: "etiqueta_ml_obrigatoria", message }` — definitivo, sem retry.
 
 ---

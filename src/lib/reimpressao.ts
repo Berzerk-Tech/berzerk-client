@@ -25,6 +25,8 @@ import { printEtiquetaUnica } from "./printer";
 import { getLabelPrinter } from "../services/printerConfig";
 import {
   getDocumentos,
+  obterEtiquetaMl,
+  type EtiquetaMlResultado,
   registrarReimpressao,
   type DocumentoReimpressao,
   type Documentos,
@@ -39,6 +41,21 @@ export type ReimpressaoResultado = {
   /** Aviso não bloqueante (ex.: ML saiu com a DANFE porque a etiqueta não veio e a trava está desligada). */
   aviso?: string;
 };
+
+const MSG_TINY_DEMOROU = "Tiny demorou, bipe de novo.";
+
+/** Um POST por pedido por vez: bip repetido reaproveita a busca em voo. */
+const buscasMlEmVoo = new Map<string, Promise<EtiquetaMlResultado>>();
+function buscarEtiquetaMl(orderId: string): Promise<EtiquetaMlResultado> {
+  let p = buscasMlEmVoo.get(orderId);
+  if (!p) {
+    p = obterEtiquetaMl(orderId)
+      .catch((): EtiquetaMlResultado => ({ ok: false, erro: { codigo: "tiny_demorou", mensagem: MSG_TINY_DEMOROU } }))
+      .finally(() => buscasMlEmVoo.delete(orderId));
+    buscasMlEmVoo.set(orderId, p);
+  }
+  return p;
+}
 
 const MSG_ETIQUETA_ML_INDISPONIVEL =
   "Etiqueta do Mercado Livre ainda não disponível no Tiny. Avise o supervisor para enviar o pedido para expedição no Tiny e bipe de novo.";
@@ -80,6 +97,8 @@ export async function imprimirDocumentoDoPedido(
   order: { id: string; numero: string | null } & PedidoComCanal,
   origem: "historico" | "ja_expedido" | "mesa",
   docs?: Documentos,
+  /** Chamado antes do POST que busca a etiqueta ML no Tiny (pode levar ~25 s) — a mesa mostra "buscando". */
+  aoBuscarEtiquetaMl?: () => void,
 ): Promise<ReimpressaoResultado> {
   const documento = documentoDoPedido(order);
   const rotulo = rotuloDocumento(documento);
@@ -88,7 +107,21 @@ export async function imprimirDocumentoDoPedido(
   const sufixo = segundaVia ? " (2a via)" : "";
 
   try {
-    const d = docs ?? (await getDocumentos(order.id));
+    const d = { ...(docs ?? (await getDocumentos(order.id))) };
+
+    // `GET documentos` só lê o cache: sem etiqueta nele, quem busca no Tiny é o POST.
+    // API velha (sem o campo `etiquetaMl`) segue direto pra DANFE.
+    if (documento === "danfe" && "etiquetaMl" in d && !d.etiquetaMl?.base64) {
+      aoBuscarEtiquetaMl?.();
+      const res = await buscarEtiquetaMl(order.id);
+      if (res.ok && res.etiqueta?.base64) {
+        d.etiquetaMl = res.etiqueta;
+        d.etiquetaMlErro = null;
+      } else if (!res.ok) {
+        d.etiquetaMl = null;
+        d.etiquetaMlErro = res.erro;
+      }
+    }
 
     let base64: string;
     let formato: "pdf" | "png";

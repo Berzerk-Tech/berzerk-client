@@ -17,6 +17,7 @@ const getExpedicaoHistory = vi.fn();
 const getDocumentos = vi.fn();
 const registrarReimpressao = vi.fn(async () => {});
 const invoke = vi.fn();
+const obterEtiquetaMl = vi.fn();
 
 vi.mock("../src/services/expedicao", async () => {
   const real =
@@ -26,6 +27,7 @@ vi.mock("../src/services/expedicao", async () => {
     getExpedicaoHistory: (...a: unknown[]) => getExpedicaoHistory(...a),
     getDocumentos: (...a: unknown[]) => getDocumentos(...a),
     registrarReimpressao: (...a: unknown[]) => registrarReimpressao(...a),
+    obterEtiquetaMl: (...a: unknown[]) => obterEtiquetaMl(...a),
   };
 });
 
@@ -134,6 +136,7 @@ describe("um pedido = UMA página 100×150", () => {
   beforeEach(() => {
     invoke.mockReset().mockResolvedValue({ ok: true, printer: null, message: null, engine: "sumatra" });
     registrarReimpressao.mockClear();
+    obterEtiquetaMl.mockReset();
   });
 
   it("documento pelo CANAL: e-commerce → etiqueta J&T em qualquer conta (03/09); Mercado Livre → DANFE (20/10)", () => {
@@ -162,24 +165,34 @@ describe("um pedido = UMA página 100×150", () => {
     const ML = { id: "ord-ml", numero: "9", canal: "mercado_livre" as const };
     const DANFE_ML = { chave_acesso: "3525", numero: "1", emitente: {}, cliente: {}, itens: [] };
     const ETQ = { base64: "RVRRTUw=", formato: "pdf" as const, fonte: "tiny" as const };
+    const base = { danfe: DANFE_ML, etiqueta: null, trackingNumber: null };
+    const jobDe = () => (invoke.mock.calls[0] as [string, { base64: string; jobName: string }])[1];
 
-    it("etiqueta presente: imprime o PDF da etiqueta ML (oficial) e registra etiqueta_ml na 2a via", async () => {
-      getDocumentos.mockResolvedValue({ danfe: DANFE_ML, etiqueta: null, trackingNumber: null, etiquetaMl: ETQ });
+    it("etiqueta no cache: imprime o PDF ML sem chamar o POST e registra etiqueta_ml na 2a via", async () => {
+      getDocumentos.mockResolvedValue({ ...base, etiquetaMl: ETQ });
       const r = await imprimirDocumentoDoPedido(ML, "mesa");
       expect(r.ok).toBe(true);
-      const [, args] = invoke.mock.calls[0] as [string, { base64: string; jobName: string }];
-      expect(args.base64).toBe("RVRRTUw=");
-      expect(args.jobName).toContain("ML");
-      expect(r.aviso).toBeUndefined();
+      expect(jobDe().base64).toBe("RVRRTUw=");
+      expect(jobDe().jobName).toContain("ML");
+      expect(obterEtiquetaMl).not.toHaveBeenCalled();
       await imprimirDocumentoDoPedido(ML, "historico");
       expect(registrarReimpressao).toHaveBeenCalledWith("ord-ml", "etiqueta_ml", "historico");
     });
 
-    it("obrigatória e sem etiqueta: não imprime e devolve etiqueta_ml_indisponivel", async () => {
-      getDocumentos.mockResolvedValue({
-        danfe: DANFE_ML, etiqueta: null, trackingNumber: null,
-        etiquetaMl: null, etiquetaMlObrigatoria: true, etiquetaMlErro: { codigo: "x", mensagem: "Tiny fora do ar." },
-      });
+    it("sem etiqueta no GET: busca pelo POST e imprime", async () => {
+      getDocumentos.mockResolvedValue({ ...base, etiquetaMl: null });
+      obterEtiquetaMl.mockResolvedValue({ ok: true, etiqueta: ETQ });
+      const aoBuscar = vi.fn();
+      const r = await imprimirDocumentoDoPedido(ML, "mesa", undefined, aoBuscar);
+      expect(r.ok).toBe(true);
+      expect(aoBuscar).toHaveBeenCalledTimes(1);
+      expect(obterEtiquetaMl).toHaveBeenCalledWith("ord-ml");
+      expect(jobDe().base64).toBe("RVRRTUw=");
+    });
+
+    it("POST ok:false com trava: não imprime e devolve etiqueta_ml_indisponivel com a mensagem", async () => {
+      getDocumentos.mockResolvedValue({ ...base, etiquetaMl: null, etiquetaMlObrigatoria: true });
+      obterEtiquetaMl.mockResolvedValue({ ok: false, erro: { codigo: "x", mensagem: "Tiny fora do ar." } });
       const r = await imprimirDocumentoDoPedido(ML, "mesa");
       expect(r.ok).toBe(false);
       expect(r.codigo).toBe("etiqueta_ml_indisponivel");
@@ -187,32 +200,43 @@ describe("um pedido = UMA página 100×150", () => {
       expect(invoke).not.toHaveBeenCalled();
     });
 
-    it("trava desligada e sem etiqueta: sai a DANFE com aviso", async () => {
-      getDocumentos.mockResolvedValue({
-        danfe: DANFE_ML, etiqueta: null, trackingNumber: null,
-        etiquetaMl: null, etiquetaMlObrigatoria: false, etiquetaMlErro: { codigo: "x", mensagem: "sem etiqueta" },
-      });
+    it("timeout/rede do POST com trava: 'Tiny demorou' e não imprime", async () => {
+      getDocumentos.mockResolvedValue({ ...base, etiquetaMl: null, etiquetaMlObrigatoria: true });
+      obterEtiquetaMl.mockRejectedValue(new Error("aborted"));
       const r = await imprimirDocumentoDoPedido(ML, "mesa");
-      expect(r.ok).toBe(true);
-      expect(r.aviso).toContain("DANFE");
-      expect((invoke.mock.calls[0] as [string, { jobName: string }])[1].jobName).toContain("DANFE");
+      expect(r.ok).toBe(false);
+      expect(r.codigo).toBe("etiqueta_ml_indisponivel");
+      expect(r.mensagem).toContain("Tiny demorou, bipe de novo");
+      expect(invoke).not.toHaveBeenCalled();
     });
 
-    it("API velha (sem os campos): DANFE sem aviso", async () => {
-      getDocumentos.mockResolvedValue({ danfe: DANFE_ML, etiqueta: null, trackingNumber: null });
+    it("POST falha sem trava: sai a DANFE com aviso", async () => {
+      getDocumentos.mockResolvedValue({ ...base, etiquetaMl: null, etiquetaMlObrigatoria: false });
+      obterEtiquetaMl.mockResolvedValue({ ok: false, erro: { codigo: "x", mensagem: "sem etiqueta" } });
+      const r = await imprimirDocumentoDoPedido(ML, "mesa");
+      expect(r.ok).toBe(true);
+      expect(r.aviso).toContain("sem etiqueta");
+      expect(jobDe().jobName).toContain("DANFE");
+    });
+
+    it("API velha (sem o campo): DANFE direto, sem POST e sem aviso", async () => {
+      getDocumentos.mockResolvedValue(base);
       const r = await imprimirDocumentoDoPedido(ML, "mesa");
       expect(r.ok).toBe(true);
       expect(r.aviso).toBeUndefined();
+      expect(obterEtiquetaMl).not.toHaveBeenCalled();
     });
 
-    it("etiqueta + erro juntos: a etiqueta vence", async () => {
-      getDocumentos.mockResolvedValue({
-        danfe: DANFE_ML, etiqueta: null, trackingNumber: null,
-        etiquetaMl: ETQ, etiquetaMlErro: { codigo: "x", mensagem: "ruído" }, etiquetaMlObrigatoria: true,
-      });
-      const r = await imprimirDocumentoDoPedido(ML, "mesa");
-      expect(r.ok).toBe(true);
-      expect((invoke.mock.calls[0] as [string, { base64: string }])[1].base64).toBe("RVRRTUw=");
+    it("dois bips seguidos do mesmo pedido: um POST só", async () => {
+      getDocumentos.mockResolvedValue({ ...base, etiquetaMl: null });
+      let resolver!: (v: unknown) => void;
+      obterEtiquetaMl.mockReturnValue(new Promise((res) => (resolver = res)));
+      const a = imprimirDocumentoDoPedido(ML, "mesa");
+      const b = imprimirDocumentoDoPedido(ML, "mesa");
+      await waitFor(() => expect(obterEtiquetaMl).toHaveBeenCalled());
+      resolver({ ok: true, etiqueta: ETQ });
+      await Promise.all([a, b]);
+      expect(obterEtiquetaMl).toHaveBeenCalledTimes(1);
     });
   });
 

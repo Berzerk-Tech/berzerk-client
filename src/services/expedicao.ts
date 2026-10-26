@@ -510,6 +510,32 @@ export function getDocumentos(orderId: string): Promise<Documentos> {
   return apiRequest<Documentos>(`/expedicao/orders/${orderId}/documentos`);
 }
 
+export type EtiquetaMlResultado =
+  | { ok: true; etiqueta: EtiquetaMl }
+  | { ok: false; erro: { codigo: string; mensagem: string } };
+
+/** O POST chama o Tiny e pode levar ~25 s no servidor. */
+export const ETIQUETA_ML_TIMEOUT_MS = 35000;
+
+/**
+ * Busca no Tiny (via servidor) a etiqueta do Mercado Envios. O `GET documentos` só lê o
+ * cache; é este POST que baixa. 200 mesmo quando o Tiny falha (`ok: false`). Pode rejeitar
+ * por rede/timeout (35 s) — quem chama trata como "Tiny demorou".
+ */
+export async function obterEtiquetaMl(orderId: string, refresh = false): Promise<EtiquetaMlResultado> {
+  const ctl = new AbortController();
+  const t = setTimeout(() => ctl.abort(), ETIQUETA_ML_TIMEOUT_MS);
+  try {
+    return await apiRequest<EtiquetaMlResultado>(`/expedicao/orders/${orderId}/etiqueta-ml`, {
+      method: "POST",
+      body: { refresh },
+      signal: ctl.signal,
+    });
+  } finally {
+    clearTimeout(t);
+  }
+}
+
 /** `message` do 409 `etiqueta_ml_obrigatoria` (texto do servidor, pt-BR); null em outro erro. */
 export function mensagemEtiquetaMlObrigatoria(e: unknown): string | null {
   if (!(e instanceof ApiError) || e.status !== 409 || !e.body || typeof e.body !== "object") return null;
