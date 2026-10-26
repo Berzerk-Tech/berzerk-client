@@ -51,6 +51,7 @@ import {
   releaseSeparacao,
   type AwbJaColetadoAviso,
   type EpcLookupItem,
+  fonteConfiavel,
   type LiberacaoFaltante,
   type LeituraResolvida,
   type LiberacaoSupervisor,
@@ -118,7 +119,13 @@ function gtinCandidates(...vals: Array<string | null | undefined>): string[] {
 
 /** Nome curto da fonte de resolução pra UI/console. */
 function rotuloFonte(f: EpcLookupItem["fonte"]): string {
-  return f === "nexus" ? "nexus (inventário)" : f === "sgtin" ? "código da etiqueta" : "iTAG";
+  return f === "nexus"
+    ? "nexus (inventário)"
+    : f === "sgtin"
+      ? "código da etiqueta"
+      : f === "itag_espelho"
+        ? "iTAG (espelho no nexus)"
+        : "iTAG";
 }
 
 type Phase = "loading" | "separating" | "empty" | "error";
@@ -1210,7 +1217,7 @@ export function SeparacaoRunner({
           beepError();
           if (look) {
             const desc = [look.name, look.size, look.ean13].filter(Boolean).join(" · ");
-            const provisoria = look.fonte !== "itag";
+            const provisoria = !fonteConfiavel(look.fonte);
             // Excedente do próprio pedido (produto certo, unidade a mais) ou
             // peça de outro produto? Muda a mensagem E o card que fica vermelho.
             const excedido = itemDoPedido(ord, look);
@@ -1992,8 +1999,8 @@ function ReadLogPanel({
                 )}
                 {x.kind !== "desconhecida" && x.fonte && (
                   <span style={extrasPinnedSimilar}>
-                    {x.fonte === "itag"
-                      ? "Identificada pela iTAG (nuvem da etiqueta)."
+                    {fonteConfiavel(x.fonte)
+                      ? `Identificada pela ${rotuloFonte(x.fonte)} — a etiqueta impressa.`
                       : `Identificada pelo ${rotuloFonte(x.fonte)}, não pela iTAG — pode estar errada. Aperte R pra consultar de novo.`}
                   </span>
                 )}

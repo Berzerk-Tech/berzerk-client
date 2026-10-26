@@ -34,13 +34,15 @@ import {
   stopReading,
 } from "../lib/rfid";
 import { decodeSgtin96 } from "../lib/sgtin";
-import { epcLookup, type EpcLookupItem } from "../services/orders";
+import { epcLookup, fonteConfiavel, type EpcLookupItem } from "../services/orders";
 
 const EPC_CACHE_KEY = "berzerk_epc_resolve_cache_v2";
-/** Resposta do nexus (`/separacao/epc-lookup`) vale por pouco tempo e só em
- *  memória: é cópia do inventário, que pode estar com o tamanho trocado
- *  (14/09/2026). Vencido o prazo, a próxima leitura tenta a nuvem iTAG de novo
- *  — senão uma resposta errada ficava fixa na estação pra sempre. */
+/** Resposta do nexus vinda do INVENTÁRIO (`fonte: "nexus"`) vale por pouco
+ *  tempo e só em memória: pode estar com o tamanho trocado (14/09/2026).
+ *  Vencido o prazo, a próxima leitura tenta de novo — senão uma resposta
+ *  errada ficava fixa na estação pra sempre. A resposta pelo ESPELHO da iTAG
+ *  (`itag_espelho`, nexus ≥ 26/10) é a etiqueta impressa e vai pro cache
+ *  persistente, como a nuvem. */
 const NEXUS_TTL_MS = 5 * 60 * 1000;
 const EPC_CACHE_MAX = 5000;
 /** Depois de quanto tempo um EPC que a nuvem iTAG disse NÃO EXISTIR pode ser
@@ -54,7 +56,8 @@ const UNRESOLVED_RETRY_MS = 5 * 60 * 1000;
  *  0.9.55); o teto aqui é só o
  *  guarda-chuva. Passou disso, segue com o que tem (fallback provisório). */
 const RESOLVE_TIMEOUT_MS = 20000;
-/** Teto do fallback `/separacao/epc-lookup` (nexus). */
+/** Teto da chamada ao `/separacao/epc-lookup` (nexus) — desde 0.9.57 é a
+ *  PRIMEIRA consulta (~10 ms em prod), antes da nuvem da iTAG. */
 const NEXUS_TIMEOUT_MS = 8000;
 function comTimeout<T>(p: Promise<T>, ms: number, rotulo: string): Promise<T> {
   return new Promise<T>((resolve, reject) => {
@@ -502,7 +505,8 @@ export function RfidProvider({ children }: { children: ReactNode }) {
       }
 
       let touchedCache = false;
-      // Só a nuvem iTAG entra no cache persistente: é a verdade da etiqueta.
+      // Só a verdade da etiqueta (nuvem iTAG ou o espelho dela no nexus) entra
+      // no cache persistente.
       const commit = (item: EpcLookupItem) => {
         const key = item.epc.toUpperCase();
         cacheRef.current.set(key, item);
@@ -510,6 +514,37 @@ export function RfidProvider({ children }: { children: ReactNode }) {
         touchedCache = true;
       };
 
+      // 1) NEXUS primeiro (0.9.57): uma chamada, ~10 ms, zero dependência da
+      // nuvem da iTAG no caminho feliz. `itag_espelho` resolve de vez;
+      // `nexus` (inventário) fica guardado como provisório pro passo 3. Em
+      // 26/10 a nuvem travou e cada peça esperava 8 s à toa antes de cair
+      // aqui com o tamanho do inventário — agora o espelho é quem responde.
+      const pendentesIniciais = [...misses, ...fallbackOnly];
+      const semNexus = pendentesIniciais.filter((e) => {
+        const doNexus = nexusRef.current.get(e);
+        return !(doNexus && agora - doNexus.em < NEXUS_TTL_MS);
+      });
+      if (semNexus.length > 0) {
+        try {
+          const { items } = await comTimeout(epcLookup(semNexus), NEXUS_TIMEOUT_MS, "epc-lookup");
+          for (const item of items) {
+            const key = item.epc.toUpperCase();
+            if (fonteConfiavel(item.fonte)) {
+              commit({ ...item, epc: key });
+              unresolvedRef.current.delete(key);
+              continue;
+            }
+            if (nexusRef.current.size > EPC_CACHE_MAX) nexusRef.current.clear();
+            nexusRef.current.set(key, { item: { ...item, epc: key, fonte: "nexus" }, em: agora });
+          }
+        } catch (e) {
+          setLastError(e instanceof Error ? e.message : String(e));
+        }
+        misses = misses.filter((e) => !result.has(e));
+      }
+
+      // 2) Nuvem da iTAG AO VIVO só pro que o espelho não conhece (etiqueta
+      // recém-impressa que o sync do espelho ainda não trouxe, ou nexus fora).
       if (misses.length > 0) {
         try {
           const details = await comTimeout(lookupEpcDetails(misses), RESOLVE_TIMEOUT_MS, "nuvem iTAG");
@@ -539,28 +574,13 @@ export function RfidProvider({ children }: { children: ReactNode }) {
         misses = misses.filter((e) => !result.has(e));
       }
 
-      // Fallback PROVISÓRIO (nexus, depois SGTIN) pra quem a nuvem não resolveu
-      // agora. Nunca persiste e nunca bloqueia nova consulta à nuvem.
-      const pendentes = [...misses, ...fallbackOnly];
-      const semNexus: string[] = [];
+      // 3) Fallback PROVISÓRIO (inventário do nexus guardado no passo 1, depois
+      // SGTIN) pra quem ninguém confiável resolveu. Nunca persiste e nunca
+      // bloqueia nova consulta.
+      const pendentes = pendentesIniciais.filter((e) => !result.has(e));
       for (const e of pendentes) {
         const doNexus = nexusRef.current.get(e);
         if (doNexus && agora - doNexus.em < NEXUS_TTL_MS) result.set(e, doNexus.item);
-        else semNexus.push(e);
-      }
-      if (semNexus.length > 0) {
-        try {
-          const { items } = await comTimeout(epcLookup(semNexus), NEXUS_TIMEOUT_MS, "epc-lookup");
-          for (const item of items) {
-            const key = item.epc.toUpperCase();
-            const it = { ...item, fonte: "nexus" as const };
-            if (nexusRef.current.size > EPC_CACHE_MAX) nexusRef.current.clear();
-            nexusRef.current.set(key, { item: it, em: agora });
-            result.set(key, it);
-          }
-        } catch (e) {
-          setLastError(e instanceof Error ? e.message : String(e));
-        }
       }
 
       for (const e of pendentes) {

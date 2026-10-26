@@ -136,7 +136,16 @@ export type ClaimResponse = { order: Order | null };
  * = `/separacao/epc-lookup` (cópia do inventário, que pode estar com o tamanho
  * trocado — 14/09/2026); `sgtin` = decodificação local (não distingue grade).
  */
-export type FonteResolucao = "itag" | "nexus" | "sgtin";
+export type FonteResolucao = "itag" | "itag_espelho" | "nexus" | "sgtin";
+
+/** Fonte que é a VERDADE da etiqueta impressa: a nuvem da iTAG consultada
+ *  daqui (`itag`) ou o espelho dela no nexus (`itag_espelho`, 26/10 — o
+ *  `/separacao/epc-lookup` passou a resolver por `itag_produtos` antes do
+ *  inventário). As duas entram no cache persistente e não levam o aviso
+ *  "pode estar errada"; `nexus` (inventário) e `sgtin` são provisórias. */
+export function fonteConfiavel(f: FonteResolucao | null | undefined): boolean {
+  return f === "itag" || f === "itag_espelho";
+}
 
 export type EpcLookupItem = {
   epc: string;
@@ -774,7 +783,7 @@ export type LeituraResolvida = {
   sku: string | null;
   size: string | null;
   name: string | null;
-  /** Ver `FonteResolucao` — o nexus só corrige o inventário com `itag`. */
+  /** Ver `FonteResolucao` — o nexus só corrige o inventário com `itag`/`itag_espelho`. */
   fonte?: FonteResolucao;
 };
 
@@ -824,14 +833,19 @@ export async function epcLookup(epcs: string[]): Promise<{ items: EpcLookupItem[
   const items: EpcLookupItem[] = [];
   for (let i = 0; i < epcs.length; i += EPC_LOOKUP_CHUNK) {
     const chunk = epcs.slice(i, i + EPC_LOOKUP_CHUNK);
-    const r = await apiRequest<{ items: Array<EpcLookupItem & { nome?: string | null }> }>(
-      "/separacao/epc-lookup",
-      { query: { epcs: chunk.join(",") } },
-    );
+    const r = await apiRequest<{
+      items: Array<Omit<EpcLookupItem, "fonte"> & { nome?: string | null; fonte?: "itag_espelho" | "inventario" }>;
+    }>("/separacao/epc-lookup", { query: { epcs: chunk.join(",") } });
     // O nexus manda o nome como `nome` — até 0.9.38 o app lia `name` e a peça
-    // resolvida por aqui aparecia sem nome na mesa.
+    // resolvida por aqui aparecia sem nome na mesa. `fonte` (nexus ≥ 26/10):
+    // `itag_espelho` é a etiqueta impressa; ausente/`inventario` é o cache
+    // ruidoso de sempre (`nexus`).
     for (const it of r.items) {
-      items.push({ ...it, name: it.name ?? it.nome ?? null, fonte: "nexus" });
+      items.push({
+        ...it,
+        name: it.name ?? it.nome ?? null,
+        fonte: it.fonte === "itag_espelho" ? "itag_espelho" : "nexus",
+      });
     }
   }
   return { items };
