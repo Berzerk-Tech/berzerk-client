@@ -50,7 +50,8 @@ const UNRESOLVED_RETRY_MS = 5 * 60 * 1000;
 /** Teto da chamada à nuvem iTAG dentro de `resolveEpcs`. Era 8 s até 0.9.39 e
  *  o Rust consultava em lotes de 8 sequenciais: mesa com muitas peças estourava
  *  e TUDO caía no fallback do nexus (inventário com tamanho trocado). Agora o
- *  Rust consulta tudo em paralelo com 8 s por chamada; o teto aqui é só o
+ *  Rust consulta tudo em paralelo com 4 s por chamada (berzerk primeiro,
+ *  0.9.55); o teto aqui é só o
  *  guarda-chuva. Passou disso, segue com o que tem (fallback provisório). */
 const RESOLVE_TIMEOUT_MS = 20000;
 /** Teto do fallback `/separacao/epc-lookup` (nexus). */
