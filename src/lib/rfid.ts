@@ -60,8 +60,13 @@ export type EpcDetail = {
   fonte: string | null;
 };
 
-/** Ambiente da iTAG onde vivem as tags impressas na era posvenda. */
-const ITAG_EXTRA_BASES = ["https://itag2.itagalert.com.br/itagalert_berzerk"];
+/** Ambiente da iTAG onde vive TODA etiqueta real — as da era posvenda e as
+ *  que este app imprime (2,85 M linhas em 26/10, tag gerada no mesmo dia). O
+ *  ambiente configurado pra impressão (`itagalert_integracao`, 51 mil linhas
+ *  de teste) fica como ÚLTIMO recurso: até 0.9.54 ele era consultado primeiro
+ *  e, quando travou (26/10), cada peça esperava 8 s à toa antes de cair no
+ *  fallback do nexus com tamanho errado. */
+const ITAG_LOOKUP_BASE_PRINCIPAL = "https://itag2.itagalert.com.br/itagalert_berzerk";
 
 /**
  * Resolve EPC → produto (ean13/nome/tamanho/cor) na nuvem da iTAG — o caminho
@@ -71,14 +76,23 @@ const ITAG_EXTRA_BASES = ["https://itag2.itagalert.com.br/itagalert_berzerk"];
 export async function lookupEpcDetails(epcs: string[]): Promise<EpcDetail[]> {
   if (epcs.length === 0) return [];
   const cfg = getIprintConfig();
-  // Não repete o ambiente já configurado (compara pelo path final, o protocolo varia).
-  const envOf = (u: string) => u.replace(/\/+$/, "").split("/").pop();
   return invoke<EpcDetail[]>("itag_epc_details", {
     config: toRustConfig(cfg),
     epcs,
-    extraBases: ITAG_EXTRA_BASES.filter((b) => envOf(b) !== envOf(cfg.baseUrl)),
+    bases: basesDeLookup(cfg.baseUrl),
     codigoEmpresa: cfg.codigoEmpresa,
   });
+}
+
+/** Ordem de consulta: berzerk primeiro; o ambiente configurado só se for outro
+ *  (compara pelo path final, o protocolo varia). Pura — testada. */
+export function basesDeLookup(baseConfigurada: string): string[] {
+  const envOf = (u: string) => u.trim().replace(/\/+$/, "").split("/").pop();
+  const bases = [ITAG_LOOKUP_BASE_PRINCIPAL];
+  if (baseConfigurada.trim() && envOf(baseConfigurada) !== envOf(ITAG_LOOKUP_BASE_PRINCIPAL)) {
+    bases.push(baseConfigurada.trim());
+  }
+  return bases;
 }
 
 export async function startReading(host?: string): Promise<void> {

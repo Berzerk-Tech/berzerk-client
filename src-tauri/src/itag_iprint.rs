@@ -16,8 +16,10 @@ use std::time::Duration;
 
 const PRINT_TIMEOUT_SECS: u64 = 60;
 const QUERY_TIMEOUT_SECS: u64 = 30;
-/// Consulta EPC→peça na nuvem: por chamada. Ver `itag_epc_details`.
-const LOOKUP_TIMEOUT_SECS: u64 = 8;
+/// Consulta EPC→peça na nuvem: por chamada. Ver `itag_epc_details`. Era 8 s;
+/// em 26/10 o `itagalert_integracao` travou a manhã inteira e cada peça pagava
+/// os 8 s antes de cair no fallback — 4 s cobre a nuvem saudável (p99 < 2 s).
+const LOOKUP_TIMEOUT_SECS: u64 = 4;
 const LOOKUP_CONCURRENCY: usize = 16;
 const POLL_INTERVAL_MS: u64 = 800;
 const POLL_MAX_ATTEMPTS: u32 = 12; // ~10s total
@@ -352,28 +354,37 @@ pub struct EpcDetail {
 /// avisa que tags em campo nem sempre são SGTIN padrão GS1 — a nuvem deles é a
 /// fonte da verdade do que cada EPC significa.
 ///
-/// Tenta cada base na ordem: o ambiente configurado primeiro e depois
-/// `extra_bases` (tags da era posvenda vivem no itagalert_berzerk; as nossas no
-/// itagalert_integracao). Mesmas credenciais Basic pra todos (validado).
+/// Tenta cada base de `bases` NA ORDEM dada pelo front (`lookupEpcDetails` em
+/// `src/lib/rfid.ts`): o `itagalert_berzerk` primeiro — é onde vive TODA
+/// etiqueta real (2,85 M em 26/10, inclusive as que este app imprime); o
+/// ambiente configurado pra impressão (`itagalert_integracao`, 51 mil linhas
+/// de teste) só se o berzerk disser que o EPC não existe. Até 0.9.54 era o
+/// contrário e a mesa pagava uma chamada perdida (8 s quando ele travava) por
+/// peça. `bases` vazio = só o ambiente configurado. Mesmas credenciais Basic
+/// pra todos (validado).
 #[tauri::command(rename_all = "camelCase")]
 pub async fn itag_epc_details(
     config: IprintConfig,
     epcs: Vec<String>,
-    extra_bases: Option<Vec<String>>,
+    bases: Option<Vec<String>>,
     codigo_empresa: Option<u32>,
 ) -> Result<Vec<EpcDetail>, String> {
+    let bases_pedidas = bases;
     // Timeout curto POR CHAMADA: o app espera o conjunto todo (`RESOLVE_TIMEOUT_MS`
     // no RfidContext) e, se estourar, perde tudo — 30 s numa chamada travada
     // derrubava a mesa inteira pro fallback do nexus.
     let client = build_client(LOOKUP_TIMEOUT_SECS).map_err(|e| format!("client_init: {}", e))?;
     let empresa = codigo_empresa.unwrap_or(1);
 
-    let mut bases = vec![base(&config)];
-    for b in extra_bases.unwrap_or_default() {
+    let mut bases: Vec<String> = Vec::new();
+    for b in bases_pedidas.unwrap_or_default() {
         let b = b.trim().trim_end_matches('/').to_string();
         if !b.is_empty() && !bases.contains(&b) {
             bases.push(b);
         }
+    }
+    if bases.is_empty() {
+        bases.push(base(&config));
     }
 
     // TODOS os EPCs em paralelo (teto de LOOKUP_CONCURRENCY). Até 0.9.39 eram
