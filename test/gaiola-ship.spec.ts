@@ -6,7 +6,7 @@
 import { describe, expect, it } from "vitest";
 import { ApiError } from "../src/lib/api";
 import { classificarCodigoShip, destravarGaiola, proximoJobDaFila, type ShipRetryJob } from "../src/lib/shipRetry";
-import { EXP_ERR, gaiolaCheiaDetails, shipErrorMessage } from "../src/services/expedicao";
+import { EXP_ERR, gaiolaCheiaDetails, mensagemEtiquetaMlObrigatoria, shipErrorMessage } from "../src/services/expedicao";
 
 const CORPO = { error: "gaiola_cheia", message: "Gaiola 12 está cheia (300/300). Feche a gaiola pra continuar.", gaiolaNumero: 12, contagem: 300, limite: 300 };
 
@@ -50,5 +50,18 @@ describe("409 gaiola_cheia", () => {
     // Sem job preso devolve o mesmo array (sem re-render à toa).
     const semPreso = [job("x")];
     expect(destravarGaiola(semPreso)).toBe(semPreso);
+  });
+});
+
+describe("etiqueta_ml_obrigatoria", () => {
+  it("é definitivo (sem retry) e leva a message do servidor", () => {
+    const corpo = { error: "etiqueta_ml_obrigatoria", message: "Sem etiqueta ML." };
+    const e = new ApiError(409, "x", corpo);
+    expect(mensagemEtiquetaMlObrigatoria(e)).toBe("Sem etiqueta ML.");
+    expect(classificarCodigoShip(EXP_ERR.ETIQUETA_ML_OBRIGATORIA, null, null, mensagemEtiquetaMlObrigatoria(e))).toMatchObject({
+      ok: false,
+      tipo: "definitivo",
+      mensagem: "Sem etiqueta ML.",
+    });
   });
 });

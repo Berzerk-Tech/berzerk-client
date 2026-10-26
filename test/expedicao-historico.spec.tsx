@@ -158,6 +158,64 @@ describe("um pedido = UMA página 100×150", () => {
     expect(args.printSettings).toBe("1,fit");
   });
 
+  describe("Mercado Livre — etiqueta do Mercado Envios", () => {
+    const ML = { id: "ord-ml", numero: "9", canal: "mercado_livre" as const };
+    const DANFE_ML = { chave_acesso: "3525", numero: "1", emitente: {}, cliente: {}, itens: [] };
+    const ETQ = { base64: "RVRRTUw=", formato: "pdf" as const, fonte: "tiny" as const };
+
+    it("etiqueta presente: imprime o PDF da etiqueta ML (oficial) e registra etiqueta_ml na 2a via", async () => {
+      getDocumentos.mockResolvedValue({ danfe: DANFE_ML, etiqueta: null, trackingNumber: null, etiquetaMl: ETQ });
+      const r = await imprimirDocumentoDoPedido(ML, "mesa");
+      expect(r.ok).toBe(true);
+      const [, args] = invoke.mock.calls[0] as [string, { base64: string; jobName: string }];
+      expect(args.base64).toBe("RVRRTUw=");
+      expect(args.jobName).toContain("ML");
+      expect(r.aviso).toBeUndefined();
+      await imprimirDocumentoDoPedido(ML, "historico");
+      expect(registrarReimpressao).toHaveBeenCalledWith("ord-ml", "etiqueta_ml", "historico");
+    });
+
+    it("obrigatória e sem etiqueta: não imprime e devolve etiqueta_ml_indisponivel", async () => {
+      getDocumentos.mockResolvedValue({
+        danfe: DANFE_ML, etiqueta: null, trackingNumber: null,
+        etiquetaMl: null, etiquetaMlObrigatoria: true, etiquetaMlErro: { codigo: "x", mensagem: "Tiny fora do ar." },
+      });
+      const r = await imprimirDocumentoDoPedido(ML, "mesa");
+      expect(r.ok).toBe(false);
+      expect(r.codigo).toBe("etiqueta_ml_indisponivel");
+      expect(r.mensagem).toContain("Tiny fora do ar.");
+      expect(invoke).not.toHaveBeenCalled();
+    });
+
+    it("trava desligada e sem etiqueta: sai a DANFE com aviso", async () => {
+      getDocumentos.mockResolvedValue({
+        danfe: DANFE_ML, etiqueta: null, trackingNumber: null,
+        etiquetaMl: null, etiquetaMlObrigatoria: false, etiquetaMlErro: { codigo: "x", mensagem: "sem etiqueta" },
+      });
+      const r = await imprimirDocumentoDoPedido(ML, "mesa");
+      expect(r.ok).toBe(true);
+      expect(r.aviso).toContain("DANFE");
+      expect((invoke.mock.calls[0] as [string, { jobName: string }])[1].jobName).toContain("DANFE");
+    });
+
+    it("API velha (sem os campos): DANFE sem aviso", async () => {
+      getDocumentos.mockResolvedValue({ danfe: DANFE_ML, etiqueta: null, trackingNumber: null });
+      const r = await imprimirDocumentoDoPedido(ML, "mesa");
+      expect(r.ok).toBe(true);
+      expect(r.aviso).toBeUndefined();
+    });
+
+    it("etiqueta + erro juntos: a etiqueta vence", async () => {
+      getDocumentos.mockResolvedValue({
+        danfe: DANFE_ML, etiqueta: null, trackingNumber: null,
+        etiquetaMl: ETQ, etiquetaMlErro: { codigo: "x", mensagem: "ruído" }, etiquetaMlObrigatoria: true,
+      });
+      const r = await imprimirDocumentoDoPedido(ML, "mesa");
+      expect(r.ok).toBe(true);
+      expect((invoke.mock.calls[0] as [string, { base64: string }])[1].base64).toBe("RVRRTUw=");
+    });
+  });
+
   it("pedido Mercado Livre sem NF: aviso, sem imprimir", async () => {
     getDocumentos.mockResolvedValue({ danfe: null, etiqueta: { base64: "QUJD", formato: "pdf" }, trackingNumber: null });
     const r = await imprimirDocumentoDoPedido({ id: "ord-ml", numero: "9", canal: "mercado_livre" }, "mesa");

@@ -122,7 +122,7 @@ Cruza os EPCs lidos na mesa com pedidos `awaiting_pickup`.
 
 ---
 
-### 3.2 `GET /expedicao/:orderId/documentos`
+### 3.2 `GET /expedicao/orders/:id/documentos`
 
 Devolve o que precisa ser impresso.
 
@@ -153,6 +153,13 @@ Devolve o que precisa ser impresso.
   não bater no Tiny toda vez.
 - **Somente leitura** (buscar/cachear a NF não muda o estado do pedido).
 - **404** se o pedido não existir; o app degrada com aviso.
+- **Mercado Livre (nexus 0.9.55+)**: para pedido do canal `mercado_livre` a resposta
+  ganha campos OPCIONAIS: `etiquetaMl?: { base64, formato: "pdf", fonte: "cache" | "tiny" } | null`
+  (etiqueta do Mercado Envios emitida pelo Tiny; é o documento impresso, no lugar da DANFE),
+  `etiquetaMlErro?: { codigo, mensagem } | null` (`mensagem` em pt-BR pra operadora) e
+  `etiquetaMlObrigatoria?: boolean` (trava do servidor: `true` = sem etiqueta o app não imprime
+  nem embala; `false`/ausente = cai na DANFE simplificada com aviso). A rota `POST /expedicao/orders/:id/etiqueta-ml` (`{ refresh?: boolean }`) existe na API, mas o app não a chama: bipar de novo já refaz a busca no servidor.
+  O `ship` pode responder 409 `{ error: "etiqueta_ml_obrigatoria", message }` — definitivo, sem retry.
 
 ---
 

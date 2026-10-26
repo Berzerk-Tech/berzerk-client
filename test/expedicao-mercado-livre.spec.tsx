@@ -125,6 +125,15 @@ describe("Expedição — pedido Mercado Livre", () => {
     expect(screen.queryByText(/SEM etiqueta/)).toBeNull();
   }, 20000);
 
+  it("no canal ML com etiqueta obrigatória e sem etiqueta: não imprime, não embala nem expede", async () => {
+    getDocumentos.mockResolvedValue({ danfe: DANFE, etiqueta: null, trackingNumber: null, etiquetaMl: null, etiquetaMlObrigatoria: true });
+    await abrirPedido();
+    expect(await screen.findByText(/ainda não disponível no Tiny/, {}, { timeout: 3000 })).toBeTruthy();
+    await new Promise((r) => setTimeout(r, 300));
+    expect(invoke.mock.calls.filter(([cmd]) => cmd === "print_pdf_silent")).toHaveLength(0);
+    expect(shipOrder).not.toHaveBeenCalled();
+  }, 10000);
+
   it("no canal ML sem NF: trava em danfe_ausente, não embala nem expede", async () => {
     getDocumentos.mockResolvedValue({ danfe: null, etiqueta: null, trackingNumber: null });
     await abrirPedido();
