@@ -102,7 +102,7 @@ export function destravarGaiola(queue: ShipRetryJob[]): ShipRetryJob[] {
 /** Códigos em que o servidor discorda da conferência da mesa — precisam de motivo HUMANO (trava de supervisor). */
 export const CODIGOS_CONFERENCIA = new Set<string>(["tags_incompletas", "pecas_insuficientes", "liberacao_necessaria"]);
 /** Códigos em que repetir não resolve: alguém mexeu no pedido no Nexus. */
-export const CODIGOS_DEFINITIVOS = new Set<string>([EXP_ERR.INVALID_STATUS, EXP_ERR.ORDER_NOT_FOUND]);
+export const CODIGOS_DEFINITIVOS = new Set<string>([EXP_ERR.INVALID_STATUS, EXP_ERR.ORDER_NOT_FOUND, EXP_ERR.ETIQUETA_ML_OBRIGATORIA]);
 
 export type ShipTentativa =
   | {

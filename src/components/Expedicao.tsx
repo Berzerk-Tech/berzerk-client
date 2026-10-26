@@ -45,6 +45,7 @@ import {
   isEndpointMissing,
   markLabelPrinted,
   motivoRecusa,
+  mensagemEtiquetaMlObrigatoria,
   shipErrorMessage,
   shipOrder,
   type AwbJaColetadoDetails,
@@ -155,7 +156,7 @@ async function expedirEmbalado(job: ShipRetryJob, segundaVez = false): Promise<S
       }
       return expedirEmbalado(job, true);
     }
-    return classificarCodigoShip(code, awbJaColetadoDetails(e), gaiolaCheiaDetails(e), motivoRecusa(e)?.message);
+    return classificarCodigoShip(code, awbJaColetadoDetails(e), gaiolaCheiaDetails(e), motivoRecusa(e)?.message ?? mensagemEtiquetaMlObrigatoria(e));
   }
 }
 
@@ -605,15 +606,26 @@ export function Expedicao({ onBack }: Props) {
       }
       rastreioTentativasRef.current = null;
 
-      const r = await imprimirDocumentoDoPedido(order, "mesa", docs);
+      const r = await imprimirDocumentoDoPedido(order, "mesa", docs, () =>
+        showNotice("Buscando etiqueta do Mercado Livre no Tiny…", 30000),
+      );
 
+      if (documento === "danfe") showNotice(null); // some o "Buscando etiqueta…"
       if (!r.ok) {
         // No oficial o documento é pré-requisito: sem papel, não expede.
         if (oficial) {
           setFlow({
             kind: "error",
-            code: documento === "etiqueta" ? "etiqueta_ausente" : "danfe_ausente",
-            message: `${r.mensagem} Verifique a impressora — o pedido não avança sem a ${rotulo}.`,
+            code:
+              r.codigo === "etiqueta_ml_indisponivel"
+                ? "etiqueta_ml_indisponivel"
+                : documento === "etiqueta"
+                  ? "etiqueta_ausente"
+                  : "danfe_ausente",
+            message:
+              r.codigo === "etiqueta_ml_indisponivel"
+                ? r.mensagem
+                : `${r.mensagem} Verifique a impressora — o pedido não avança sem a ${rotulo}.`,
             order,
           });
           return;
@@ -622,6 +634,8 @@ export function Expedicao({ onBack }: Props) {
         setFlow({ kind: "packing", order, lidas, override });
         return;
       }
+
+      if (r.aviso) showNotice(r.aviso, 10000);
 
       // `printed_at` da etiqueta é o carimbo de embalagem que o `ship` exige —
       // só existe pra conta JT (FM não tem linha em `jt_shipping_labels`).
@@ -1558,7 +1572,7 @@ function StageCenter({
             >
               {reprintingId === ja.orderId
                 ? "Reimprimindo…"
-                : `↻ Reimprimir ${doc === "etiqueta" ? "etiqueta" : "DANFE"}`}
+                : ja?.canal === "mercado_livre" ? "↻ Reimprimir documento" : `↻ Reimprimir ${doc === "etiqueta" ? "etiqueta" : "DANFE"}`}
             </button>
           )}
           <button style={redBtn} onClick={onRestart}>Nova leitura</button>

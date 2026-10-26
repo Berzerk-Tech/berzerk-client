@@ -14,6 +14,7 @@ const epcMatch = vi.fn();
 const getDocumentos = vi.fn();
 const markLabelPrinted = vi.fn();
 const shipOrder = vi.fn();
+const obterEtiquetaMl = vi.fn();
 const invoke = vi.fn();
 let presence: ((cur: string[]) => void) | null = null;
 
@@ -25,6 +26,7 @@ vi.mock("../src/services/expedicao", async () => {
     getDocumentos: (...a: unknown[]) => getDocumentos(...a),
     markLabelPrinted: (...a: unknown[]) => markLabelPrinted(...a),
     shipOrder: (...a: unknown[]) => shipOrder(...a),
+    obterEtiquetaMl: (...a: unknown[]) => obterEtiquetaMl(...a),
   };
 });
 vi.mock("../src/contexts/RfidContext", () => ({
@@ -102,6 +104,7 @@ describe("Expedição — pedido Mercado Livre", () => {
     getDocumentos.mockReset().mockResolvedValue({ danfe: DANFE, etiqueta: null, trackingNumber: null });
     markLabelPrinted.mockReset().mockResolvedValue(undefined);
     shipOrder.mockReset().mockResolvedValue({ gaiola: null });
+    obterEtiquetaMl.mockReset().mockResolvedValue({ ok: false, erro: { codigo: "x", mensagem: "Etiqueta ainda não disponível no Tiny." } });
     invoke.mockReset().mockImplementation(async (cmd: string) =>
       cmd === "print_engine_status" ? { ok: true, printer: null, message: null, engine: "sumatra" } : { ok: true },
     );
@@ -124,6 +127,15 @@ describe("Expedição — pedido Mercado Livre", () => {
     expect(screen.queryByText(/ainda não tem o rastreio/)).toBeNull();
     expect(screen.queryByText(/SEM etiqueta/)).toBeNull();
   }, 20000);
+
+  it("no canal ML com etiqueta obrigatória e sem etiqueta: não imprime, não embala nem expede", async () => {
+    getDocumentos.mockResolvedValue({ danfe: DANFE, etiqueta: null, trackingNumber: null, etiquetaMl: null, etiquetaMlObrigatoria: true });
+    await abrirPedido();
+    expect(await screen.findByText(/ainda não disponível no Tiny/, {}, { timeout: 3000 })).toBeTruthy();
+    await new Promise((r) => setTimeout(r, 300));
+    expect(invoke.mock.calls.filter(([cmd]) => cmd === "print_pdf_silent")).toHaveLength(0);
+    expect(shipOrder).not.toHaveBeenCalled();
+  }, 10000);
 
   it("no canal ML sem NF: trava em danfe_ausente, não embala nem expede", async () => {
     getDocumentos.mockResolvedValue({ danfe: null, etiqueta: null, trackingNumber: null });

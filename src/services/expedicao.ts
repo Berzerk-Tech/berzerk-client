@@ -156,7 +156,15 @@ export type Documentos = {
   danfe: DanfeData | null;
   etiqueta: { base64: string; formato: "pdf" | "png" } | null;
   trackingNumber: string | null;
+  /** Etiqueta do Mercado Envios (só pedido do canal `mercado_livre`; ausente em API anterior). */
+  etiquetaMl?: EtiquetaMl | null;
+  /** Por que a etiqueta ML não veio — `mensagem` já em pt-BR pra operadora. */
+  etiquetaMlErro?: { codigo: string; mensagem: string } | null;
+  /** Trava do servidor: true = sem etiqueta ML o pedido não embala. */
+  etiquetaMlObrigatoria?: boolean;
 };
+
+export type EtiquetaMl = { base64: string; formato: "pdf"; fonte: "cache" | "tiny" };
 
 // ---------------------------------------------------------------------------
 // Ship + histórico
@@ -192,7 +200,7 @@ export type ExpedicaoHistoryOrder = {
 };
 
 /** Documento reimprimível a partir do histórico / da tela "já foi expedido". */
-export type DocumentoReimpressao = "danfe" | "etiqueta";
+export type DocumentoReimpressao = "danfe" | "etiqueta" | "etiqueta_ml";
 
 export type ExpedicaoHistoryResponse = {
   items: ExpedicaoHistoryOrder[];
@@ -221,6 +229,8 @@ export const EXP_ERR = {
   GAIOLA_CHEIA: "gaiola_cheia",
   /** 409 do `fecharGaiola`: sem gaiola aberta ou com zero pedidos. */
   GAIOLA_VAZIA: "gaiola_vazia",
+  /** 409 do ship: pedido ML sem etiqueta do Mercado Envios e a trava do servidor ligada. Definitivo. */
+  ETIQUETA_ML_OBRIGATORIA: "etiqueta_ml_obrigatoria",
 } as const;
 
 /** Extrai o `{ error: 'CODIGO' }` de um ApiError (ou null se não for de negócio). */
@@ -275,6 +285,8 @@ export function shipErrorMessage(code: string | null): string {
       return "a gaiola está cheia. Feche a gaiola pra continuar.";
     case EXP_ERR.GAIOLA_VAZIA:
       return "não há gaiola aberta com pedidos pra fechar.";
+    case EXP_ERR.ETIQUETA_ML_OBRIGATORIA:
+      return "o pedido do Mercado Livre está sem a etiqueta do Mercado Envios.";
     default:
       return "erro no servidor de expedição.";
   }
@@ -497,6 +509,41 @@ export function getDocumentos(orderId: string): Promise<Documentos> {
   if (isExpedicaoSimulacao()) return Promise.resolve(mockDocumentos(orderId));
   return apiRequest<Documentos>(`/expedicao/orders/${orderId}/documentos`);
 }
+
+export type EtiquetaMlResultado =
+  | { ok: true; etiqueta: EtiquetaMl }
+  | { ok: false; erro: { codigo: string; mensagem: string } };
+
+/** O POST chama o Tiny e pode levar ~25 s no servidor. */
+export const ETIQUETA_ML_TIMEOUT_MS = 35000;
+
+/**
+ * Busca no Tiny (via servidor) a etiqueta do Mercado Envios. O `GET documentos` só lê o
+ * cache; é este POST que baixa. 200 mesmo quando o Tiny falha (`ok: false`). Pode rejeitar
+ * por rede/timeout (35 s) — quem chama trata como "Tiny demorou".
+ */
+export async function obterEtiquetaMl(orderId: string, refresh = false): Promise<EtiquetaMlResultado> {
+  const ctl = new AbortController();
+  const t = setTimeout(() => ctl.abort(), ETIQUETA_ML_TIMEOUT_MS);
+  try {
+    return await apiRequest<EtiquetaMlResultado>(`/expedicao/orders/${orderId}/etiqueta-ml`, {
+      method: "POST",
+      body: { refresh },
+      signal: ctl.signal,
+    });
+  } finally {
+    clearTimeout(t);
+  }
+}
+
+/** `message` do 409 `etiqueta_ml_obrigatoria` (texto do servidor, pt-BR); null em outro erro. */
+export function mensagemEtiquetaMlObrigatoria(e: unknown): string | null {
+  if (!(e instanceof ApiError) || e.status !== 409 || !e.body || typeof e.body !== "object") return null;
+  const b = e.body as Record<string, unknown>;
+  if (b.error !== EXP_ERR.ETIQUETA_ML_OBRIGATORIA) return null;
+  return typeof b.message === "string" && b.message.trim() ? b.message : null;
+}
+
 
 /**
  * Marca a etiqueta J&T como impressa (passo OBRIGATÓRIO antes do ship — o ship

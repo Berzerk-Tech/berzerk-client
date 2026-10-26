@@ -281,7 +281,9 @@ export function ExpedicaoHistoryModal({ onClose }: { onClose: () => void }) {
                     >
                       {imprimindo === o.id
                         ? "Imprimindo…"
-                        : documento === "etiqueta"
+                        : o.canal === "mercado_livre"
+                          ? "↻ Reimprimir documento"
+                          : documento === "etiqueta"
                           ? "↻ Reimprimir etiqueta"
                           : "↻ Reimprimir DANFE"}
                     </button>
