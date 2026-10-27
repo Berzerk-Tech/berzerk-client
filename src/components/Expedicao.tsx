@@ -31,6 +31,22 @@ import {
   type CanalExpedicao,
 } from "../lib/canalExpedicao";
 import { ExpedicaoHistoryModal } from "./ExpedicaoHistoryModal";
+import { ModoFilaTabs } from "./expedicao/ModoFilaTabs";
+import { UnicosFila } from "./expedicao/UnicosFila";
+import { UnicosGrupos } from "./expedicao/UnicosGrupos";
+import {
+  UNICOS_MAX_TAGS,
+  erroSepararUnico,
+  getGrupoEscolhido,
+  getModoFila,
+  matchDoSeparar,
+  replayJaExpedido,
+  unicosRotaAusente,
+  setGrupoEscolhido,
+  setModoFila,
+  type GrupoEscolhido,
+  type ModoFila,
+} from "../lib/unicosExpedicao";
 import { SupervisorModal } from "./SupervisorModal";
 import {
   EXP_ERR,
@@ -47,6 +63,7 @@ import {
   motivoRecusa,
   mensagemEtiquetaMlObrigatoria,
   shipErrorMessage,
+  separarUnico,
   shipOrder,
   type AwbJaColetadoDetails,
   type Documentos,
@@ -61,6 +78,7 @@ import {
 import {
   getExpedicaoMode,
   isExpedicaoSimulacao,
+  isModoTeste,
   type ExpedicaoMode,
 } from "../services/expedicaoMode";
 import { conferir, type Conferencia } from "../lib/conferenciaExpedicao";
@@ -117,6 +135,8 @@ type Flow =
       order?: ExpedicaoOrder;
       /** Só no `ja_expedido`: o pedido lá atrás, pra oferecer a reimpressão. */
       jaExpedido?: JaExpedido;
+      /** Modo Únicos: oferece o botão "Trocar fila" (peça de outra fila). */
+      trocarFila?: boolean;
     };
 
 const PACKING_MS = 5000;
@@ -240,6 +260,23 @@ export function Expedicao({ onBack }: Props) {
   const [canal, setCanal] = useState<CanalExpedicao>(() => getCanalExpedicao());
   const canalRef = useRef<CanalExpedicao>(canal);
   canalRef.current = canal;
+  // Modo Únicos (27/10): só no e-commerce. Mercado Livre sempre em Pedidos.
+  // Modo teste (padrão) não grava no servidor, e o `separar` grava (claim + complete):
+  // Únicos só no oficial (na simulação o `separar` é mock, então vale).
+  const unicosSoOficial = isModoTeste() && !isExpedicaoSimulacao();
+  const unicosSoOficialRef = useRef(unicosSoOficial);
+  unicosSoOficialRef.current = unicosSoOficial;
+  const [modoFila, setModoFilaState] = useState<ModoFila>(() =>
+    getCanalExpedicao() === "ecommerce" && !(isModoTeste() && !isExpedicaoSimulacao()) ? getModoFila() : "pedidos",
+  );
+  const modoFilaRef = useRef<ModoFila>(modoFila);
+  modoFilaRef.current = modoFila;
+  const [grupoUnicos, setGrupoUnicos] = useState<GrupoEscolhido | null>(() => getGrupoEscolhido());
+  const grupoRef = useRef<GrupoEscolhido | null>(grupoUnicos);
+  grupoRef.current = grupoUnicos;
+  const [unicosIndisponivel, setUnicosIndisponivel] = useState(false);
+  // Soma 1 a cada ciclo concluído: a lista do grupo refaz a contagem.
+  const [versaoUnicos, setVersaoUnicos] = useState(0);
   const simulacao = isExpedicaoSimulacao();
   const [flow, setFlow] = useState<Flow>({ kind: "idle" });
   const flowRef = useRef<Flow>(flow);
@@ -295,6 +332,8 @@ export function Expedicao({ onBack }: Props) {
   // Assinatura do último conjunto que FALHOU no match — os retries desse mesmo
   // conjunto são silenciosos (sem beep/aviso repetido).
   const lastFailSigRef = useRef<string>("");
+  // A última falha do Únicos foi definitiva (não adianta repetir o POST pro mesmo conjunto da mesa).
+  const unicoFalhaDefinitivaRef = useRef(false);
   const resolveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const modoRef = useRef<ExpedicaoMode>(modo);
   modoRef.current = modo;
@@ -365,11 +404,57 @@ export function Expedicao({ onBack }: Props) {
       }
       setCanalExpedicao(novo);
       setCanal(novo);
+      if (novo !== "ecommerce" && modoFilaRef.current !== "pedidos") {
+        setModoFila("pedidos");
+        setModoFilaState("pedidos");
+      }
       reiniciar();
     },
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [reiniciar, showNotice],
   );
+
+  /** Pedidos | Únicos: mesmo reset da mesa que a troca de canal. */
+  const trocarModoFila = useCallback(
+    (novo: ModoFila) => {
+      if (novo === modoFilaRef.current) return;
+      if (novo === "unicos" && unicosSoOficialRef.current) {
+        showNotice("Únicos só no modo oficial.");
+        return;
+      }
+      if (mesaOcupada()) {
+        showNotice("Termine o pedido na mesa antes de trocar o modo.");
+        return;
+      }
+      setModoFila(novo);
+      setModoFilaState(novo);
+      reiniciar();
+    },
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [reiniciar, showNotice],
+  );
+
+  const escolherGrupo = useCallback(
+    (g: GrupoEscolhido | null) => {
+      if (mesaOcupada()) {
+        showNotice("Termine o pedido na mesa antes de trocar a fila.");
+        return;
+      }
+      setGrupoEscolhido(g);
+      setGrupoUnicos(g);
+      grupoRef.current = g;
+      reiniciar();
+    },
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [reiniciar, showNotice],
+  );
+
+  const unicosSemApi = useCallback(() => {
+    setUnicosIndisponivel(true);
+    setModoFila("pedidos");
+    setModoFilaState("pedidos");
+    showNotice("Atualize a API: a fila de únicos ainda não existe no servidor.", 10000);
+  }, [showNotice]);
 
   const doResolve = useCallback(async () => {
     // Modal de justificativa aberto: não re-identifica nem muda de estado.
@@ -406,6 +491,11 @@ export function Expedicao({ onBack }: Props) {
       resolveTimer.current = setTimeout(() => void doResolve(), RESOLVE_RETRY_MS);
     };
     try {
+      // Modo Únicos: o servidor escolhe o pedido pela peça bipada (não há epc-match).
+      if (modoFilaRef.current === "unicos" && canalRef.current === "ecommerce") {
+        await resolverUnico(epcs, gen, retrying, scheduleRetry, sigNow);
+        return;
+      }
       const { matches, unmatchedEpcs, jaExpedidos } = await epcMatch(epcs);
       if (gen !== resolveGenRef.current) return; // mesa mudou no meio — resultado velho
       if (mesaOcupada()) return; // impressão/embalagem começou enquanto o epc-match voava
@@ -523,6 +613,67 @@ export function Expedicao({ onBack }: Props) {
     },
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [rfid, showNotice],
+  );
+
+  // ---- Modo Únicos: bipou a peça → o servidor separa o próximo pedido dela ----
+  // O `order` devolvido entra no fluxo de sempre como um match de 1 peça
+  // (identifica → imprime → embala → ship). O servidor é idempotente por EPC.
+  const resolverUnico = useCallback(
+    async (epcs: string[], gen: number, retrying: boolean, scheduleRetry: () => void, sigNow: string) => {
+      const g = grupoRef.current;
+      if (!g || unicosSoOficialRef.current) {
+        setFlow({ kind: "idle" });
+        return;
+      }
+      // Já recusou esse mesmo conjunto de forma definitiva: mantém o erro na tela, sem novo POST nem bipe.
+      if (retrying && unicoFalhaDefinitivaRef.current) return;
+      // Pedido já na tela e a mesa só oscilou (nenhuma peça nova): re-confere por baixo, sem ir ao servidor.
+      const atual = flowRef.current;
+      if (atual.kind === "identified") {
+        const tags = new Set((atual.order.rfidTags ?? []).map((t) => t.toUpperCase()));
+        if (epcs.length > 0 && epcs.every((t) => tags.has(t.toUpperCase()))) {
+          await identifica(matchDoSeparar(atual.order, epcs), new Set(), gen);
+          return;
+        }
+      }
+      const falha = (e: ReturnType<typeof erroSepararUnico>, tentarDeNovo: boolean) => {
+        if (!retrying) beepError();
+        setFlow({ kind: "error", code: e.code, message: e.message, trocarFila: e.trocarFila });
+        unicoFalhaDefinitivaRef.current = !tentarDeNovo;
+        lastFailSigRef.current = sigNow;
+        if (tentarDeNovo) scheduleRetry();
+      };
+      if (epcs.length > UNICOS_MAX_TAGS) {
+        falha({ code: "varias_pecas", message: "Deixe só uma peça na mesa.", definitivo: true }, false);
+        return;
+      }
+      const leituras = await leiturasRef.current(epcs);
+      if (gen !== resolveGenRef.current || mesaOcupada()) return;
+      let r;
+      try {
+        r = await separarUnico({ rfidTags: epcs, estampa: g.estampa, tamanho: g.tamanho, leituras });
+      } catch (e) {
+        if (gen !== resolveGenRef.current || mesaOcupada()) return;
+        const er = erroSepararUnico(e, g);
+        if (unicosRotaAusente(e)) unicosSemApi();
+        falha(er, !er.definitivo);
+        return;
+      }
+      if (gen !== resolveGenRef.current || mesaOcupada()) return;
+      lastFailSigRef.current = "";
+      if (replayJaExpedido(r)) {
+        // Já saiu: não reimprime. Tira a peça do radar pra não repetir o aviso.
+        for (const e of epcs) processedRef.current.add(e.toUpperCase());
+        beepError();
+        setFlow({ kind: "error", code: "ja_expedido", message: `Pedido #${r.order.numero ?? ""} já foi expedido.` });
+        return;
+      }
+      const f = flowRef.current;
+      if (!(f.kind === "identified" && f.order.id === r.order.id)) beepOk();
+      await identifica(matchDoSeparar(r.order, epcs), new Set(), gen);
+    },
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [unicosSemApi],
   );
 
   // ---- impressão (J&T → DANFE) → embalagem ----
@@ -771,9 +922,13 @@ export function Expedicao({ onBack }: Props) {
     // escondia a tag do pedido vizinho pro resto da sessão — ele nunca mais
     // completava (FALTAM PEÇAS + pecas_insuficientes num pedido inteiro).
     for (const e of lidas) processedRef.current.add(e.toUpperCase());
+    // Únicos: a tag gravada no pedido também sai de cena. Peça parada na mesa
+    // depois do ship não pode disparar `separar` de novo (viraria "já expedido").
+    if (modoFilaRef.current === "unicos") for (const t of order.rfidTags ?? []) processedRef.current.add(t.toUpperCase());
 
     const registra = (enfileirado: boolean) => {
       concluindoRef.current = false;
+      setVersaoUnicos((v) => v + 1);
       setSession((s) => [{ order, at: new Date(), modo: modoRef.current }, ...s].slice(0, 12));
       setFlow({ kind: "done", order, modo: modoRef.current, enfileirado });
       window.setTimeout(() => {
@@ -1283,6 +1438,9 @@ export function Expedicao({ onBack }: Props) {
           <BackButton onClick={onBack} />
           <OperatorChip />
           <CanalTabs canal={canal} onChange={trocarCanal} />
+          {canal === "ecommerce" && (
+            <ModoFilaTabs modo={modoFila} onChange={trocarModoFila} unicosIndisponivel={unicosIndisponivel} unicosSoOficial={unicosSoOficial} />
+          )}
         </div>
         <h2 style={title}>Expedição</h2>
         <div style={hRight}>
@@ -1409,6 +1567,17 @@ export function Expedicao({ onBack }: Props) {
         <LiveReadPanel readLog={readLog} conf={conf} connected={rfid.connected} />
 
         <main style={stage}>
+          {modoFila === "unicos" && canal === "ecommerce" && grupoUnicos && (
+            <UnicosFila
+              grupo={grupoUnicos}
+              versao={versaoUnicos}
+              onTrocar={() => escolherGrupo(null)}
+              trocarDesabilitado={flow.kind === "printing" || flow.kind === "packing" || flow.kind === "done"}
+            />
+          )}
+          {modoFila === "unicos" && canal === "ecommerce" && !grupoUnicos ? (
+            <UnicosGrupos onEscolher={escolherGrupo} onIndisponivel={unicosSemApi} />
+          ) : (
           <StageCenter
             flow={flow}
             conf={conf}
@@ -1422,7 +1591,10 @@ export function Expedicao({ onBack }: Props) {
             reprintingId={reprintingId}
             onReprint={(o) => void reprint(o, "ja_expedido")}
             canalMesa={canal}
+            unicosGrupo={modoFila === "unicos" && canal === "ecommerce" ? grupoUnicos : null}
+            onTrocarFila={() => escolherGrupo(null)}
           />
+          )}
         </main>
 
         <HistorySidebar session={session} reprintingId={reprintingId} onReprint={(o) => void reprint(o, "historico")} />
@@ -1492,12 +1664,17 @@ function StageCenter({
   reprintingId,
   onReprint,
   canalMesa,
+  unicosGrupo,
+  onTrocarFila,
 }: {
   flow: Flow;
   conf: Conferencia | null;
   packingProgress: number;
   autoPrint: boolean;
   canalMesa: CanalExpedicao;
+  /** Modo Únicos com fila escolhida (muda o texto do PRONTO). */
+  unicosGrupo: GrupoEscolhido | null;
+  onTrocarFila: () => void;
   onChoose: (m: EpcMatch) => void;
   onForce: () => void;
   onPrint: () => void;
@@ -1511,7 +1688,9 @@ function StageCenter({
       <div style={centerBlock}>
         <div style={{ ...heroDot, background: "var(--success-dot)" }} />
         <h1 style={heroDisplay}>PRONTO</h1>
-        <p style={heroHint}>Coloque o próximo pedido {rotuloCanal(canalMesa)} na mesa</p>
+        <p style={heroHint}>
+          {unicosGrupo ? "Bipe a próxima peça desta fila na mesa" : `Coloque o próximo pedido ${rotuloCanal(canalMesa)} na mesa`}
+        </p>
       </div>
     );
   }
@@ -1574,7 +1753,8 @@ function StageCenter({
                 : ja?.canal === "mercado_livre" ? "↻ Reimprimir documento" : `↻ Reimprimir ${doc === "etiqueta" ? "etiqueta" : "DANFE"}`}
             </button>
           )}
-          <button style={redBtn} onClick={onRestart}>Nova leitura</button>
+          {flow.trocarFila && <button style={redBtn} onClick={onTrocarFila}>Trocar fila</button>}
+          <button style={flow.trocarFila ? ghostBtn : redBtn} onClick={onRestart}>Nova leitura</button>
         </div>
       </div>
     );

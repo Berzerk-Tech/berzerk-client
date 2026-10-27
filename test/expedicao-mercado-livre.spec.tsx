@@ -114,7 +114,7 @@ describe("Expedição — pedido Mercado Livre", () => {
   it("no canal ML: imprime a DANFE (uma página), não espera rastreio nem marca etiqueta, e expede", async () => {
     await abrirPedido();
     expect(await screen.findByText("MERCADO LIVRE", {}, { timeout: 3000 })).toBeTruthy();
-    expect(screen.getByText(/Sai a DANFE/)).toBeTruthy();
+    expect(screen.getByText(/sai a DANFE/i)).toBeTruthy();
     // Embalagem (5 s) e depois o ship normal.
     await waitFor(() => expect(shipOrder).toHaveBeenCalled(), { timeout: 9000 });
     expect(shipOrder.mock.calls[0][0]).toBe("ord-ml");

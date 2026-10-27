@@ -504,6 +504,97 @@ export async function epcMatch(epcs: string[]): Promise<EpcMatchResponse> {
   };
 }
 
+// ---------------------------------------------------------------------------
+// Únicos (27/10): pedidos e-commerce de UMA peça, agrupados por estampa × tamanho.
+// Contrato: nexus `packages/contracts/src/expedicao-unicos.ts`. Ver NEXUS_EXPEDICAO.md "Únicos".
+// ---------------------------------------------------------------------------
+
+export type UnicoTipo = { produtoId: string; produtoNome: string; cor?: string | null; pedidos: number };
+
+export type UnicoGrupo = {
+  estampa: string;
+  tamanho: string;
+  pedidos: number;
+  prioritarios?: number;
+  imagemUrl?: string | null;
+  tipos?: UnicoTipo[];
+};
+
+export type UnicosResponse = {
+  grupos: UnicoGrupo[];
+  totalPedidos?: number;
+  /** `false` = trava do servidor desligada: estes pedidos ainda aparecem na fila de separação. */
+  filaUnicosAtiva?: boolean;
+};
+
+export type UnicoPedido = {
+  id: string;
+  numero: string | null;
+  cliente?: string | null;
+  produtoId?: string;
+  produtoNome: string;
+  tamanho?: string;
+  ean?: string | null;
+  sku?: string | null;
+  prioritario?: boolean;
+  emitidoEm?: string | null;
+  trackingNumber?: string | null;
+};
+
+export type UnicoSepararResponse = {
+  order: ExpedicaoOrder;
+  /** true = o EPC já tinha separado/expedido um pedido: nada foi duplicado. */
+  replay?: boolean;
+  grupo?: { estampa: string; tamanho: string };
+};
+
+export const UNICOS_ERR = {
+  PECA_DE_OUTRA_FILA: "peca_de_outra_fila",
+  SEM_PEDIDO_UNICO: "sem_pedido_unico",
+  VARIAS_PECAS: "varias_pecas",
+  EPC_NAO_RESOLVIDO: "epc_nao_resolvido",
+  PEDIDO_INDISPONIVEL: "pedido_indisponivel",
+} as const;
+
+export function getUnicos(): Promise<UnicosResponse> {
+  if (isExpedicaoSimulacao()) return Promise.resolve(mockUnicos());
+  return apiRequest<UnicosResponse>("/expedicao/unicos");
+}
+
+export async function getUnicosPedidos(estampa: string, tamanho: string): Promise<UnicoPedido[]> {
+  if (isExpedicaoSimulacao()) return mockUnicosPedidos(estampa, tamanho);
+  const r = await apiRequest<{ pedidos?: UnicoPedido[] }>("/expedicao/unicos/pedidos", { query: { estampa, tamanho } });
+  return r.pedidos ?? [];
+}
+
+/**
+ * Bipou a peça na mesa: o servidor pega o próximo pedido único da variante, faz
+ * claim + complete e devolve o pedido `awaiting_pickup` (ou `shipped`, no replay).
+ * NÃO expede — o app imprime e faz o `ship` de sempre. Idempotente por EPC.
+ */
+export function separarUnico(args: {
+  rfidTags: string[];
+  estampa?: string;
+  tamanho?: string;
+  leituras?: LeituraResolvida[];
+}): Promise<UnicoSepararResponse> {
+  if (isExpedicaoSimulacao()) {
+    const order = mockOrderFor(args.rfidTags);
+    return Promise.resolve({ order, replay: false, grupo: { estampa: args.estampa ?? "Simulação", tamanho: args.tamanho ?? "M" } });
+  }
+  const estacao = estacaoId();
+  return apiRequest<UnicoSepararResponse>("/expedicao/unicos/separar", {
+    method: "POST",
+    body: {
+      rfidTags: args.rfidTags,
+      ...(estacao ? { estacaoId: estacao } : {}),
+      ...(args.estampa ? { estampa: args.estampa } : {}),
+      ...(args.tamanho ? { tamanho: args.tamanho } : {}),
+      ...(args.leituras && args.leituras.length > 0 ? { leituras: args.leituras } : {}),
+    },
+  });
+}
+
 /** Documentos do pedido (etiqueta J&T + DANFE + rastreio). */
 export function getDocumentos(orderId: string): Promise<Documentos> {
   if (isExpedicaoSimulacao()) return Promise.resolve(mockDocumentos(orderId));
@@ -687,6 +778,28 @@ function mockOrderFor(epcs: string[]): ExpedicaoOrder {
     createdAt: now,
     updatedAt: now,
   };
+}
+
+function mockUnicos(): UnicosResponse {
+  return {
+    grupos: [
+      { estampa: "Simulação", tamanho: "M", pedidos: 3, prioritarios: 1, imagemUrl: null, tipos: [{ produtoId: "mock-1", produtoNome: "Oversized", cor: null, pedidos: 3 }] },
+      { estampa: "Simulação", tamanho: "G", pedidos: 2, prioritarios: 0, imagemUrl: null, tipos: [{ produtoId: "mock-2", produtoNome: "Regata", cor: null, pedidos: 2 }] },
+    ],
+    totalPedidos: 5,
+    filaUnicosAtiva: true,
+  };
+}
+
+function mockUnicosPedidos(estampa: string, tamanho: string): UnicoPedido[] {
+  return [1, 2, 3].map((i) => ({
+    id: `mock-un-${estampa}-${tamanho}-${i}`,
+    numero: `BRZ-${1000 + i}`,
+    cliente: "Cliente Demonstração",
+    produtoNome: "Oversized",
+    tamanho,
+    prioritario: i === 1,
+  }));
 }
 
 function mockMatch(epcs: string[]): EpcMatchResponse {
