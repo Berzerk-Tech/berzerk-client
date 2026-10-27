@@ -534,9 +534,8 @@ export function Expedicao({ onBack }: Props) {
       resolveGenRef.current++;
       const oficial = modoRef.current === "oficial";
       // UM documento por pedido, pelo canal: e-commerce → etiqueta J&T;
-      // Mercado Livre → DANFE simplificada (a etiqueta do Mercado Envios sai no
-      // Tiny / Mercado Livre, o Nexus não a tem — 20/10, como o legado fazia
-      // pra pedido sem etiqueta J&T).
+      // Mercado Livre → "danfe" = etiqueta do Mercado Envios buscada no Tiny
+      // pela API (26/10); só sem ela sai a DANFE simplificada.
       const documento = documentoDoPedido(order);
       const rotulo = rotuloDocumento(documento);
       setFlow({ kind: "printing", order });
@@ -1669,7 +1668,7 @@ function OrderPanel({
       {order.canal === "mercado_livre" && (
         <>
           <div style={seloMercadoLivre}>MERCADO LIVRE</div>
-          <div style={etiquetaMlLinha}>Sai a DANFE · a etiqueta do Mercado Envios é impressa no Tiny / Mercado Livre</div>
+          <div style={etiquetaMlLinha}>Imprime a etiqueta do Mercado Envios (buscada no Tiny) · se o Tiny não devolver, sai a DANFE</div>
         </>
       )}
       <div style={orderPanelMain}>
