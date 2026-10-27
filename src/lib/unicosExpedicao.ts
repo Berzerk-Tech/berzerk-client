@@ -1,0 +1,171 @@
+// Modo "Únicos" da Expedição (27/10): fila de pedidos e-commerce de UMA peça,
+// agrupada por estampa × tamanho. Aqui só o que é puro (testável sem tela):
+// persistência do modo/grupo, busca, mensagens de erro e a montagem do match.
+
+import { ApiError } from "./api";
+import type { EpcMatch, ExpedicaoOrder, UnicoGrupo, UnicoSepararResponse } from "../services/expedicao";
+import { UNICOS_ERR } from "../services/expedicao";
+
+export type ModoFila = "pedidos" | "unicos";
+
+/** Máximo de EPCs que o `separar` aceita; acima disso é mais de uma peça na mesa. */
+export const UNICOS_MAX_TAGS = 10;
+
+// Chave própria: `berzerk_expedicao_modo_v1` já é o modo oficial/teste (services/expedicaoMode).
+const MODO_KEY = "berzerk_expedicao_fila_v1";
+const GRUPO_KEY = "berzerk_expedicao_unicos_grupo_v1";
+
+export type GrupoEscolhido = { estampa: string; tamanho: string };
+
+export function getModoFila(): ModoFila {
+  try {
+    return localStorage.getItem(MODO_KEY) === "unicos" ? "unicos" : "pedidos";
+  } catch {
+    return "pedidos";
+  }
+}
+
+export function setModoFila(modo: ModoFila): void {
+  try {
+    localStorage.setItem(MODO_KEY, modo);
+  } catch {
+    /* ignore */
+  }
+}
+
+export function getGrupoEscolhido(): GrupoEscolhido | null {
+  try {
+    const raw = localStorage.getItem(GRUPO_KEY);
+    if (!raw) return null;
+    const g = JSON.parse(raw) as Partial<GrupoEscolhido>;
+    if (typeof g.estampa === "string" && g.estampa && typeof g.tamanho === "string" && g.tamanho) {
+      return { estampa: g.estampa, tamanho: g.tamanho };
+    }
+  } catch {
+    /* ignore */
+  }
+  return null;
+}
+
+export function setGrupoEscolhido(g: GrupoEscolhido | null): void {
+  try {
+    if (g) localStorage.setItem(GRUPO_KEY, JSON.stringify(g));
+    else localStorage.removeItem(GRUPO_KEY);
+  } catch {
+    /* ignore */
+  }
+}
+
+/** Minúsculo e sem acento — a busca da tela não pode depender de como se digita. */
+export function normalizarBusca(s: string): string {
+  return s
+    .normalize("NFD")
+    .replace(/[̀-ͯ]/g, "")
+    .toLowerCase()
+    .trim();
+}
+
+/** "LEG DAY · G" — o título grande do cabeçalho. */
+export function rotuloGrupo(g: GrupoEscolhido): string {
+  return `${g.estampa} · ${g.tamanho}`.toUpperCase();
+}
+
+export function mesmoGrupo(a: GrupoEscolhido | null | undefined, b: GrupoEscolhido | null | undefined): boolean {
+  return !!a && !!b && a.estampa === b.estampa && a.tamanho === b.tamanho;
+}
+
+/** Filtra os grupos por estampa, tamanho ou tipo de peça (cada palavra da busca precisa casar). */
+export function filtrarGrupos(grupos: UnicoGrupo[], busca: string): UnicoGrupo[] {
+  const palavras = normalizarBusca(busca).split(/\s+/).filter(Boolean);
+  if (palavras.length === 0) return grupos;
+  return grupos.filter((g) => {
+    const alvo = normalizarBusca([g.estampa, g.tamanho, ...(g.tipos ?? []).map((t) => t.produtoNome)].join(" "));
+    return palavras.every((p) => alvo.includes(p));
+  });
+}
+
+export type ErroUnicos = {
+  code: string;
+  message: string;
+  /** Erro que só muda com a mesa: não adianta o retry automático. */
+  definitivo: boolean;
+  /** Mostra o botão "Trocar fila" no painel de erro. */
+  trocarFila?: boolean;
+};
+
+function str(v: unknown): string {
+  return typeof v === "string" ? v : "";
+}
+
+/**
+ * 404 do Nest sem rota ("Cannot GET /expedicao/unicos"): a API ainda não tem a fila.
+ * Um 404 de gateway/proxy (sem esse corpo) é passageiro e NÃO desliga o modo.
+ */
+export function unicosRotaAusente(e: unknown): boolean {
+  if (!(e instanceof ApiError) || e.status !== 404) return false;
+  const b = e.body;
+  if (!b || typeof b !== "object") return false;
+  const m = (b as Record<string, unknown>).message;
+  return typeof m === "string" && m.startsWith("Cannot ");
+}
+
+/** Erro do `separar` (ou de rede) → texto pt-BR pro painel da mesa. */
+export function erroSepararUnico(e: unknown, grupo: GrupoEscolhido | null): ErroUnicos {
+  if (e instanceof ApiError && e.body && typeof e.body === "object") {
+    const b = e.body as Record<string, unknown>;
+    const code = str(b.error);
+    const peca = `${str(b.produtoNome)} ${str(b.tamanho)}`.trim();
+    switch (code) {
+      case UNICOS_ERR.PECA_DE_OUTRA_FILA:
+        return {
+          code,
+          message: `Esta peça é ${[str(b.estampa), str(b.tamanho)].filter(Boolean).join(" ")}. A fila escolhida é ${grupo ? rotuloGrupo(grupo) : "outra"}.`,
+          definitivo: true,
+          trocarFila: true,
+        };
+      case UNICOS_ERR.SEM_PEDIDO_UNICO:
+        return { code, message: `Nenhum pedido único aguardando ${peca || "esta peça"}.`, definitivo: false };
+      case UNICOS_ERR.VARIAS_PECAS:
+        return { code, message: "Deixe só uma peça na mesa.", definitivo: true };
+      case UNICOS_ERR.EPC_NAO_RESOLVIDO:
+        return { code, message: "Peça não reconhecida (etiqueta sem cadastro).", definitivo: true };
+      case UNICOS_ERR.PEDIDO_INDISPONIVEL:
+        return { code, message: "Bipe a peça de novo.", definitivo: false };
+      case "missing_permission":
+        return {
+          code,
+          message: "Seu usuário não tem a permissão de Expedição (expedicao:operate). Peça o papel de expedidor no admin do nexus.",
+          definitivo: true,
+        };
+    }
+  }
+  if (unicosRotaAusente(e)) {
+    return { code: "nexus_pendente", message: "Atualize a API: a fila de únicos ainda não existe no servidor.", definitivo: true };
+  }
+  // 4xx desconhecido (409 do complete, 422, 400 do zod…): refazer o POST não muda nada.
+  if (e instanceof ApiError && e.status >= 400 && e.status < 500) {
+    const b = e.body && typeof e.body === "object" ? (e.body as Record<string, unknown>) : {};
+    return { code: str(b.error) || "erro_servidor", message: str(b.message) || "Recusado pelo servidor.", definitivo: true };
+  }
+  // Só falha de rede e 5xx chegam aqui.
+  return { code: "sem_conexao", message: "Sem conexão, bipe de novo.", definitivo: false };
+}
+
+/** O `order` do `separar` entra no fluxo existente como um match de 1 peça. */
+export function matchDoSeparar(order: ExpedicaoOrder, lidas: string[]): EpcMatch {
+  const l = Array.from(new Set(lidas.map((t) => t.toUpperCase())));
+  const todas = (order.rfidTags ?? []).map((t) => t.toUpperCase());
+  const matched = l.filter((t) => todas.includes(t));
+  return {
+    order,
+    tagsLidas: l,
+    tagsFaltantes: todas.filter((t) => !l.includes(t)),
+    tagsMatched: matched.length || l.length,
+    tagsTotal: todas.length || l.length,
+  };
+}
+
+/** Replay de pedido que já saiu: não reimprime, só avisa. */
+export function replayJaExpedido(r: UnicoSepararResponse): boolean {
+  return r.replay === true && r.order.status === "shipped";
+}

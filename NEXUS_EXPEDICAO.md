@@ -464,3 +464,13 @@ em produção nunca vê esse 409, e portanto **este release (0.9.45, com os trê
 itens acima) precisa estar em produção ANTES de alguém ligar a trava do lado
 do nexus**. Avise quando o 0.9.45 estiver rodando na frota pra combinarmos o
 momento de ligar.
+
+## 9. Únicos (27/10, client 0.9.59)
+
+Fila da embalagem de pedidos e-commerce com UMA peça, agrupada por estampa × tamanho. Permissão `expedicao:operate`. Contratos em `packages/contracts/src/expedicao-unicos.ts` do nexus; tipos copiados em `src/services/expedicao.ts` (campos opcionais onde dá, pra tolerar API velha).
+
+- `GET /expedicao/unicos` → `{ grupos[{ estampa, tamanho, pedidos, prioritarios, imagemUrl, tipos[] }], totalPedidos, filaUnicosAtiva }` (cache de 30 s no servidor). `filaUnicosAtiva: false` = a trava está desligada e os pedidos ainda aparecem na fila de separação (o app só avisa).
+- `GET /expedicao/unicos/pedidos?estampa=&tamanho=` → `{ pedidos[] }` na ordem da fila.
+- `POST /expedicao/unicos/separar` `{ rfidTags (1..10), estacaoId?, estampa?, tamanho?, leituras? }` → `{ order, replay, grupo }`. O servidor resolve o EPC, faz claim + complete do próximo pedido único da variante e devolve o pedido `awaiting_pickup`. **Não expede.** Mesmo EPC de novo = `replay: true` com o mesmo pedido. Erros: 409 `peca_de_outra_fila`, `sem_pedido_unico`, `varias_pecas`, `pedido_indisponivel`; 422 `epc_nao_resolvido`. 404 na rota = API sem a fila (o app desabilita o modo).
+
+Fluxo do app (Expedição, canal J&T, seletor **Pedidos | Únicos**; chave `berzerk_expedicao_fila_v1`, grupo em `berzerk_expedicao_unicos_grupo_v1`): escolhe o grupo na grade de cards → bipa a peça → `separar` (com `estampa`/`tamanho` do grupo, `estacaoId` e `leituras`) → o `order` entra no fluxo de sempre como um match de 1 peça (conferência, etiqueta, embalagem, `ship` com fila de retry) → volta a esperar a próxima peça do mesmo grupo. O EPC expedido entra no conjunto de já processados e não dispara `separar` de novo enquanto fica na mesa. Mercado Livre não tem modo Únicos.
