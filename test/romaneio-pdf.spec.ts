@@ -1,6 +1,6 @@
-// Romaneio da gaiola (A4, uma linha por pedido): função pura jsPDF → base64.
+// Romaneio da gaiola (A4, duas colunas): função pura jsPDF → base64.
 import { describe, expect, it } from "vitest";
-import { gerarRomaneioPdf } from "../src/lib/romaneioPdf";
+import { gerarRomaneioPdf, LINHAS_POR_PAGINA } from "../src/lib/romaneioPdf";
 import type { Manifest } from "../src/services/expedicao";
 
 function manifest(n: number): Manifest {
@@ -34,8 +34,17 @@ describe("gerarRomaneioPdf", () => {
     expect(pequeno.startsWith("JVBERi")).toBe(true); // "%PDF"
     expect(paginas(pequeno)).toBe(1);
     const grande = gerarRomaneioPdf({ gaiolaNumero: 12, romaneio: manifest(350) });
-    expect(paginas(grande)).toBeGreaterThanOrEqual(8);
-    expect(paginas(grande)).toBeLessThanOrEqual(10);
+    expect(paginas(grande)).toBeGreaterThanOrEqual(3);
+    expect(paginas(grande)).toBeLessThanOrEqual(5);
+  });
+
+  it("96 pedidos cabem em 1 página com a assinatura (última página divide as colunas ao meio)", () => {
+    expect(LINHAS_POR_PAGINA).toBeGreaterThanOrEqual(100);
+    expect(paginas(gerarRomaneioPdf({ gaiolaNumero: 12, romaneio: manifest(96) }))).toBe(1);
+    // 110 enche a folha; a assinatura vai pra uma segunda.
+    expect(paginas(gerarRomaneioPdf({ gaiolaNumero: 12, romaneio: manifest(110) }))).toBe(2);
+    // 160 = 110 + 50: a segunda folha fica com 25/25 e a assinatura cabe nela.
+    expect(paginas(gerarRomaneioPdf({ gaiolaNumero: 12, romaneio: manifest(160) }))).toBe(2);
   });
 
   it("romaneio vazio ainda sai (uma página, sem quebrar) e sem número de gaiola", () => {

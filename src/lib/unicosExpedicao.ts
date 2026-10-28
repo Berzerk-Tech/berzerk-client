@@ -169,3 +169,46 @@ export function matchDoSeparar(order: ExpedicaoOrder, lidas: string[]): EpcMatch
 export function replayJaExpedido(r: UnicoSepararResponse): boolean {
   return r.replay === true && r.order.status === "shipped";
 }
+
+/** Ordem de exibição dos tamanhos; o que não está aqui vai pro fim. */
+export const ORDEM_TAMANHOS = ["PP", "P", "M", "G", "GG", "XG", "XGG", "U"];
+
+/** Compara tamanhos pela posição em `ORDEM_TAMANHOS`; desconhecidos no fim, em ordem alfabética. */
+export function ordenarTamanhos(a: string, b: string): number {
+  const na = a.trim().toUpperCase();
+  const nb = b.trim().toUpperCase();
+  const ia = ORDEM_TAMANHOS.indexOf(na);
+  const ib = ORDEM_TAMANHOS.indexOf(nb);
+  if (ia >= 0 && ib >= 0) return ia - ib;
+  if (ia >= 0) return -1;
+  if (ib >= 0) return 1;
+  return na.localeCompare(nb);
+}
+
+export type EstampaAgrupada = {
+  estampa: string;
+  imagemUrl: string | null;
+  pedidos: number;
+  prioritarios: number;
+  /** Os grupos originais da estampa, na ordem PP…U. */
+  tamanhos: UnicoGrupo[];
+};
+
+/** Agrupa os grupos estampa × tamanho por estampa, mantendo a ordem de primeira aparição. */
+export function agruparPorEstampa(grupos: UnicoGrupo[]): EstampaAgrupada[] {
+  const mapa = new Map<string, EstampaAgrupada>();
+  for (const g of grupos) {
+    let e = mapa.get(g.estampa);
+    if (!e) {
+      e = { estampa: g.estampa, imagemUrl: null, pedidos: 0, prioritarios: 0, tamanhos: [] };
+      mapa.set(g.estampa, e);
+    }
+    e.pedidos += g.pedidos;
+    e.prioritarios += g.prioritarios ?? 0;
+    if (!e.imagemUrl && g.imagemUrl) e.imagemUrl = g.imagemUrl;
+    e.tamanhos.push(g);
+  }
+  const lista = Array.from(mapa.values());
+  for (const e of lista) e.tamanhos.sort((a, b) => ordenarTamanhos(a.tamanho, b.tamanho));
+  return lista;
+}
