@@ -122,7 +122,7 @@ describe("Expedição — modo Únicos", () => {
   });
   afterEach(() => cleanup());
 
-  it("sem grupo escolhido mostra os cards, o aviso da trava e escolhe a fila", async () => {
+  it("estampa com um tamanho: mostra o card, o aviso da trava e o clique escolhe direto", async () => {
     localStorage.removeItem("berzerk_expedicao_unicos_grupo_v1");
     render(<Expedicao onBack={() => {}} />);
     expect(await screen.findByText(/Trava desligada/)).toBeTruthy();
@@ -130,6 +130,29 @@ describe("Expedição — modo Únicos", () => {
     fireEvent.click(await screen.findByTitle("Escolher a fila Leg Day G"));
     expect(await screen.findByText("LEG DAY · G")).toBeTruthy();
     expect(JSON.parse(localStorage.getItem("berzerk_expedicao_unicos_grupo_v1") ?? "{}")).toEqual(GRUPO);
+  });
+
+  it("estampa com dois tamanhos: o card abre o painel, Voltar fecha e o botão escolhe o tamanho", async () => {
+    localStorage.removeItem("berzerk_expedicao_unicos_grupo_v1");
+    getUnicos.mockResolvedValue({
+      grupos: [
+        { ...GRUPO, pedidos: 3, prioritarios: 1, imagemUrl: null },
+        { estampa: "Leg Day", tamanho: "P", pedidos: 2, imagemUrl: null },
+      ],
+      totalPedidos: 5,
+      filaUnicosAtiva: true,
+    });
+    render(<Expedicao onBack={() => {}} />);
+    fireEvent.click(await screen.findByTitle("Abrir Leg Day"));
+    expect(await screen.findByTitle("Escolher a fila Leg Day P")).toBeTruthy();
+    expect(screen.getByTitle("Escolher a fila Leg Day G")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "← Voltar" }));
+    expect(await screen.findByTitle("Abrir Leg Day")).toBeTruthy();
+    expect(screen.queryByTitle("Escolher a fila Leg Day P")).toBeNull();
+    fireEvent.click(screen.getByTitle("Abrir Leg Day"));
+    fireEvent.click(await screen.findByTitle("Escolher a fila Leg Day P"));
+    expect(await screen.findByText("LEG DAY · P")).toBeTruthy();
+    expect(JSON.parse(localStorage.getItem("berzerk_expedicao_unicos_grupo_v1") ?? "{}")).toEqual({ estampa: "Leg Day", tamanho: "P" });
   });
 
   it("bipou: chama o separar com o grupo, imprime, expede e não repete o EPC parado na mesa", async () => {

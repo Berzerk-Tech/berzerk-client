@@ -1,11 +1,13 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import { ApiError } from "../src/lib/api";
 import {
+  agruparPorEstampa,
   erroSepararUnico,
   filtrarGrupos,
   getGrupoEscolhido,
   getModoFila,
   matchDoSeparar,
+  ordenarTamanhos,
   replayJaExpedido,
   rotuloGrupo,
   setGrupoEscolhido,
@@ -101,5 +103,33 @@ describe("persistência", () => {
     expect(rotuloGrupo(getGrupoEscolhido()!)).toBe("LEG DAY · G");
     setGrupoEscolhido(null);
     expect(getGrupoEscolhido()).toBeNull();
+  });
+});
+
+describe("ordenarTamanhos", () => {
+  it("segue PP…U, ignora caixa/espaço e põe desconhecidos no fim em ordem alfabética", () => {
+    const l = ["U", "xg", " M ", "ZZ", "PP", "AA", "G", "P"].sort(ordenarTamanhos).map((t) => t.trim().toUpperCase());
+    expect(l).toEqual(["PP", "P", "M", "G", "XG", "U", "AA", "ZZ"]);
+  });
+});
+
+describe("agruparPorEstampa", () => {
+  const g = (estampa: string, tamanho: string, pedidos: number, extra: Partial<UnicoGrupo> = {}): UnicoGrupo => ({ estampa, tamanho, pedidos, ...extra });
+  it("soma pedidos e prioritários, pega a primeira imagem não nula e ordena os tamanhos", () => {
+    const r = agruparPorEstampa([
+      g("Leg Day", "XG", 1, { prioritarios: 1 }),
+      g("Leg Day", "P", 6, { imagemUrl: "a.jpg", prioritarios: 2 }),
+      g("Leg Day", "ZZZ", 1, { imagemUrl: "b.jpg" }),
+      g("Leg Day", "M", 2),
+    ]);
+    expect(r).toHaveLength(1);
+    expect(r[0]).toMatchObject({ estampa: "Leg Day", pedidos: 10, prioritarios: 3, imagemUrl: "a.jpg" });
+    expect(r[0].tamanhos.map((t) => t.tamanho)).toEqual(["P", "M", "XG", "ZZZ"]);
+  });
+  it("mantém a ordem de primeira aparição das estampas e imagem nula quando não há", () => {
+    const r = agruparPorEstampa([g("B", "M", 1), g("A", "G", 1), g("B", "G", 1)]);
+    expect(r.map((e) => e.estampa)).toEqual(["B", "A"]);
+    expect(r[0].imagemUrl).toBeNull();
+    expect(r[0].prioritarios).toBe(0);
   });
 });

@@ -1,10 +1,18 @@
 // Modo Únicos, passo 1: a embaladora escolhe a caixa (estampa × tamanho) que
-// chegou na mesa. Poll de 30 s (o servidor guarda 30 s de cache).
+// chegou na mesa. A grade tem UM card por estampa (com os tamanhos como chips);
+// estampa com mais de um tamanho abre um painel de botões grandes de tamanho.
+// Poll de 30 s (o servidor guarda 30 s de cache).
 
 import { useCallback, useEffect, useMemo, useState, type CSSProperties } from "react";
 import { miniaturaLeve } from "../../lib/imagens";
-import { filtrarGrupos, unicosRotaAusente, type GrupoEscolhido } from "../../lib/unicosExpedicao";
-import { getUnicos, type UnicoGrupo, type UnicosResponse } from "../../services/expedicao";
+import {
+  agruparPorEstampa,
+  filtrarGrupos,
+  unicosRotaAusente,
+  type EstampaAgrupada,
+  type GrupoEscolhido,
+} from "../../lib/unicosExpedicao";
+import { getUnicos, type UnicosResponse } from "../../services/expedicao";
 
 const POLL_MS = 30000;
 
@@ -20,6 +28,7 @@ export function UnicosGrupos({
   const [erro, setErro] = useState<string | null>(null);
   const [carregando, setCarregando] = useState(false);
   const [busca, setBusca] = useState("");
+  const [estampaAberta, setEstampaAberta] = useState<string | null>(null);
 
   const carregar = useCallback(async () => {
     setCarregando(true);
@@ -41,6 +50,18 @@ export function UnicosGrupos({
   }, [carregar]);
 
   const grupos = useMemo(() => filtrarGrupos(dados?.grupos ?? [], busca), [dados, busca]);
+  const estampas = useMemo(() => agruparPorEstampa(grupos), [grupos]);
+  const aberta = estampaAberta ? (estampas.find((e) => e.estampa === estampaAberta) ?? null) : null;
+
+  // Estampa aberta sumiu (acabaram os pedidos no poll) ou deixou de casar com a busca: volta pra grade.
+  useEffect(() => {
+    if (estampaAberta && !aberta) setEstampaAberta(null);
+  }, [estampaAberta, aberta]);
+
+  const clicarEstampa = (e: EstampaAgrupada) => {
+    if (e.tamanhos.length === 1) onEscolher({ estampa: e.estampa, tamanho: e.tamanhos[0].tamanho });
+    else setEstampaAberta(e.estampa);
+  };
 
   return (
     <div style={wrap}>
@@ -64,39 +85,120 @@ export function UnicosGrupos({
       {dados && grupos.length === 0 && (
         <div style={vazio}>{busca.trim() ? "Nenhuma fila combina com a busca." : "Nenhum pedido único aguardando."}</div>
       )}
-      <div style={grade} className="thin-scroll">
-        {grupos.map((g) => (
-          <CardGrupo key={`${g.estampa}|${g.tamanho}`} g={g} onEscolher={() => onEscolher({ estampa: g.estampa, tamanho: g.tamanho })} />
-        ))}
-      </div>
+      {aberta ? (
+        <EscolherTamanho e={aberta} onVoltar={() => setEstampaAberta(null)} onEscolher={onEscolher} />
+      ) : (
+        <div style={grade} className="thin-scroll">
+          {estampas.map((e) => (
+            <CardEstampa key={e.estampa} e={e} onClick={() => clicarEstampa(e)} />
+          ))}
+        </div>
+      )}
     </div>
   );
 }
 
-function CardGrupo({ g, onEscolher }: { g: UnicoGrupo; onEscolher: () => void }) {
-  const img = miniaturaLeve(g.imagemUrl);
-  const tipos = g.tipos ?? [];
+function Prioritarios({ n }: { n: number }) {
+  if (n <= 0) return null;
   return (
-    <button type="button" style={card} onClick={onEscolher} title={`Escolher a fila ${g.estampa} ${g.tamanho}`}>
+    <span style={prioBadge}>
+      {n} prioritário{n === 1 ? "" : "s"}
+    </span>
+  );
+}
+
+function CardEstampa({ e, onClick }: { e: EstampaAgrupada; onClick: () => void }) {
+  const img = miniaturaLeve(e.imagemUrl);
+  const unico = e.tamanhos.length === 1 ? e.tamanhos[0].tamanho : null;
+  return (
+    <button
+      type="button"
+      style={card}
+      onClick={onClick}
+      title={unico ? `Escolher a fila ${e.estampa} ${unico}` : `Abrir ${e.estampa}`}
+    >
       <div style={fotoBox}>{img ? <img src={img} alt="" style={foto} loading="lazy" /> : <span style={semFoto}>sem foto</span>}</div>
       <div style={cardCorpo}>
-        <div style={estampaTxt}>{g.estampa}</div>
-        <div style={tamanhoTxt}>{g.tamanho}</div>
+        <div style={estampaTxt}>{e.estampa}</div>
         <div style={contagem}>
-          {g.pedidos} pedido{g.pedidos === 1 ? "" : "s"}
-          {(g.prioritarios ?? 0) > 0 && <span style={prioBadge}>{g.prioritarios} prioritário{g.prioritarios === 1 ? "" : "s"}</span>}
+          {e.pedidos} pedido{e.pedidos === 1 ? "" : "s"}
+          <Prioritarios n={e.prioritarios} />
         </div>
-        {tipos.length > 0 && (
-          <div style={tiposTxt}>
-            {tipos
-              .slice(0, 3)
-              .map((t) => `${t.produtoNome} (${t.pedidos})`)
-              .join(" · ")}
-            {tipos.length > 3 ? ` · +${tipos.length - 3}` : ""}
-          </div>
-        )}
+        <div style={chips}>
+          {e.tamanhos.map((t) => (
+            <span key={t.tamanho} style={chip}>
+              <b>{t.tamanho}</b> {t.pedidos}
+            </span>
+          ))}
+        </div>
       </div>
     </button>
+  );
+}
+
+function EscolherTamanho({
+  e,
+  onVoltar,
+  onEscolher,
+}: {
+  e: EstampaAgrupada;
+  onVoltar: () => void;
+  onEscolher: (g: GrupoEscolhido) => void;
+}) {
+  useEffect(() => {
+    const h = (ev: KeyboardEvent) => {
+      if (ev.key === "Escape") onVoltar();
+    };
+    window.addEventListener("keydown", h);
+    return () => window.removeEventListener("keydown", h);
+  }, [onVoltar]);
+
+  const img = miniaturaLeve(e.imagemUrl);
+  return (
+    <div style={painel} className="thin-scroll">
+      <button type="button" style={voltarBtn} onClick={onVoltar}>
+        ← Voltar
+      </button>
+      <div style={painelTopo}>
+        <div style={fotoGrande}>{img ? <img src={img} alt="" style={foto} /> : <span style={semFoto}>sem foto</span>}</div>
+        <div style={cardCorpo}>
+          <div style={estampaGrande}>{e.estampa}</div>
+          <div style={contagem}>
+            {e.pedidos} pedido{e.pedidos === 1 ? "" : "s"}
+            <Prioritarios n={e.prioritarios} />
+          </div>
+        </div>
+      </div>
+      <div style={botoes}>
+        {e.tamanhos.map((g) => {
+          const tipos = g.tipos ?? [];
+          return (
+            <button
+              key={g.tamanho}
+              type="button"
+              style={tamanhoBtn}
+              onClick={() => onEscolher({ estampa: e.estampa, tamanho: g.tamanho })}
+              title={`Escolher a fila ${e.estampa} ${g.tamanho}`}
+            >
+              <div style={tamanhoGrande}>{g.tamanho}</div>
+              <div style={contagem}>
+                {g.pedidos} pedido{g.pedidos === 1 ? "" : "s"}
+                <Prioritarios n={g.prioritarios ?? 0} />
+              </div>
+              {tipos.length > 0 && (
+                <div style={tiposTxt}>
+                  {tipos
+                    .slice(0, 3)
+                    .map((t) => `${t.produtoNome} (${t.pedidos})`)
+                    .join(" · ")}
+                  {tipos.length > 3 ? ` · +${tipos.length - 3}` : ""}
+                </div>
+              )}
+            </button>
+          );
+        })}
+      </div>
+    </div>
   );
 }
 
@@ -114,8 +216,17 @@ const fotoBox: CSSProperties = { width: 84, height: 112, flexShrink: 0, borderRa
 const foto: CSSProperties = { width: "100%", height: "100%", objectFit: "cover" };
 const semFoto: CSSProperties = { fontSize: 11, color: "var(--text-muted)" };
 const cardCorpo: CSSProperties = { display: "flex", flexDirection: "column", gap: 4, minWidth: 0 };
-const estampaTxt: CSSProperties = { fontSize: 17, fontWeight: 800, lineHeight: 1.15, overflowWrap: "anywhere" };
-const tamanhoTxt: CSSProperties = { fontSize: 40, fontWeight: 900, lineHeight: 1 };
+const estampaTxt: CSSProperties = { fontSize: 19, fontWeight: 800, lineHeight: 1.15, overflowWrap: "anywhere" };
 const contagem: CSSProperties = { fontSize: 13, color: "var(--text-secondary)", fontWeight: 700, display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap" };
 const prioBadge: CSSProperties = { padding: "1px 7px", borderRadius: 999, background: "var(--danger-bg, #fee2e2)", color: "var(--danger-text, #b91c1c)", fontSize: 11 };
 const tiposTxt: CSSProperties = { fontSize: 11, color: "var(--text-muted)" };
+const chips: CSSProperties = { display: "flex", flexWrap: "wrap", gap: 4 };
+const chip: CSSProperties = { padding: "1px 7px", borderRadius: 6, background: "var(--bg-input)", border: "1px solid var(--border)", fontSize: 12, color: "var(--text-secondary)" };
+const painel: CSSProperties = { flex: 1, minHeight: 0, overflowY: "auto", display: "flex", flexDirection: "column", gap: 16 };
+const voltarBtn: CSSProperties = { alignSelf: "flex-start", padding: "9px 14px", background: "var(--bg-card)", border: "1px solid var(--border)", borderRadius: 10, color: "var(--text)", fontWeight: 700, cursor: "pointer" };
+const painelTopo: CSSProperties = { display: "flex", gap: 16, alignItems: "center" };
+const fotoGrande: CSSProperties = { ...fotoBox, width: 140, height: 186 };
+const estampaGrande: CSSProperties = { fontSize: 32, fontWeight: 900, lineHeight: 1.1, overflowWrap: "anywhere" };
+const botoes: CSSProperties = { display: "flex", flexWrap: "wrap", gap: 12 };
+const tamanhoBtn: CSSProperties = { minWidth: 150, minHeight: 150, padding: 12, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 6, textAlign: "center", background: "var(--bg-card)", border: "2px solid var(--border-strong)", borderRadius: 14, color: "var(--text)", cursor: "pointer" };
+const tamanhoGrande: CSSProperties = { fontSize: 44, fontWeight: 900, lineHeight: 1 };

@@ -1,7 +1,10 @@
 // Romaneio da GAIOLA — a folha que vai com a gaiola pra J&T (15/10).
 //
-// Sai em A4 retrato, UMA LINHA POR PEDIDO (300 a 400 por gaiola), com espaço
-// pra assinatura do motorista no fim. Mesmo caminho dos outros impressos do
+// Sai em A4 retrato, uma linha por pedido (300 a 400 por gaiola) em DUAS
+// COLUNAS por página (esquerda de cima a baixo, depois a direita): uma coluna
+// só dava 8 a 10 folhas por gaiola, e o chão pediu economia de papel. A coluna
+// dupla fica em ~4 folhas; a zebra (linhas alternadas em cinza claro) mantém a
+// leitura boa em lista longa. Espaço pra assinatura do motorista no fim. Mesmo caminho dos outros impressos do
 // app: jsPDF → base64 → impressão silenciosa (src/lib/printer.ts). Nada de
 // HTML/`window.print()`: no WebView2 isso abre o diálogo do Windows, que a
 // mesa não tem como responder.
@@ -23,19 +26,31 @@ export type RomaneioDoc = {
 const W = 210;
 const H = 297;
 const M = 12;
-const ALTURA_LINHA = 5.2;
+const ALTURA_LINHA = 4.4;
 /** Abaixo disto é rodapé. */
 const LIMITE_Y = H - 14;
 
-/** Colunas: x inicial e largura (mm). Soma = 186 (área útil). */
-const COLUNAS = {
-  seq: { x: M, w: 10 },
-  pedido: { x: M + 10, w: 24 },
-  conta: { x: M + 34, w: 14 },
-  cliente: { x: M + 48, w: 78 },
-  rastreio: { x: M + 126, w: 44 },
-  hora: { x: M + 170, w: 16 },
+/** Duas colunas de 90 mm com calha de 6 mm (soma 186 = área útil). */
+const LARGURA_COL = 90;
+const CALHA = 6;
+const X_COL = [M, M + LARGURA_COL + CALHA] as const;
+
+/** Campos dentro de uma coluna (offset x e largura, mm). Soma = 90. */
+const CAMPOS = {
+  seq: { x: 0, w: 7 },
+  pedido: { x: 7, w: 23 },
+  cliente: { x: 30, w: 36 },
+  rastreio: { x: 66, w: 24 },
 } as const;
+
+/** Altura reservada pro cabeçalho (título + metadados + cabeçalho da tabela). */
+const ALTURA_CABECALHO = 40;
+/** A assinatura precisa de ~28 mm no fim da última página. */
+const ALTURA_ASSINATURA = 28;
+
+const LINHAS_POR_COLUNA = Math.floor((LIMITE_Y - ALTURA_CABECALHO) / ALTURA_LINHA);
+/** Pedidos por página (duas colunas). */
+export const LINHAS_POR_PAGINA = 2 * LINHAS_POR_COLUNA;
 
 /** Gera o PDF do romaneio e devolve o base64 (sem prefixo data:). */
 export function gerarRomaneioPdf(doc: RomaneioDoc): string {
@@ -47,9 +62,9 @@ export function gerarRomaneioPdf(doc: RomaneioDoc): string {
   paginas.forEach((pagina, i) => {
     if (i > 0) pdf.addPage("a4", "portrait");
     cabecalho(pdf, doc, i + 1, paginas.length);
-    tabela(pdf, pagina.linhas, pagina.inicio, ALTURA_CABECALHO);
+    tabela(pdf, pagina.linhas, pagina.inicio, pagina.esq, ALTURA_CABECALHO);
     rodape(pdf, i + 1, paginas.length);
-    yFim = ALTURA_CABECALHO + pagina.linhas.length * ALTURA_LINHA;
+    yFim = ALTURA_CABECALHO + pagina.esq * ALTURA_LINHA;
   });
   if (linhas.length === 0) {
     pdf.setFontSize(10);
@@ -61,24 +76,26 @@ export function gerarRomaneioPdf(doc: RomaneioDoc): string {
   return pdf.output("datauristring").split(",")[1] ?? "";
 }
 
-type Pagina = { linhas: ManifestOrder[]; inicio: number };
+/** `esq` = quantas linhas vão na coluna esquerda (o resto vai pra direita). */
+type Pagina = { linhas: ManifestOrder[]; inicio: number; esq: number };
 
-/** Altura reservada pro cabeçalho (título + metadados + cabeçalho da tabela). */
-const ALTURA_CABECALHO = 40;
-/** A assinatura precisa de ~28 mm no fim da última página. */
-const ALTURA_ASSINATURA = 28;
-
-/** Sempre ao menos uma página; a assinatura tem que caber depois da última linha. */
+/**
+ * Sempre ao menos uma página. Páginas cheias enchem a esquerda primeiro; a
+ * ÚLTIMA divide as linhas ao meio entre as colunas pra sobrar lugar pra
+ * assinatura (até 96 pedidos cabem numa folha só). Se mesmo assim não couber,
+ * entra uma página só com a assinatura.
+ */
 function paginar(linhas: ManifestOrder[]): Pagina[] {
   const paginas: Pagina[] = [];
-  const porPagina = Math.floor((LIMITE_Y - ALTURA_CABECALHO) / ALTURA_LINHA);
-  for (let i = 0; i < linhas.length; i += porPagina) {
-    paginas.push({ linhas: linhas.slice(i, i + porPagina), inicio: i });
+  for (let i = 0; i < linhas.length; i += LINHAS_POR_PAGINA) {
+    const fatia = linhas.slice(i, i + LINHAS_POR_PAGINA);
+    paginas.push({ linhas: fatia, inicio: i, esq: Math.min(fatia.length, LINHAS_POR_COLUNA) });
   }
-  if (paginas.length === 0) paginas.push({ linhas: [], inicio: 0 });
+  if (paginas.length === 0) paginas.push({ linhas: [], inicio: 0, esq: 0 });
   const ultima = paginas[paginas.length - 1];
-  if (ALTURA_CABECALHO + ultima.linhas.length * ALTURA_LINHA + ALTURA_ASSINATURA > LIMITE_Y) {
-    paginas.push({ linhas: [], inicio: linhas.length });
+  ultima.esq = Math.ceil(ultima.linhas.length / 2);
+  if (ALTURA_CABECALHO + ultima.esq * ALTURA_LINHA + ALTURA_ASSINATURA > LIMITE_Y) {
+    paginas.push({ linhas: [], inicio: linhas.length, esq: 0 });
   }
   return paginas;
 }
@@ -110,30 +127,59 @@ function cabecalho(pdf: jsPDF, doc: RomaneioDoc, pagina: number, total: number):
   const y = M + 23;
   pdf.setDrawColor(0);
   pdf.setLineWidth(0.3);
-  pdf.line(M, y + 1.5, W - M, y + 1.5);
   pdf.setFont("helvetica", "bold");
   pdf.setFontSize(8.5);
-  pdf.text("#", COLUNAS.seq.x, y);
-  pdf.text("Pedido", COLUNAS.pedido.x, y);
-  pdf.text("Conta", COLUNAS.conta.x, y);
-  pdf.text("Cliente", COLUNAS.cliente.x, y);
-  pdf.text("Rastreio", COLUNAS.rastreio.x, y);
-  pdf.text("Hora", COLUNAS.hora.x, y);
+  for (const x0 of X_COL) {
+    pdf.line(x0, y + 1.5, x0 + LARGURA_COL, y + 1.5);
+    pdf.text("#", x0 + CAMPOS.seq.x, y);
+    pdf.text("Pedido", x0 + CAMPOS.pedido.x, y);
+    pdf.text("Cliente", x0 + CAMPOS.cliente.x, y);
+    pdf.text("Rastreio", x0 + CAMPOS.rastreio.x, y);
+  }
   pdf.setFont("helvetica", "normal");
 }
 
-function tabela(pdf: jsPDF, linhas: ManifestOrder[], inicio: number, y0: number): void {
-  pdf.setFontSize(8.5);
-  let y = y0;
-  linhas.forEach((o, i) => {
-    pdf.text(String(inicio + i + 1), COLUNAS.seq.x, y);
-    pdf.text(cortar(pdf, texto(o.tinyOrderNumber), COLUNAS.pedido.w), COLUNAS.pedido.x, y);
-    pdf.text(cortar(pdf, texto(o.tinyAccount), COLUNAS.conta.w), COLUNAS.conta.x, y);
-    pdf.text(cortar(pdf, texto(o.cliente), COLUNAS.cliente.w), COLUNAS.cliente.x, y);
-    pdf.text(cortar(pdf, texto(o.trackingCode), COLUNAS.rastreio.w), COLUNAS.rastreio.x, y);
-    pdf.text(hora(o.printedAt), COLUNAS.hora.x, y);
-    y += ALTURA_LINHA;
-  });
+function tabela(pdf: jsPDF, linhas: ManifestOrder[], inicio: number, nEsq: number, y0: number): void {
+  for (let i = 0; i < linhas.length; i++) {
+    const col = i < nEsq ? 0 : 1;
+    const x0 = X_COL[col];
+    // Linha DENTRO da coluna: a zebra alterna igual nas duas (senão vira xadrez).
+    const linha = col === 0 ? i : i - nEsq;
+    const y = y0 + linha * ALTURA_LINHA;
+    const o = linhas[i];
+    // Zebra: fundo ANTES do texto.
+    if (linha % 2 === 1) {
+      pdf.setFillColor(243, 243, 243);
+      pdf.rect(x0, y - 3.2, LARGURA_COL, ALTURA_LINHA, "F");
+    }
+    pdf.setFont("helvetica", "normal");
+    pdf.setFontSize(8);
+    pdf.text(String(inicio + i + 1), x0 + CAMPOS.seq.x, y);
+    pdf.text(cortar(pdf, texto(o.cliente), CAMPOS.cliente.w), x0 + CAMPOS.cliente.x, y);
+    pdf.text(cortar(pdf, texto(o.trackingCode), CAMPOS.rastreio.w), x0 + CAMPOS.rastreio.x, y);
+    // Pedido em negrito + conta Tiny pequena logo depois.
+    const xPedido = x0 + CAMPOS.pedido.x;
+    pdf.setFont("helvetica", "bold");
+    const num = texto(o.tinyOrderNumber);
+    pdf.text(num, xPedido, y);
+    const conta = texto(o.tinyAccount);
+    if (conta) {
+      const wNum = pdf.getTextWidth(num);
+      pdf.setFont("helvetica", "normal");
+      pdf.setFontSize(6.5);
+      pdf.text(conta, xPedido + wNum + 1, y);
+    }
+  }
+  pdf.setFont("helvetica", "normal");
+  pdf.setFontSize(8);
+  // Linha vertical fina no meio da calha, do cabeçalho da tabela à última linha.
+  if (linhas.length > 0) {
+    const xMeio = M + LARGURA_COL + CALHA / 2;
+    pdf.setDrawColor(180);
+    pdf.setLineWidth(0.2);
+    pdf.line(xMeio, y0 - 4, xMeio, y0 - 3.2 + nEsq * ALTURA_LINHA);
+    pdf.setDrawColor(0);
+  }
 }
 
 function assinatura(pdf: jsPDF, y: number): void {
@@ -171,10 +217,4 @@ function dataHora(iso: string | null): string {
   if (!iso) return "";
   const d = new Date(iso);
   return Number.isNaN(d.getTime()) ? iso : d.toLocaleString("pt-BR", { timeZone: "America/Sao_Paulo" });
-}
-
-function hora(iso: string | null): string {
-  if (!iso) return "";
-  const d = new Date(iso);
-  return Number.isNaN(d.getTime()) ? "" : d.toLocaleTimeString("pt-BR", { hour: "2-digit", minute: "2-digit", timeZone: "America/Sao_Paulo" });
 }
