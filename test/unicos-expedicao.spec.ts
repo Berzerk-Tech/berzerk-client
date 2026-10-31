@@ -9,6 +9,7 @@ import {
   matchDoSeparar,
   ordenarTamanhos,
   replayJaExpedido,
+  rotuloOrderBump,
   rotuloGrupo,
   setGrupoEscolhido,
   setModoFila,
@@ -131,5 +132,39 @@ describe("agruparPorEstampa", () => {
     expect(r.map((e) => e.estampa)).toEqual(["B", "A"]);
     expect(r[0].imagemUrl).toBeNull();
     expect(r[0].prioritarios).toBe(0);
+  });
+});
+
+describe("order bump", () => {
+  const api = (status: number, body: unknown) => new ApiError(status, "x", body);
+  it("order_bump_necessario não é definitivo e cita o produto", () => {
+    const e = erroSepararUnico(
+      api(409, { error: "order_bump_necessario", orderBump: { produtoId: "9", produtoNome: "Touca Berzerk" } }),
+      { estampa: "Leg Day", tamanho: "G" },
+    );
+    expect(e.code).toBe("order_bump_necessario");
+    expect(e.definitivo).toBe(false);
+    expect(e.message).toBe("Este pedido tem order bump: leia a peça junto com Touca Berzerk.");
+  });
+  it("bump_sem_pedido não é definitivo e diz pra tirar o item da mesa", () => {
+    const e = erroSepararUnico(
+      api(409, { error: "bump_sem_pedido", produtoNome: "Oversized Leg Day", tamanho: "G", orderBump: { produtoId: "9", produtoNome: "Touca Berzerk" } }),
+      { estampa: "Leg Day", tamanho: "G" },
+    );
+    expect(e.code).toBe("bump_sem_pedido");
+    expect(e.definitivo).toBe(false);
+    expect(e.message).toBe("Nenhum pedido de Oversized Leg Day G leva Touca Berzerk. Se o item não é desta caixa, tire-o da mesa e leia só a peça.");
+  });
+  it("agrupa comOrderBump por estampa (ausente = 0)", () => {
+    const g: UnicoGrupo[] = [
+      { estampa: "Leg Day", tamanho: "G", pedidos: 3, comOrderBump: 2 },
+      { estampa: "Leg Day", tamanho: "M", pedidos: 1 },
+    ];
+    expect(agruparPorEstampa(g)[0].comOrderBump).toBe(2);
+  });
+  it("rótulo do botão", () => {
+    expect(rotuloOrderBump(null)).toBe("Order bump: desligado");
+    expect(rotuloOrderBump({ ativo: false, produtos: [] })).toBe("Order bump: desligado");
+    expect(rotuloOrderBump({ ativo: true, produtos: [{ id: "1", nome: "Touca", imagemUrl: null }] })).toBe("Order bump: Touca");
   });
 });

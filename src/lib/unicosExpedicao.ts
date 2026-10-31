@@ -3,7 +3,7 @@
 // persistência do modo/grupo, busca, mensagens de erro e a montagem do match.
 
 import { ApiError } from "./api";
-import type { EpcMatch, ExpedicaoOrder, UnicoGrupo, UnicoSepararResponse } from "../services/expedicao";
+import type { EpcMatch, ExpedicaoOrder, OrderBumpConfig, UnicoGrupo, UnicoSepararResponse } from "../services/expedicao";
 import { UNICOS_ERR } from "../services/expedicao";
 
 export type ModoFila = "pedidos" | "unicos";
@@ -131,6 +131,24 @@ export function erroSepararUnico(e: unknown, grupo: GrupoEscolhido | null): Erro
         return { code, message: "Peça não reconhecida (etiqueta sem cadastro).", definitivo: true };
       case UNICOS_ERR.PEDIDO_INDISPONIVEL:
         return { code, message: "Bipe a peça de novo.", definitivo: false };
+      case UNICOS_ERR.ORDER_BUMP_NECESSARIO: {
+        const ob = b.orderBump && typeof b.orderBump === "object" ? (b.orderBump as Record<string, unknown>) : {};
+        const nome = str(ob.produtoNome) || "o item do order bump";
+        return {
+          code,
+          message: `Este pedido tem order bump: leia a peça junto com ${nome}.`,
+          definitivo: false,
+        };
+      }
+      case UNICOS_ERR.BUMP_SEM_PEDIDO: {
+        const ob = b.orderBump && typeof b.orderBump === "object" ? (b.orderBump as Record<string, unknown>) : {};
+        const nome = str(ob.produtoNome) || "o item do order bump";
+        return {
+          code,
+          message: `Nenhum pedido de ${peca || "esta peça"} leva ${nome}. Se o item não é desta caixa, tire-o da mesa e leia só a peça.`,
+          definitivo: false,
+        };
+      }
       case "missing_permission":
         return {
           code,
@@ -185,11 +203,19 @@ export function ordenarTamanhos(a: string, b: string): number {
   return na.localeCompare(nb);
 }
 
+/** Texto do botão Order bump: "Order bump: A, B" ou "desligado". */
+export function rotuloOrderBump(ob: OrderBumpConfig | null | undefined): string {
+  if (!ob || !ob.ativo) return "Order bump: desligado";
+  const nomes = ob.produtos.map((p) => p.nome).join(", ");
+  return nomes ? `Order bump: ${nomes}` : "Order bump: ativo";
+}
+
 export type EstampaAgrupada = {
   estampa: string;
   imagemUrl: string | null;
   pedidos: number;
   prioritarios: number;
+  comOrderBump: number;
   /** Os grupos originais da estampa, na ordem PP…U. */
   tamanhos: UnicoGrupo[];
 };
@@ -200,11 +226,12 @@ export function agruparPorEstampa(grupos: UnicoGrupo[]): EstampaAgrupada[] {
   for (const g of grupos) {
     let e = mapa.get(g.estampa);
     if (!e) {
-      e = { estampa: g.estampa, imagemUrl: null, pedidos: 0, prioritarios: 0, tamanhos: [] };
+      e = { estampa: g.estampa, imagemUrl: null, pedidos: 0, prioritarios: 0, comOrderBump: 0, tamanhos: [] };
       mapa.set(g.estampa, e);
     }
     e.pedidos += g.pedidos;
     e.prioritarios += g.prioritarios ?? 0;
+    e.comOrderBump += g.comOrderBump ?? 0;
     if (!e.imagemUrl && g.imagemUrl) e.imagemUrl = g.imagemUrl;
     e.tamanhos.push(g);
   }
