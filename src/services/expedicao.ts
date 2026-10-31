@@ -518,13 +518,20 @@ export type UnicoGrupo = {
   prioritarios?: number;
   imagemUrl?: string | null;
   tipos?: UnicoTipo[];
+  /** Pedidos do grupo com item de order bump (ausente = 0). */
+  comOrderBump?: number;
 };
+
+export type OrderBumpProduto = { id: string; nome: string; imagemUrl: string | null };
+export type OrderBumpConfig = { ativo: boolean; produtos: OrderBumpProduto[] };
 
 export type UnicosResponse = {
   grupos: UnicoGrupo[];
   totalPedidos?: number;
   /** `false` = trava do servidor desligada: estes pedidos ainda aparecem na fila de separação. */
   filaUnicosAtiva?: boolean;
+  /** Ausente/null = API sem order bump (esconde o botão). */
+  orderBump?: OrderBumpConfig | null;
 };
 
 export type UnicoPedido = {
@@ -546,6 +553,8 @@ export type UnicoSepararResponse = {
   /** true = o EPC já tinha separado/expedido um pedido: nada foi duplicado. */
   replay?: boolean;
   grupo?: { estampa: string; tamanho: string };
+  /** Pedido com order bump: o item do bump foi lido junto com a peça principal. */
+  orderBump?: { produtoId: string; produtoNome: string } | null;
 };
 
 export const UNICOS_ERR = {
@@ -554,11 +563,32 @@ export const UNICOS_ERR = {
   VARIAS_PECAS: "varias_pecas",
   EPC_NAO_RESOLVIDO: "epc_nao_resolvido",
   PEDIDO_INDISPONIVEL: "pedido_indisponivel",
+  ORDER_BUMP_NECESSARIO: "order_bump_necessario",
+  /** Bump lido junto, mas nenhum pedido da peça leva esse item (brinde de outra caixa ou pedidos com bump já saíram). */
+  BUMP_SEM_PEDIDO: "bump_sem_pedido",
 } as const;
 
 export function getUnicos(): Promise<UnicosResponse> {
   if (isExpedicaoSimulacao()) return Promise.resolve(mockUnicos());
   return apiRequest<UnicosResponse>("/expedicao/unicos");
+}
+
+export function getOrderBump(): Promise<OrderBumpConfig> {
+  if (isExpedicaoSimulacao()) return Promise.resolve({ ativo: false, produtos: [] });
+  return apiRequest<OrderBumpConfig>("/expedicao/unicos/order-bump");
+}
+
+export function putOrderBump(body: { ativo: boolean; produtoIds: string[] }): Promise<OrderBumpConfig> {
+  if (isExpedicaoSimulacao()) return Promise.resolve({ ativo: body.ativo, produtos: [] });
+  return apiRequest<OrderBumpConfig>("/expedicao/unicos/order-bump", { method: "PUT", body });
+}
+
+export async function buscarProdutosOrderBump(busca: string, limite = 20): Promise<OrderBumpProduto[]> {
+  if (isExpedicaoSimulacao()) return [];
+  const r = await apiRequest<{ produtos?: OrderBumpProduto[] }>("/expedicao/unicos/order-bump/produtos", {
+    query: { busca, limite: String(limite) },
+  });
+  return r.produtos ?? [];
 }
 
 export async function getUnicosPedidos(estampa: string, tamanho: string): Promise<UnicoPedido[]> {

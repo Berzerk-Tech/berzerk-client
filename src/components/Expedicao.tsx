@@ -275,6 +275,10 @@ export function Expedicao({ onBack }: Props) {
   const grupoRef = useRef<GrupoEscolhido | null>(grupoUnicos);
   grupoRef.current = grupoUnicos;
   const [unicosIndisponivel, setUnicosIndisponivel] = useState(false);
+  // Order bump (Únicos): o pedido tinha item de bump lido junto com a peça principal.
+  // O limite de EPCs (UNICOS_MAX_TAGS) já comporta principal + bump; o servidor decide
+  // o que é cada um e responde `varias_pecas` / `order_bump_necessario`.
+  const [bumpDoPedido, setBumpDoPedido] = useState<{ orderId: string; nome: string } | null>(null);
   // Soma 1 a cada ciclo concluído: a lista do grupo refaz a contagem.
   const [versaoUnicos, setVersaoUnicos] = useState(0);
   const simulacao = isExpedicaoSimulacao();
@@ -335,6 +339,13 @@ export function Expedicao({ onBack }: Props) {
   // A última falha do Únicos foi definitiva (não adianta repetir o POST pro mesmo conjunto da mesa).
   const unicoFalhaDefinitivaRef = useRef(false);
   const resolveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Desmontou: o retry agendado não pode disparar depois.
+  useEffect(
+    () => () => {
+      if (resolveTimer.current) clearTimeout(resolveTimer.current);
+    },
+    [],
+  );
   const modoRef = useRef<ExpedicaoMode>(modo);
   modoRef.current = modo;
 
@@ -670,6 +681,7 @@ export function Expedicao({ onBack }: Props) {
       }
       const f = flowRef.current;
       if (!(f.kind === "identified" && f.order.id === r.order.id)) beepOk();
+      setBumpDoPedido(r.orderBump?.produtoNome ? { orderId: r.order.id, nome: r.orderBump.produtoNome } : null);
       await identifica(matchDoSeparar(r.order, epcs), new Set(), gen);
     },
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -1592,6 +1604,7 @@ export function Expedicao({ onBack }: Props) {
             onReprint={(o) => void reprint(o, "ja_expedido")}
             canalMesa={canal}
             unicosGrupo={modoFila === "unicos" && canal === "ecommerce" ? grupoUnicos : null}
+            orderBumpNome={modoFila === "unicos" && flow.kind !== "idle" && flow.kind !== "reading" && flow.kind !== "choose" && flow.kind !== "error" && bumpDoPedido?.orderId === flow.order.id ? bumpDoPedido.nome : null}
             onTrocarFila={() => escolherGrupo(null)}
           />
           )}
@@ -1665,6 +1678,7 @@ function StageCenter({
   onReprint,
   canalMesa,
   unicosGrupo,
+  orderBumpNome,
   onTrocarFila,
 }: {
   flow: Flow;
@@ -1674,6 +1688,8 @@ function StageCenter({
   canalMesa: CanalExpedicao;
   /** Modo Únicos com fila escolhida (muda o texto do PRONTO). */
   unicosGrupo: GrupoEscolhido | null;
+  /** Modo Únicos: nome do item de order bump lido junto com a peça (null = pedido sem bump). */
+  orderBumpNome: string | null;
   onTrocarFila: () => void;
   onChoose: (m: EpcMatch) => void;
   onForce: () => void;
@@ -1787,6 +1803,12 @@ function StageCenter({
         }
       />
 
+      {orderBumpNome && (
+        <div style={bumpLinha}>
+          <strong>Order bump:</strong> {orderBumpNome}
+        </div>
+      )}
+
       {flow.kind === "identified" && conf?.trocaEquivalente && (
         <div style={trocaAviso}>
           <strong>Peça trocada na embalagem.</strong> As {total} peças da grade conferem, mas{" "}
@@ -1822,6 +1844,8 @@ function StageCenter({
     </div>
   );
 }
+
+const bumpLinha: CSSProperties = { padding: "4px 12px", borderRadius: 8, background: "var(--bg-input)", border: "1px solid var(--border)", fontSize: 13, color: "var(--text-secondary)" };
 
 function OrderPanel({
   order,

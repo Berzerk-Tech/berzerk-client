@@ -8,11 +8,14 @@ import { miniaturaLeve } from "../../lib/imagens";
 import {
   agruparPorEstampa,
   filtrarGrupos,
+  rotuloOrderBump,
   unicosRotaAusente,
   type EstampaAgrupada,
   type GrupoEscolhido,
 } from "../../lib/unicosExpedicao";
 import { getUnicos, type UnicosResponse } from "../../services/expedicao";
+import { getMe } from "../../services/orders";
+import { OrderBumpModal } from "./OrderBumpModal";
 
 const POLL_MS = 30000;
 
@@ -29,11 +32,27 @@ export function UnicosGrupos({
   const [carregando, setCarregando] = useState(false);
   const [busca, setBusca] = useState("");
   const [estampaAberta, setEstampaAberta] = useState<string | null>(null);
+  const [bumpAberto, setBumpAberto] = useState(false);
+  // O PUT da config exige `separacao:manage` (coordenação do CD): a operadora não vê o botão.
+  const [podeConfigurarBump, setPodeConfigurarBump] = useState(false);
+
+  useEffect(() => {
+    let vivo = true;
+    getMe()
+      .then((me) => {
+        if (vivo) setPodeConfigurarBump(me.permissions.includes("*") || me.permissions.includes("separacao:manage"));
+      })
+      .catch(() => {});
+    return () => {
+      vivo = false;
+    };
+  }, []);
 
   const carregar = useCallback(async () => {
     setCarregando(true);
     try {
-      setDados(await getUnicos());
+      const r = await getUnicos();
+      setDados(r);
       setErro(null);
     } catch (e) {
       if (unicosRotaAusente(e)) onIndisponivel();
@@ -74,10 +93,26 @@ export function UnicosGrupos({
           aria-label="Buscar fila de únicos"
         />
         <span style={total}>{dados ? `${dados.totalPedidos ?? 0} pedidos` : ""}</span>
+        {dados?.orderBump && podeConfigurarBump && (
+          <button type="button" style={bumpBtn} onClick={() => setBumpAberto(true)} title="Configurar order bump">
+            {rotuloOrderBump(dados.orderBump)}
+          </button>
+        )}
         <button type="button" style={atualizarBtn} onClick={() => void carregar()} disabled={carregando}>
           {carregando ? "Atualizando…" : "↻ Atualizar"}
         </button>
       </div>
+      {bumpAberto && dados?.orderBump && (
+        <OrderBumpModal
+          atual={dados.orderBump}
+          onFechar={() => setBumpAberto(false)}
+          onSalvo={(c) => {
+            setDados((d) => (d ? { ...d, orderBump: c } : d));
+            setBumpAberto(false);
+            void carregar();
+          }}
+        />
+      )}
       {dados && dados.filaUnicosAtiva === false && (
         <div style={aviso}>Trava desligada: estes pedidos ainda aparecem na fila de separação.</div>
       )}
@@ -107,6 +142,11 @@ function Prioritarios({ n }: { n: number }) {
   );
 }
 
+function ComBump({ n }: { n: number }) {
+  if (n <= 0) return null;
+  return <span style={bumpBadge}>{n} com bump</span>;
+}
+
 function CardEstampa({ e, onClick }: { e: EstampaAgrupada; onClick: () => void }) {
   const img = miniaturaLeve(e.imagemUrl);
   const unico = e.tamanhos.length === 1 ? e.tamanhos[0].tamanho : null;
@@ -123,6 +163,7 @@ function CardEstampa({ e, onClick }: { e: EstampaAgrupada; onClick: () => void }
         <div style={contagem}>
           {e.pedidos} pedido{e.pedidos === 1 ? "" : "s"}
           <Prioritarios n={e.prioritarios} />
+          <ComBump n={e.comOrderBump} />
         </div>
         <div style={chips}>
           {e.tamanhos.map((t) => (
@@ -166,6 +207,7 @@ function EscolherTamanho({
           <div style={contagem}>
             {e.pedidos} pedido{e.pedidos === 1 ? "" : "s"}
             <Prioritarios n={e.prioritarios} />
+            <ComBump n={e.comOrderBump} />
           </div>
         </div>
       </div>
@@ -184,6 +226,7 @@ function EscolherTamanho({
               <div style={contagem}>
                 {g.pedidos} pedido{g.pedidos === 1 ? "" : "s"}
                 <Prioritarios n={g.prioritarios ?? 0} />
+                <ComBump n={g.comOrderBump ?? 0} />
               </div>
               {tipos.length > 0 && (
                 <div style={tiposTxt}>
@@ -207,6 +250,8 @@ const topo: CSSProperties = { display: "flex", alignItems: "center", gap: 12 };
 const buscaInput: CSSProperties = { flex: 1, padding: "10px 14px", background: "var(--bg-input)", border: "1px solid var(--border)", borderRadius: 10, color: "var(--text)", fontSize: 15 };
 const total: CSSProperties = { color: "var(--text-secondary)", fontSize: 13, fontWeight: 700 };
 const atualizarBtn: CSSProperties = { padding: "9px 14px", background: "var(--bg-card)", border: "1px solid var(--border)", borderRadius: 10, color: "var(--text)", fontWeight: 700, cursor: "pointer" };
+const bumpBtn: CSSProperties = { padding: "9px 14px", background: "var(--bg-card)", border: "1px solid var(--border)", borderRadius: 10, color: "var(--text)", fontWeight: 700, cursor: "pointer", maxWidth: 280, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" };
+const bumpBadge: CSSProperties = { padding: "1px 7px", borderRadius: 999, background: "var(--info-bg, #dbeafe)", color: "var(--info-text, #1d4ed8)", fontSize: 11 };
 const aviso: CSSProperties = { padding: "6px 12px", borderRadius: 8, background: "var(--warning-bg)", border: "1px solid var(--warning-border)", color: "var(--warning-text)", fontSize: 12 };
 const avisoErro: CSSProperties = { ...aviso };
 const vazio: CSSProperties = { flex: 1, display: "flex", alignItems: "center", justifyContent: "center", color: "var(--text-secondary)", fontSize: 18 };

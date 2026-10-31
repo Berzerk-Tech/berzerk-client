@@ -174,6 +174,31 @@ describe("Expedição — modo Únicos", () => {
     expect(separarUnico).toHaveBeenCalledTimes(1);
   }, 20000);
 
+  it("order bump: 2 EPCs na mesa vão juntos pro separar e a tela mostra o item do bump", async () => {
+    const TAG2 = "E2801170000002099AAAA002";
+    const order = { ...pedidoUnico(), rfidTags: [TAG, TAG2] };
+    separarUnico.mockReset().mockResolvedValue({ order, replay: false, grupo: GRUPO, orderBump: { produtoId: "b1", produtoNome: "Touca Berzerk" } });
+    await abrirGrupo();
+    await act(async () => {
+      presence?.([TAG, TAG2]);
+    });
+    await waitFor(() => expect(separarUnico).toHaveBeenCalledTimes(1));
+    expect(separarUnico.mock.calls[0][0].rfidTags).toEqual([TAG, TAG2]);
+    expect(await screen.findByText("Touca Berzerk")).toBeTruthy();
+  }, 20000);
+
+  it("order_bump_necessario: avisa qual item colocar junto e deixa tentar de novo", async () => {
+    separarUnico.mockReset().mockRejectedValue(
+      new ApiError(409, "x", { error: "order_bump_necessario", orderBump: { produtoId: "b1", produtoNome: "Touca Berzerk" } }),
+    );
+    await abrirGrupo();
+    await act(async () => {
+      presence?.([TAG]);
+    });
+    expect(await screen.findByText(/leia a peça junto com Touca Berzerk/)).toBeTruthy();
+    expect(shipOrder).not.toHaveBeenCalled();
+  });
+
   it("peça de outra fila: avisa, oferece Trocar fila e não expede", async () => {
     separarUnico.mockReset().mockRejectedValue(
       new ApiError(409, "x", { error: "peca_de_outra_fila", estampa: "Ember", tamanho: "M", produtoNome: "Oversized" }),
