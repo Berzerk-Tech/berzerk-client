@@ -3,7 +3,7 @@
 // persistência do modo/grupo, busca, mensagens de erro e a montagem do match.
 
 import { ApiError } from "./api";
-import type { EpcMatch, ExpedicaoOrder, OrderBumpConfig, UnicoGrupo, UnicoSepararResponse } from "../services/expedicao";
+import type { EpcMatch, ExpedicaoOrder, OrderBumpConfig, UnicoGrupo, UnicoSepararResponse, UnicoTipo } from "../services/expedicao";
 import { UNICOS_ERR } from "../services/expedicao";
 
 export type ModoFila = "pedidos" | "unicos";
@@ -210,9 +210,78 @@ export function rotuloOrderBump(ob: OrderBumpConfig | null | undefined): string 
   return nomes ? `Order bump: ${nomes}` : "Order bump: ativo";
 }
 
+const SEPARADORES = /^[\s\-–—·|/:,]+|[\s\-–—·|/:,]+$/g;
+
+/** Caractere a caractere, pra o índice do texto normalizado bater com o original. */
+function normalizarPorChar(s: string): string {
+  let out = "";
+  for (const c of s) {
+    const n = c.normalize("NFD").replace(/[̀-ͯ]/g, "").toLowerCase();
+    out += n.length === 1 ? n : c.toLowerCase().slice(0, 1) || c;
+  }
+  return out;
+}
+
+/**
+ * Tipo da peça sem a estampa e sem separadores soltos:
+ * "Oversized - Legends" (estampa "Legends") → "Oversized". Sobrou nada → o nome inteiro.
+ */
+export function tipoBaseDoProduto(produtoNome: string, estampa: string): string {
+  const nome = produtoNome.trim();
+  const alvo = normalizarPorChar(estampa).trim();
+  let base = nome;
+  if (alvo) {
+    const i = normalizarPorChar(nome).indexOf(alvo);
+    if (i >= 0) base = nome.slice(0, i) + " " + nome.slice(i + alvo.length);
+  }
+  base = base.replace(/\s+/g, " ").replace(SEPARADORES, "").trim();
+  return base || nome;
+}
+
+/** "Oversized · Preto" (sem cor: só "Oversized"). */
+export function rotuloTipo(tipo: Pick<UnicoTipo, "produtoNome" | "cor">, estampa: string): string {
+  const base = tipoBaseDoProduto(tipo.produtoNome, estampa);
+  const cor = tipo.cor?.trim();
+  return cor ? `${base} · ${cor}` : base;
+}
+
+/** Um tipo só → "Oversized · Preto"; vários → "Oversized · Preto 8 · Poliamida · Azul 2". */
+export function rotuloTipos(tipos: UnicoTipo[], estampa: string): string {
+  if (tipos.length === 0) return "";
+  if (tipos.length === 1) return rotuloTipo(tipos[0], estampa);
+  return tipos.map((t) => `${rotuloTipo(t, estampa)} ${t.pedidos}`).join(" · ");
+}
+
+/** Soma os tipos de vários grupos por produto + cor, mais pedidos primeiro. */
+export function somarTipos(grupos: UnicoGrupo[]): UnicoTipo[] {
+  const mapa = new Map<string, UnicoTipo>();
+  for (const g of grupos) {
+    for (const t of g.tipos ?? []) {
+      const chave = `${t.produtoId}|${(t.cor ?? "").trim().toLowerCase()}`;
+      const atual = mapa.get(chave);
+      if (atual) {
+        atual.pedidos += t.pedidos;
+        if (!atual.imagemUrl && t.imagemUrl) atual.imagemUrl = t.imagemUrl;
+      } else {
+        mapa.set(chave, { ...t });
+      }
+    }
+  }
+  return Array.from(mapa.values()).sort((a, b) => b.pedidos - a.pedidos);
+}
+
+/** Tipos de uma estampa (todos os tamanhos) e a foto do dominante (senão a do grupo). */
+export function tiposDaEstampa(grupos: UnicoGrupo[]): { tipos: UnicoTipo[]; imagemUrl: string | null } {
+  const tipos = somarTipos(grupos);
+  const imagemUrl = tipos.find((t) => t.imagemUrl)?.imagemUrl ?? grupos.find((g) => g.imagemUrl)?.imagemUrl ?? null;
+  return { tipos, imagemUrl };
+}
+
 export type EstampaAgrupada = {
   estampa: string;
   imagemUrl: string | null;
+  /** Tipos de peça da estampa (todos os tamanhos), mais pedidos primeiro. */
+  tipos: UnicoTipo[];
   pedidos: number;
   prioritarios: number;
   comOrderBump: number;
@@ -226,16 +295,20 @@ export function agruparPorEstampa(grupos: UnicoGrupo[]): EstampaAgrupada[] {
   for (const g of grupos) {
     let e = mapa.get(g.estampa);
     if (!e) {
-      e = { estampa: g.estampa, imagemUrl: null, pedidos: 0, prioritarios: 0, comOrderBump: 0, tamanhos: [] };
+      e = { estampa: g.estampa, imagemUrl: null, tipos: [], pedidos: 0, prioritarios: 0, comOrderBump: 0, tamanhos: [] };
       mapa.set(g.estampa, e);
     }
     e.pedidos += g.pedidos;
     e.prioritarios += g.prioritarios ?? 0;
     e.comOrderBump += g.comOrderBump ?? 0;
-    if (!e.imagemUrl && g.imagemUrl) e.imagemUrl = g.imagemUrl;
     e.tamanhos.push(g);
   }
   const lista = Array.from(mapa.values());
-  for (const e of lista) e.tamanhos.sort((a, b) => ordenarTamanhos(a.tamanho, b.tamanho));
+  for (const e of lista) {
+    e.tamanhos.sort((a, b) => ordenarTamanhos(a.tamanho, b.tamanho));
+    const t = tiposDaEstampa(e.tamanhos);
+    e.tipos = t.tipos;
+    e.imagemUrl = t.imagemUrl;
+  }
   return lista;
 }

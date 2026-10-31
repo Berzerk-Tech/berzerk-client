@@ -509,7 +509,14 @@ export async function epcMatch(epcs: string[]): Promise<EpcMatchResponse> {
 // Contrato: nexus `packages/contracts/src/expedicao-unicos.ts`. Ver NEXUS_EXPEDICAO.md "Únicos".
 // ---------------------------------------------------------------------------
 
-export type UnicoTipo = { produtoId: string; produtoNome: string; cor?: string | null; pedidos: number };
+export type UnicoTipo = {
+  produtoId: string;
+  produtoNome: string;
+  cor?: string | null;
+  pedidos: number;
+  /** Foto do tipo (API nova); ausente na API velha. */
+  imagemUrl?: string | null;
+};
 
 export type UnicoGrupo = {
   estampa: string;
