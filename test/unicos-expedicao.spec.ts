@@ -11,6 +11,10 @@ import {
   replayJaExpedido,
   rotuloOrderBump,
   rotuloGrupo,
+  rotuloTipo,
+  rotuloTipos,
+  tipoBaseDoProduto,
+  tiposDaEstampa,
   setGrupoEscolhido,
   setModoFila,
   unicosRotaAusente,
@@ -166,5 +170,46 @@ describe("order bump", () => {
     expect(rotuloOrderBump(null)).toBe("Order bump: desligado");
     expect(rotuloOrderBump({ ativo: false, produtos: [] })).toBe("Order bump: desligado");
     expect(rotuloOrderBump({ ativo: true, produtos: [{ id: "1", nome: "Touca", imagemUrl: null }] })).toBe("Order bump: Touca");
+  });
+});
+
+describe("tipo e cor", () => {
+  it("tipoBaseDoProduto tira a estampa e os separadores", () => {
+    expect(tipoBaseDoProduto("Oversized - Legends", "Legends")).toBe("Oversized");
+    expect(tipoBaseDoProduto("Poliamida Symbol", "symbol")).toBe("Poliamida");
+    expect(tipoBaseDoProduto("Regata Ribana - Keep", "Keep")).toBe("Regata Ribana");
+    expect(tipoBaseDoProduto("Camiseta Ação Direta Preta", "acao direta")).toBe("Camiseta Preta");
+  });
+  it("sobrou vazio ou estampa ausente: devolve o nome", () => {
+    expect(tipoBaseDoProduto("Legends", "Legends")).toBe("Legends");
+    expect(tipoBaseDoProduto("Oversized", "Keep")).toBe("Oversized");
+  });
+  it("rotuloTipo com e sem cor", () => {
+    expect(rotuloTipo({ produtoNome: "Oversized - Keep", cor: "Preto" }, "Keep")).toBe("Oversized · Preto");
+    expect(rotuloTipo({ produtoNome: "Oversized - Keep", cor: null }, "Keep")).toBe("Oversized");
+  });
+  it("rotuloTipos: contagem só com mais de um tipo", () => {
+    const um = [{ produtoId: "1", produtoNome: "Oversized Keep", cor: "Preto", pedidos: 8 }];
+    expect(rotuloTipos(um, "Keep")).toBe("Oversized · Preto");
+    const dois = [...um, { produtoId: "2", produtoNome: "Poliamida Keep", cor: "Azul", pedidos: 2 }];
+    expect(rotuloTipos(dois, "Keep")).toBe("Oversized · Preto 8 · Poliamida · Azul 2");
+    expect(rotuloTipos([], "Keep")).toBe("");
+  });
+  it("tiposDaEstampa soma por produto + cor, ordena e usa a foto do dominante", () => {
+    const gs: UnicoGrupo[] = [
+      { estampa: "Keep", tamanho: "M", pedidos: 3, imagemUrl: "g.jpg", tipos: [{ produtoId: "1", produtoNome: "Oversized", cor: "Preto", pedidos: 1 }, { produtoId: "2", produtoNome: "Poliamida", cor: "Azul", pedidos: 2, imagemUrl: "azul.jpg" }] },
+      { estampa: "Keep", tamanho: "G", pedidos: 4, tipos: [{ produtoId: "1", produtoNome: "Oversized", cor: "Preto", pedidos: 4, imagemUrl: "preto.jpg" }] },
+    ];
+    const r = tiposDaEstampa(gs);
+    expect(r.tipos.map((t) => [t.produtoId, t.pedidos])).toEqual([["1", 5], ["2", 2]]);
+    expect(r.imagemUrl).toBe("preto.jpg");
+    expect(tiposDaEstampa([{ estampa: "K", tamanho: "M", pedidos: 1, imagemUrl: "g.jpg" }]).imagemUrl).toBe("g.jpg");
+  });
+  it("agruparPorEstampa expõe tipos e foto do tipo dominante", () => {
+    const e = agruparPorEstampa([
+      { estampa: "Keep", tamanho: "M", pedidos: 2, imagemUrl: "g.jpg", tipos: [{ produtoId: "1", produtoNome: "Oversized", cor: "Preto", pedidos: 2, imagemUrl: "p.jpg" }] },
+    ])[0];
+    expect(e.tipos).toHaveLength(1);
+    expect(e.imagemUrl).toBe("p.jpg");
   });
 });

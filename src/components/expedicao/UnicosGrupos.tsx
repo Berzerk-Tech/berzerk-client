@@ -9,6 +9,7 @@ import {
   agruparPorEstampa,
   filtrarGrupos,
   rotuloOrderBump,
+  rotuloTipos,
   unicosRotaAusente,
   type EstampaAgrupada,
   type GrupoEscolhido,
@@ -147,6 +148,16 @@ function ComBump({ n }: { n: number }) {
   return <span style={bumpBadge}>{n} com bump</span>;
 }
 
+function TiposLinha({ e }: { e: EstampaAgrupada }) {
+  const txt = rotuloTipos(e.tipos, e.estampa);
+  if (!txt) return null;
+  return (
+    <div style={tiposCard} title={txt}>
+      {txt}
+    </div>
+  );
+}
+
 function CardEstampa({ e, onClick }: { e: EstampaAgrupada; onClick: () => void }) {
   const img = miniaturaLeve(e.imagemUrl);
   const unico = e.tamanhos.length === 1 ? e.tamanhos[0].tamanho : null;
@@ -159,6 +170,7 @@ function CardEstampa({ e, onClick }: { e: EstampaAgrupada; onClick: () => void }
     >
       <div style={fotoBox}>{img ? <img src={img} alt="" style={foto} loading="lazy" /> : <span style={semFoto}>sem foto</span>}</div>
       <div style={cardCorpo}>
+        <TiposLinha e={e} />
         <div style={estampaTxt}>{e.estampa}</div>
         <div style={contagem}>
           {e.pedidos} pedido{e.pedidos === 1 ? "" : "s"}
@@ -203,6 +215,7 @@ function EscolherTamanho({
       <div style={painelTopo}>
         <div style={fotoGrande}>{img ? <img src={img} alt="" style={foto} /> : <span style={semFoto}>sem foto</span>}</div>
         <div style={cardCorpo}>
+          <TiposLinha e={e} />
           <div style={estampaGrande}>{e.estampa}</div>
           <div style={contagem}>
             {e.pedidos} pedido{e.pedidos === 1 ? "" : "s"}
@@ -229,12 +242,8 @@ function EscolherTamanho({
                 <ComBump n={g.comOrderBump ?? 0} />
               </div>
               {tipos.length > 0 && (
-                <div style={tiposTxt}>
-                  {tipos
-                    .slice(0, 3)
-                    .map((t) => `${t.produtoNome} (${t.pedidos})`)
-                    .join(" · ")}
-                  {tipos.length > 3 ? ` · +${tipos.length - 3}` : ""}
+                <div style={tiposTxt} title={rotuloTipos(tipos, e.estampa)}>
+                  {rotuloTipos(tipos, e.estampa)}
                 </div>
               )}
             </button>
@@ -264,7 +273,8 @@ const cardCorpo: CSSProperties = { display: "flex", flexDirection: "column", gap
 const estampaTxt: CSSProperties = { fontSize: 19, fontWeight: 800, lineHeight: 1.15, overflowWrap: "anywhere" };
 const contagem: CSSProperties = { fontSize: 13, color: "var(--text-secondary)", fontWeight: 700, display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap" };
 const prioBadge: CSSProperties = { padding: "1px 7px", borderRadius: 999, background: "var(--danger-bg, #fee2e2)", color: "var(--danger-text, #b91c1c)", fontSize: 11 };
-const tiposTxt: CSSProperties = { fontSize: 11, color: "var(--text-muted)" };
+const tiposTxt: CSSProperties = { fontSize: 12, color: "var(--text-secondary)", maxWidth: 190, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" };
+const tiposCard: CSSProperties = { fontSize: 12, fontWeight: 700, color: "var(--text-secondary)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" };
 const chips: CSSProperties = { display: "flex", flexWrap: "wrap", gap: 4 };
 const chip: CSSProperties = { padding: "1px 7px", borderRadius: 6, background: "var(--bg-input)", border: "1px solid var(--border)", fontSize: 12, color: "var(--text-secondary)" };
 const painel: CSSProperties = { flex: 1, minHeight: 0, overflowY: "auto", display: "flex", flexDirection: "column", gap: 16 };

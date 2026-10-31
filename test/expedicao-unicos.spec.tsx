@@ -155,6 +155,39 @@ describe("Expedição — modo Únicos", () => {
     expect(JSON.parse(localStorage.getItem("berzerk_expedicao_unicos_grupo_v1") ?? "{}")).toEqual({ estampa: "Leg Day", tamanho: "P" });
   });
 
+  it("card mostra tipo e cor acima da estampa; com dois tipos mostra contagens e a foto do dominante", async () => {
+    localStorage.removeItem("berzerk_expedicao_unicos_grupo_v1");
+    getUnicos.mockResolvedValue({
+      grupos: [
+        { ...GRUPO, pedidos: 3, imagemUrl: "https://cdn.shopify.com/s/files/grupo.jpg", tipos: [{ produtoId: "p", produtoNome: "Oversized - Leg Day", cor: "Preto", pedidos: 3, imagemUrl: "https://cdn.shopify.com/s/files/preto.jpg" }] },
+      ],
+      totalPedidos: 3,
+      filaUnicosAtiva: true,
+    });
+    const { container } = render(<Expedicao onBack={() => {}} />);
+    const linha = await screen.findByText("Oversized · Preto");
+    const estampa = screen.getByText("Leg Day");
+    expect(linha.compareDocumentPosition(estampa) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(container.querySelector("img")?.getAttribute("src")).toContain("preto.jpg");
+
+    getUnicos.mockResolvedValue({
+      grupos: [
+        { ...GRUPO, pedidos: 8, tipos: [{ produtoId: "p", produtoNome: "Oversized Leg Day", cor: "Preto", pedidos: 8, imagemUrl: "https://cdn.shopify.com/s/files/preto.jpg" }] },
+        { estampa: "Leg Day", tamanho: "P", pedidos: 2, tipos: [{ produtoId: "q", produtoNome: "Poliamida Leg Day", cor: "Azul", pedidos: 2 }] },
+      ],
+      totalPedidos: 10,
+      filaUnicosAtiva: true,
+    });
+    cleanup();
+    const r2 = render(<Expedicao onBack={() => {}} />);
+    const multi = await screen.findAllByText("Oversized · Preto 8 · Poliamida · Azul 2");
+    expect(multi.length).toBeGreaterThan(0);
+    expect(r2.container.querySelector("img")?.getAttribute("src")).toContain("preto.jpg");
+    fireEvent.click(await screen.findByTitle("Abrir Leg Day"));
+    expect(await screen.findByText("Poliamida · Azul")).toBeTruthy();
+    expect(screen.getByText("Oversized · Preto")).toBeTruthy();
+  });
+
   it("bipou: chama o separar com o grupo, imprime, expede e não repete o EPC parado na mesa", async () => {
     await abrirGrupo();
     expect(await screen.findByText("LEG DAY · G")).toBeTruthy();
