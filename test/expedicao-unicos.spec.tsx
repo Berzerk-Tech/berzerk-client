@@ -128,7 +128,7 @@ describe("Expedição — modo Únicos", () => {
     expect(await screen.findByText(/Trava desligada/)).toBeTruthy();
     expect(screen.getAllByText("3 pedidos", { exact: false }).length).toBeGreaterThan(0);
     fireEvent.click(await screen.findByTitle("Escolher a fila Leg Day G"));
-    expect(await screen.findByText("LEG DAY · G")).toBeTruthy();
+    expect(await screen.findByText("Oversized · Leg Day · G")).toBeTruthy();
     expect(JSON.parse(localStorage.getItem("berzerk_expedicao_unicos_grupo_v1") ?? "{}")).toEqual(GRUPO);
   });
 
@@ -190,7 +190,7 @@ describe("Expedição — modo Únicos", () => {
 
   it("bipou: chama o separar com o grupo, imprime, expede e não repete o EPC parado na mesa", async () => {
     await abrirGrupo();
-    expect(await screen.findByText("LEG DAY · G")).toBeTruthy();
+    expect(await screen.findByText("Oversized · Leg Day · G")).toBeTruthy();
     await act(async () => {
       presence?.([TAG]);
     });
@@ -230,6 +230,18 @@ describe("Expedição — modo Únicos", () => {
     });
     expect(await screen.findByText(/leia a peça junto com Touca Berzerk/)).toBeTruthy();
     expect(shipOrder).not.toHaveBeenCalled();
+  });
+
+  it("order_bump_necessario: mostra 1/2 peças lidas e o item que falta", async () => {
+    separarUnico.mockReset().mockRejectedValue(
+      new ApiError(409, "x", { error: "order_bump_necessario", orderBump: { produtoId: "b1", produtoNome: "Touca Berzerk", imagemUrl: "https://cdn.shopify.com/s/files/t.jpg" } }),
+    );
+    await abrirGrupo();
+    await act(async () => {
+      presence?.([TAG]);
+    });
+    expect(await screen.findByText("1/2 peças lidas")).toBeTruthy();
+    expect(await screen.findByText("Falta: Touca Berzerk")).toBeTruthy();
   });
 
   it("peça de outra fila: avisa, oferece Trocar fila e não expede", async () => {
