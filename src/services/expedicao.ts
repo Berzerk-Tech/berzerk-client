@@ -554,7 +554,7 @@ export type UnicoPedido = {
   emitidoEm?: string | null;
   trackingNumber?: string | null;
   /** Pedido com item de order bump: ler a peça junto com ele. */
-  orderBump?: { produtoId: string; produtoNome: string; tamanho?: string } | null;
+  orderBump?: { produtoId: string; produtoNome: string; tamanho?: string; imagemUrl?: string | null } | null;
 };
 
 export type UnicoSepararResponse = {
@@ -563,7 +563,7 @@ export type UnicoSepararResponse = {
   replay?: boolean;
   grupo?: { estampa: string; tamanho: string };
   /** Pedido com order bump: o item do bump foi lido junto com a peça principal. */
-  orderBump?: { produtoId: string; produtoNome: string } | null;
+  orderBump?: { produtoId: string; produtoNome: string; imagemUrl?: string | null } | null;
 };
 
 export const UNICOS_ERR = {
@@ -575,6 +575,10 @@ export const UNICOS_ERR = {
   ORDER_BUMP_NECESSARIO: "order_bump_necessario",
   /** Bump lido junto, mas nenhum pedido da peça leva esse item (brinde de outra caixa ou pedidos com bump já saíram). */
   BUMP_SEM_PEDIDO: "bump_sem_pedido",
+  /** O pedido escolhido na fila já saiu (outra mesa pegou, cancelado…): recarrega a lista. */
+  PEDIDO_ESCOLHIDO_INDISPONIVEL: "pedido_escolhido_indisponivel",
+  /** A peça lida não é a do pedido escolhido. */
+  PECA_NAO_E_DO_PEDIDO: "peca_nao_e_do_pedido",
 } as const;
 
 export function getUnicos(): Promise<UnicosResponse> {
@@ -616,6 +620,8 @@ export function separarUnico(args: {
   estampa?: string;
   tamanho?: string;
   leituras?: LeituraResolvida[];
+  /** Pedido escolhido na fila: o servidor separa ESSE pedido (se a peça casar). */
+  orderId?: string;
 }): Promise<UnicoSepararResponse> {
   if (isExpedicaoSimulacao()) {
     const order = mockOrderFor(args.rfidTags);
@@ -629,6 +635,7 @@ export function separarUnico(args: {
       ...(estacao ? { estacaoId: estacao } : {}),
       ...(args.estampa ? { estampa: args.estampa } : {}),
       ...(args.tamanho ? { tamanho: args.tamanho } : {}),
+      ...(args.orderId ? { orderId: args.orderId } : {}),
       ...(args.leituras && args.leituras.length > 0 ? { leituras: args.leituras } : {}),
     },
   });

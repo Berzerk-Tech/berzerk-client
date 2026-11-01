@@ -3,6 +3,7 @@ import { ApiError } from "../src/lib/api";
 import {
   agruparPorEstampa,
   erroSepararUnico,
+  selecaoAposRecarga,
   filtrarGrupos,
   getGrupoEscolhido,
   getModoFila,
@@ -211,5 +212,38 @@ describe("tipo e cor", () => {
     ])[0];
     expect(e.tipos).toHaveLength(1);
     expect(e.imagemUrl).toBe("p.jpg");
+  });
+});
+
+describe("pedido selecionado e erros novos", () => {
+  const api = (status: number, body: unknown) => new ApiError(status, "x", body);
+  const g = { estampa: "Baki", tamanho: "G" };
+  it("selecaoAposRecarga mantém o id existente, senão o primeiro, senão null", () => {
+    const l = [{ id: "a" }, { id: "b" }];
+    expect(selecaoAposRecarga("b", l)).toBe("b");
+    expect(selecaoAposRecarga("x", l)).toBe("a");
+    expect(selecaoAposRecarga(null, l)).toBe("a");
+    expect(selecaoAposRecarga("a", [])).toBeNull();
+  });
+  it("pedido_escolhido_indisponivel não é definitivo", () => {
+    const e = erroSepararUnico(api(409, { error: "pedido_escolhido_indisponivel", estampa: "Baki", tamanho: "G", produtoNome: "Oversized" }), g);
+    expect(e.code).toBe("pedido_escolhido_indisponivel");
+    expect(e.definitivo).toBe(false);
+  });
+  it("peca_nao_e_do_pedido é definitiva e cita as duas peças", () => {
+    const e = erroSepararUnico(
+      api(409, { error: "peca_nao_e_do_pedido", produtoNome: "Oversized", pedido: { numero: "1001", produtoNome: "Poliamida" } }),
+      g,
+    );
+    expect(e.definitivo).toBe(true);
+    expect(e.message).toBe("A peça lida é Oversized; o pedido #1001 é Poliamida. Troque a peça ou selecione outro pedido.");
+  });
+  it("order_bump_necessario traz progresso e miniatura do item que falta", () => {
+    const e = erroSepararUnico(
+      api(409, { error: "order_bump_necessario", orderBump: { produtoId: "9", produtoNome: "Touca", imagemUrl: "https://x/t.jpg" } }),
+      g,
+    );
+    expect(e.progresso).toBe("1/2");
+    expect(e.orderBump).toEqual({ produtoNome: "Touca", imagemUrl: "https://x/t.jpg" });
   });
 });

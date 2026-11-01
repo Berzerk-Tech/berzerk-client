@@ -64,6 +64,7 @@ import {
   mensagemEtiquetaMlObrigatoria,
   shipErrorMessage,
   separarUnico,
+  UNICOS_ERR,
   shipOrder,
   type AwbJaColetadoDetails,
   type Documentos,
@@ -137,6 +138,9 @@ type Flow =
       jaExpedido?: JaExpedido;
       /** Modo Únicos: oferece o botão "Trocar fila" (peça de outra fila). */
       trocarFila?: boolean;
+      /** Order bump: peças lidas/total e o item que falta. */
+      progresso?: string;
+      orderBump?: { produtoNome: string; imagemUrl: string | null };
     };
 
 const PACKING_MS = 5000;
@@ -283,6 +287,9 @@ export function Expedicao({ onBack }: Props) {
   const [bumpDoPedido, setBumpDoPedido] = useState<{ orderId: string; nome: string } | null>(null);
   // Soma 1 a cada ciclo concluído: a lista do grupo refaz a contagem.
   const [versaoUnicos, setVersaoUnicos] = useState(0);
+  const [pedidoSelecionadoUnicos, setPedidoSelecionadoUnicos] = useState<string | null>(null);
+  const pedidoSelecionadoRef = useRef<string | null>(null);
+  pedidoSelecionadoRef.current = pedidoSelecionadoUnicos;
   const simulacao = isExpedicaoSimulacao();
   const [flow, setFlow] = useState<Flow>({ kind: "idle" });
   const flowRef = useRef<Flow>(flow);
@@ -457,6 +464,8 @@ export function Expedicao({ onBack }: Props) {
       setGrupoEscolhido(g);
       setGrupoUnicos(g);
       grupoRef.current = g;
+      setPedidoSelecionadoUnicos(null);
+      pedidoSelecionadoRef.current = null;
       reiniciar();
     },
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -652,7 +661,7 @@ export function Expedicao({ onBack }: Props) {
       }
       const falha = (e: ReturnType<typeof erroSepararUnico>, tentarDeNovo: boolean) => {
         if (!retrying) beepError();
-        setFlow({ kind: "error", code: e.code, message: e.message, trocarFila: e.trocarFila });
+        setFlow({ kind: "error", code: e.code, message: e.message, trocarFila: e.trocarFila, progresso: e.progresso, orderBump: e.orderBump });
         unicoFalhaDefinitivaRef.current = !tentarDeNovo;
         lastFailSigRef.current = sigNow;
         if (tentarDeNovo) scheduleRetry();
@@ -665,11 +674,16 @@ export function Expedicao({ onBack }: Props) {
       if (gen !== resolveGenRef.current || mesaOcupada()) return;
       let r;
       try {
-        r = await separarUnico({ rfidTags: epcs, estampa: g.estampa, tamanho: g.tamanho, leituras });
+        r = await separarUnico({ rfidTags: epcs, estampa: g.estampa, tamanho: g.tamanho, leituras, orderId: pedidoSelecionadoRef.current ?? undefined });
       } catch (e) {
         if (gen !== resolveGenRef.current || mesaOcupada()) return;
         const er = erroSepararUnico(e, g);
         if (unicosRotaAusente(e)) unicosSemApi();
+        if (er.code === UNICOS_ERR.PEDIDO_ESCOLHIDO_INDISPONIVEL) {
+          pedidoSelecionadoRef.current = null;
+          setPedidoSelecionadoUnicos(null);
+          setVersaoUnicos((v) => v + 1);
+        }
         falha(er, !er.definitivo);
         return;
       }
@@ -1586,6 +1600,11 @@ export function Expedicao({ onBack }: Props) {
             <UnicosFila
               grupo={grupoUnicos}
               versao={versaoUnicos}
+              selecionadoId={pedidoSelecionadoUnicos}
+              onSelecionar={(id) => {
+                pedidoSelecionadoRef.current = id;
+                setPedidoSelecionadoUnicos(id);
+              }}
               onTrocar={() => escolherGrupo(null)}
               trocarDesabilitado={flow.kind === "printing" || flow.kind === "packing" || flow.kind === "done"}
               mesaLivre={!(flow.kind === "printing" || flow.kind === "packing" || flow.kind === "done")}
@@ -1762,6 +1781,17 @@ function StageCenter({
         </h1>
         {semEtiqueta && flow.order && (
           <div style={{ ...heroDisplay, fontSize: 72, lineHeight: 1.1 }}>#{flow.order.numero ?? "?"}</div>
+        )}
+        {flow.progresso && (
+          <div style={{ ...heroDisplay, fontSize: 56, lineHeight: 1.05 }}>{flow.progresso} peças lidas</div>
+        )}
+        {flow.orderBump && (
+          <div style={{ display: "flex", alignItems: "center", gap: 14 }}>
+            {miniaturaLeve(flow.orderBump.imagemUrl) && (
+              <img src={miniaturaLeve(flow.orderBump.imagemUrl) ?? undefined} alt="" style={{ width: 96, height: 96, borderRadius: 10, objectFit: "cover" }} />
+            )}
+            <span style={{ fontSize: 20, fontWeight: 800 }}>Falta: {flow.orderBump.produtoNome}</span>
+          </div>
         )}
         <p style={{ ...heroHint, fontSize: 16, maxWidth: 560, color: "var(--text)" }}>{flow.message}</p>
         <div style={erroAcoesRow}>

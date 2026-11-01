@@ -91,7 +91,18 @@ export type ErroUnicos = {
   definitivo: boolean;
   /** Mostra o botão "Trocar fila" no painel de erro. */
   trocarFila?: boolean;
+  /** order_bump_necessario: item que falta ler junto (nome + foto). */
+  orderBump?: { produtoNome: string; imagemUrl: string | null };
+  /** order_bump_necessario: peças lidas / total, ex. "1/2". */
+  progresso?: string;
 };
+
+/** Mantém a seleção se o id ainda está na lista; senão o primeiro pedido (null se vazia). */
+export function selecaoAposRecarga(selecionadoId: string | null, pedidos: { id: string }[]): string | null {
+  if (pedidos.length === 0) return null;
+  if (selecionadoId && pedidos.some((p) => p.id === selecionadoId)) return selecionadoId;
+  return pedidos[0].id;
+}
 
 function str(v: unknown): string {
   return typeof v === "string" ? v : "";
@@ -138,6 +149,23 @@ export function erroSepararUnico(e: unknown, grupo: GrupoEscolhido | null): Erro
           code,
           message: `Este pedido tem order bump: leia a peça junto com ${nome}.`,
           definitivo: false,
+          orderBump: { produtoNome: nome, imagemUrl: str(ob.imagemUrl) || null },
+          progresso: "1/2",
+        };
+      }
+      case UNICOS_ERR.PEDIDO_ESCOLHIDO_INDISPONIVEL:
+        return {
+          code,
+          message: "O pedido escolhido já saiu da fila. Selecionei o primeiro da lista; bipe a peça de novo.",
+          definitivo: false,
+        };
+      case UNICOS_ERR.PECA_NAO_E_DO_PEDIDO: {
+        const pd = b.pedido && typeof b.pedido === "object" ? (b.pedido as Record<string, unknown>) : {};
+        const lido = str(b.produtoNome) || "outra";
+        return {
+          code,
+          message: `A peça lida é ${lido}; o pedido #${str(pd.numero)} é ${str(pd.produtoNome) || "outra peça"}. Troque a peça ou selecione outro pedido.`,
+          definitivo: true,
         };
       }
       case UNICOS_ERR.BUMP_SEM_PEDIDO: {

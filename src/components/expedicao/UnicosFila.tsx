@@ -3,7 +3,8 @@
 // o refetch (a contagem cai um pedido). Poll de 30 s.
 
 import { useCallback, useEffect, useRef, useState, type CSSProperties } from "react";
-import { rotuloGrupo, type GrupoEscolhido } from "../../lib/unicosExpedicao";
+import { miniaturaLeve } from "../../lib/imagens";
+import { rotuloGrupo, selecaoAposRecarga, tipoBaseDoProduto, type GrupoEscolhido } from "../../lib/unicosExpedicao";
 import { getUnicosPedidos, type UnicoPedido } from "../../services/expedicao";
 
 const POLL_MS = 30000;
@@ -15,6 +16,8 @@ export function UnicosFila({
   trocarDesabilitado,
   onEsgotou,
   mesaLivre,
+  selecionadoId,
+  onSelecionar,
 }: {
   grupo: GrupoEscolhido;
   versao: number;
@@ -23,12 +26,19 @@ export function UnicosFila({
   /** A fila do grupo acabou e a mesa está livre: o pai volta pra escolha de tamanho/estampa. */
   onEsgotou: () => void;
   mesaLivre: boolean;
+  /** Pedido que o bip vai separar (null = ainda sem lista). */
+  selecionadoId?: string | null;
+  onSelecionar?: (id: string | null) => void;
 }) {
   const [pedidos, setPedidos] = useState<UnicoPedido[] | null>(null);
   const [erro, setErro] = useState(false);
   const esgotouAvisado = useRef(false);
   const onEsgotouRef = useRef(onEsgotou);
   onEsgotouRef.current = onEsgotou;
+  const selRef = useRef<string | null>(selecionadoId ?? null);
+  selRef.current = selecionadoId ?? null;
+  const onSelecionarRef = useRef(onSelecionar);
+  onSelecionarRef.current = onSelecionar;
 
   // Grupo novo: descarta a lista do grupo anterior e rearma o aviso.
   useEffect(() => {
@@ -51,7 +61,13 @@ export function UnicosFila({
 
   const carregar = useCallback(async () => {
     try {
-      setPedidos(await getUnicosPedidos(grupo.estampa, grupo.tamanho));
+      const lista = await getUnicosPedidos(grupo.estampa, grupo.tamanho);
+      setPedidos(lista);
+      const nova = selecaoAposRecarga(selRef.current, lista);
+      if (nova !== selRef.current) {
+        selRef.current = nova;
+        onSelecionarRef.current?.(nova);
+      }
       setErro(false);
     } catch {
       setErro(true);
@@ -64,13 +80,18 @@ export function UnicosFila({
     return () => window.clearInterval(id);
   }, [carregar, versao]);
 
+  const selEfetivo = selecaoAposRecarga(selecionadoId ?? null, pedidos ?? []);
+  const pedidoSel = (pedidos ?? []).find((p) => p.id === selEfetivo) ?? null;
+  const tituloGrupo = pedidoSel
+    ? `${tipoBaseDoProduto(pedidoSel.produtoNome, grupo.estampa)} · ${grupo.estampa} · ${grupo.tamanho}`
+    : rotuloGrupo(grupo);
   const comBump = (pedidos ?? []).filter((p) => p.orderBump).length;
 
   return (
     <div style={wrap}>
       <div style={cabecalho}>
         <div>
-          <div style={titulo}>{rotuloGrupo(grupo)}</div>
+          <div style={titulo}>{tituloGrupo}</div>
           <div style={sub}>
             {pedidos ? `${pedidos.length} pedido${pedidos.length === 1 ? "" : "s"} na fila${comBump > 0 ? ` · ${comBump} com bump` : ""}` : "Carregando…"}
             {erro && " · não consegui atualizar"}
@@ -86,10 +107,20 @@ export function UnicosFila({
           Trocar fila
         </button>
       </div>
-      <div style={lista} className="thin-scroll">
+      <div style={lista} className="thin-scroll" role="listbox">
         {pedidos && pedidos.length === 0 && <div style={vazio}>Nenhum pedido único aguardando esta fila · voltando…</div>}
         {(pedidos ?? []).map((p, i) => (
-          <div key={p.id} style={p.orderBump ? { ...linha, ...linhaBump } : linha}>
+          <div
+            key={p.id}
+            role="option"
+            aria-selected={p.id === selEfetivo}
+            onClick={() => {
+              if (p.id === selEfetivo) return;
+              selRef.current = p.id;
+              onSelecionarRef.current?.(p.id);
+            }}
+            style={{ ...linha, ...(p.orderBump ? linhaBump : {}), cursor: "pointer", ...(p.id === selEfetivo ? linhaSel : {}) }}
+          >
             <span style={pos}>{i + 1}</span>
             <code style={num}>#{p.numero ?? p.id.slice(0, 8)}</code>
             <span style={cli}>{p.cliente ?? ""}</span>
@@ -98,6 +129,9 @@ export function UnicosFila({
               <span style={bumpPill} title="Order bump: leia esta peça junto com o item">
                 + {p.orderBump.produtoNome}
               </span>
+            )}
+            {p.orderBump && miniaturaLeve(p.orderBump.imagemUrl) && (
+              <img src={miniaturaLeve(p.orderBump.imagemUrl) ?? undefined} alt="" style={bumpThumb} loading="lazy" decoding="async" />
             )}
             {p.prioritario && <span style={prio}>PRIORITÁRIO</span>}
           </div>
@@ -120,5 +154,7 @@ const num: CSSProperties = { fontWeight: 800, fontSize: 14 };
 const cli: CSSProperties = { flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", color: "var(--text-secondary)" };
 const tipo: CSSProperties = { color: "var(--text)" };
 const prio: CSSProperties = { padding: "1px 8px", borderRadius: 999, background: "var(--danger-bg, #fee2e2)", color: "var(--danger-text, #b91c1c)", fontSize: 11, fontWeight: 800 };
+const linhaSel: CSSProperties = { border: "2px solid var(--accent, #22c55e)", background: "var(--bg-input)", padding: "4px 11px" };
+const bumpThumb: CSSProperties = { width: 20, height: 20, borderRadius: 4, objectFit: "cover" };
 const linhaBump: CSSProperties = { borderLeft: "3px solid var(--info-text, #1d4ed8)" };
 const bumpPill: CSSProperties = { padding: "1px 8px", borderRadius: 999, background: "var(--info-bg, #dbeafe)", color: "var(--info-text, #1d4ed8)", fontSize: 12, fontWeight: 800 };
