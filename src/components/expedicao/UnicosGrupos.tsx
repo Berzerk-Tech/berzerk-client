@@ -23,16 +23,19 @@ const POLL_MS = 30000;
 export function UnicosGrupos({
   onEscolher,
   onIndisponivel,
+  estampaInicial = null,
 }: {
   onEscolher: (g: GrupoEscolhido) => void;
   /** API ainda sem a fila (404): a tela desabilita o modo. */
   onIndisponivel: () => void;
+  /** Estampa cujo painel de tamanhos abre direto (a fila do tamanho acabou). */
+  estampaInicial?: string | null;
 }) {
   const [dados, setDados] = useState<UnicosResponse | null>(null);
   const [erro, setErro] = useState<string | null>(null);
   const [carregando, setCarregando] = useState(false);
   const [busca, setBusca] = useState("");
-  const [estampaAberta, setEstampaAberta] = useState<string | null>(null);
+  const [estampaAberta, setEstampaAberta] = useState<string | null>(estampaInicial);
   const [bumpAberto, setBumpAberto] = useState(false);
   // O PUT da config exige `separacao:manage` (coordenação do CD): a operadora não vê o botão.
   const [podeConfigurarBump, setPodeConfigurarBump] = useState(false);
@@ -75,8 +78,9 @@ export function UnicosGrupos({
 
   // Estampa aberta sumiu (acabaram os pedidos no poll) ou deixou de casar com a busca: volta pra grade.
   useEffect(() => {
-    if (estampaAberta && !aberta) setEstampaAberta(null);
-  }, [estampaAberta, aberta]);
+    // Só depois do primeiro carregamento: antes disso `aberta` é null por falta de dados.
+    if (dados !== null && estampaAberta && !aberta) setEstampaAberta(null);
+  }, [dados, estampaAberta, aberta]);
 
   const clicarEstampa = (e: EstampaAgrupada) => {
     if (e.tamanhos.length === 1) onEscolher({ estampa: e.estampa, tamanho: e.tamanhos[0].tamanho });

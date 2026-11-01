@@ -2,15 +2,52 @@
 // pedidos dele, na ordem da fila. `versao` muda a cada ciclo concluído e força
 // o refetch (a contagem cai um pedido). Poll de 30 s.
 
-import { useCallback, useEffect, useState, type CSSProperties } from "react";
+import { useCallback, useEffect, useRef, useState, type CSSProperties } from "react";
 import { rotuloGrupo, type GrupoEscolhido } from "../../lib/unicosExpedicao";
 import { getUnicosPedidos, type UnicoPedido } from "../../services/expedicao";
 
 const POLL_MS = 30000;
 
-export function UnicosFila({ grupo, versao, onTrocar, trocarDesabilitado }: { grupo: GrupoEscolhido; versao: number; onTrocar: () => void; trocarDesabilitado?: boolean }) {
+export function UnicosFila({
+  grupo,
+  versao,
+  onTrocar,
+  trocarDesabilitado,
+  onEsgotou,
+  mesaLivre,
+}: {
+  grupo: GrupoEscolhido;
+  versao: number;
+  onTrocar: () => void;
+  trocarDesabilitado?: boolean;
+  /** A fila do grupo acabou e a mesa está livre: o pai volta pra escolha de tamanho/estampa. */
+  onEsgotou: () => void;
+  mesaLivre: boolean;
+}) {
   const [pedidos, setPedidos] = useState<UnicoPedido[] | null>(null);
   const [erro, setErro] = useState(false);
+  const esgotouAvisado = useRef(false);
+  const onEsgotouRef = useRef(onEsgotou);
+  onEsgotouRef.current = onEsgotou;
+
+  // Grupo novo: descarta a lista do grupo anterior e rearma o aviso.
+  useEffect(() => {
+    setPedidos(null);
+    esgotouAvisado.current = false;
+  }, [grupo.estampa, grupo.tamanho]);
+
+  // Lista vazia com a mesa livre: avisa UMA vez; se a mesa estiver ocupada, tenta quando liberar.
+  useEffect(() => {
+    if (!pedidos) return;
+    if (pedidos.length > 0) {
+      esgotouAvisado.current = false;
+      return;
+    }
+    if (mesaLivre && !esgotouAvisado.current) {
+      esgotouAvisado.current = true;
+      onEsgotouRef.current();
+    }
+  }, [pedidos, mesaLivre]);
 
   const carregar = useCallback(async () => {
     try {
@@ -27,13 +64,15 @@ export function UnicosFila({ grupo, versao, onTrocar, trocarDesabilitado }: { gr
     return () => window.clearInterval(id);
   }, [carregar, versao]);
 
+  const comBump = (pedidos ?? []).filter((p) => p.orderBump).length;
+
   return (
     <div style={wrap}>
       <div style={cabecalho}>
         <div>
           <div style={titulo}>{rotuloGrupo(grupo)}</div>
           <div style={sub}>
-            {pedidos ? `${pedidos.length} pedido${pedidos.length === 1 ? "" : "s"} na fila` : "Carregando…"}
+            {pedidos ? `${pedidos.length} pedido${pedidos.length === 1 ? "" : "s"} na fila${comBump > 0 ? ` · ${comBump} com bump` : ""}` : "Carregando…"}
             {erro && " · não consegui atualizar"}
           </div>
         </div>
@@ -48,13 +87,18 @@ export function UnicosFila({ grupo, versao, onTrocar, trocarDesabilitado }: { gr
         </button>
       </div>
       <div style={lista} className="thin-scroll">
-        {pedidos && pedidos.length === 0 && <div style={vazio}>Nenhum pedido único aguardando esta fila.</div>}
+        {pedidos && pedidos.length === 0 && <div style={vazio}>Nenhum pedido único aguardando esta fila · voltando…</div>}
         {(pedidos ?? []).map((p, i) => (
-          <div key={p.id} style={linha}>
+          <div key={p.id} style={p.orderBump ? { ...linha, ...linhaBump } : linha}>
             <span style={pos}>{i + 1}</span>
             <code style={num}>#{p.numero ?? p.id.slice(0, 8)}</code>
             <span style={cli}>{p.cliente ?? ""}</span>
             <span style={tipo}>{p.produtoNome}</span>
+            {p.orderBump && (
+              <span style={bumpPill} title="Order bump: leia esta peça junto com o item">
+                + {p.orderBump.produtoNome}
+              </span>
+            )}
             {p.prioritario && <span style={prio}>PRIORITÁRIO</span>}
           </div>
         ))}
@@ -76,3 +120,5 @@ const num: CSSProperties = { fontWeight: 800, fontSize: 14 };
 const cli: CSSProperties = { flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", color: "var(--text-secondary)" };
 const tipo: CSSProperties = { color: "var(--text)" };
 const prio: CSSProperties = { padding: "1px 8px", borderRadius: 999, background: "var(--danger-bg, #fee2e2)", color: "var(--danger-text, #b91c1c)", fontSize: 11, fontWeight: 800 };
+const linhaBump: CSSProperties = { borderLeft: "3px solid var(--info-text, #1d4ed8)" };
+const bumpPill: CSSProperties = { padding: "1px 8px", borderRadius: 999, background: "var(--info-bg, #dbeafe)", color: "var(--info-text, #1d4ed8)", fontSize: 12, fontWeight: 800 };
