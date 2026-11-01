@@ -274,6 +274,8 @@ export function Expedicao({ onBack }: Props) {
   const [grupoUnicos, setGrupoUnicos] = useState<GrupoEscolhido | null>(() => getGrupoEscolhido());
   const grupoRef = useRef<GrupoEscolhido | null>(grupoUnicos);
   grupoRef.current = grupoUnicos;
+  // Estampa a reabrir no painel de tamanhos quando a fila do tamanho acaba.
+  const [estampaInicialUnicos, setEstampaInicialUnicos] = useState<string | null>(null);
   const [unicosIndisponivel, setUnicosIndisponivel] = useState(false);
   // Order bump (Únicos): o pedido tinha item de bump lido junto com a peça principal.
   // O limite de EPCs (UNICOS_MAX_TAGS) já comporta principal + bump; o servidor decide
@@ -451,6 +453,7 @@ export function Expedicao({ onBack }: Props) {
         showNotice("Termine o pedido na mesa antes de trocar a fila.");
         return;
       }
+      if (g) setEstampaInicialUnicos(null);
       setGrupoEscolhido(g);
       setGrupoUnicos(g);
       grupoRef.current = g;
@@ -1585,10 +1588,16 @@ export function Expedicao({ onBack }: Props) {
               versao={versaoUnicos}
               onTrocar={() => escolherGrupo(null)}
               trocarDesabilitado={flow.kind === "printing" || flow.kind === "packing" || flow.kind === "done"}
+              mesaLivre={!(flow.kind === "printing" || flow.kind === "packing" || flow.kind === "done")}
+              onEsgotou={() => {
+                if (mesaOcupada()) return;
+                setEstampaInicialUnicos(grupoUnicos.estampa);
+                escolherGrupo(null);
+              }}
             />
           )}
           {modoFila === "unicos" && canal === "ecommerce" && !grupoUnicos ? (
-            <UnicosGrupos onEscolher={escolherGrupo} onIndisponivel={unicosSemApi} />
+            <UnicosGrupos onEscolher={escolherGrupo} onIndisponivel={unicosSemApi} estampaInicial={estampaInicialUnicos} />
           ) : (
           <StageCenter
             flow={flow}

@@ -553,6 +553,8 @@ export type UnicoPedido = {
   prioritario?: boolean;
   emitidoEm?: string | null;
   trackingNumber?: string | null;
+  /** Pedido com item de order bump: ler a peça junto com ele. */
+  orderBump?: { produtoId: string; produtoNome: string; tamanho?: string } | null;
 };
 
 export type UnicoSepararResponse = {
