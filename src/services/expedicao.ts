@@ -553,8 +553,11 @@ export type UnicoPedido = {
   prioritario?: boolean;
   emitidoEm?: string | null;
   trackingNumber?: string | null;
+  /** Cor e foto da peça principal (API nova). */
+  cor?: string | null;
+  imagemUrl?: string | null;
   /** Pedido com item de order bump: ler a peça junto com ele. */
-  orderBump?: { produtoId: string; produtoNome: string; tamanho?: string; imagemUrl?: string | null } | null;
+  orderBump?: { produtoId: string; produtoNome: string; tamanho?: string | null; imagemUrl?: string | null } | null;
 };
 
 export type UnicoSepararResponse = {
@@ -579,6 +582,10 @@ export const UNICOS_ERR = {
   PEDIDO_ESCOLHIDO_INDISPONIVEL: "pedido_escolhido_indisponivel",
   /** A peça lida não é a do pedido escolhido. */
   PECA_NAO_E_DO_PEDIDO: "peca_nao_e_do_pedido",
+  /** O order bump lido tem tamanho diferente do que o pedido leva. */
+  BUMP_TAMANHO_ERRADO: "bump_tamanho_errado",
+  /** Só a tag do order bump foi lida, sem a peça. */
+  SO_ORDER_BUMP_LIDO: "so_order_bump_lido",
 } as const;
 
 export function getUnicos(): Promise<UnicosResponse> {

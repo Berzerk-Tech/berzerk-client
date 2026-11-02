@@ -136,14 +136,22 @@ type Flow =
       order?: ExpedicaoOrder;
       /** Só no `ja_expedido`: o pedido lá atrás, pra oferecer a reimpressão. */
       jaExpedido?: JaExpedido;
-      /** Modo Únicos: oferece o botão "Trocar fila" (peça de outra fila). */
+      /** Modo Únicos: oferece o botão "Trocar estampa" (peça de outra fila). */
       trocarFila?: boolean;
       /** Order bump: peças lidas/total e o item que falta. */
       progresso?: string;
-      orderBump?: { produtoNome: string; imagemUrl: string | null };
+      orderBump?: { produtoNome: string; imagemUrl: string | null; tamanho?: string | null };
     };
 
 const PACKING_MS = 5000;
+
+/** Rótulo do item do bump no painel OPA: depende do erro (lido × esperado × faltando). */
+function rotuloBumpDoErro(code: string, ob: { produtoNome: string; tamanho?: string | null }): string {
+  const item = [ob.produtoNome, ob.tamanho].filter(Boolean).join(" · ");
+  if (code === UNICOS_ERR.SO_ORDER_BUMP_LIDO) return `Lido: ${item}`;
+  if (code === UNICOS_ERR.BUMP_TAMANHO_ERRADO) return `O pedido leva: ${item}`;
+  return `Falta: ${item}`;
+}
 const RESOLVE_DEBOUNCE_MS = 250;
 // Peças na mesa sem pedido resolvido (separação atrasada, rede, etc.): tenta de
 // novo sozinho — o operador não tem mouse/teclado, "Nova leitura" é exceção.
@@ -454,6 +462,8 @@ export function Expedicao({ onBack }: Props) {
     [reiniciar, showNotice],
   );
 
+  const unicosAtivo = modoFila === "unicos" && canal === "ecommerce";
+
   const escolherGrupo = useCallback(
     (g: GrupoEscolhido | null) => {
       if (mesaOcupada()) {
@@ -471,6 +481,29 @@ export function Expedicao({ onBack }: Props) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [reiniciar, showNotice],
   );
+
+  /** Únicos: volta pro painel de tamanhos da estampa atual. */
+  const voltarParaTamanhos = useCallback(() => {
+    const g = grupoRef.current;
+    if (mesaOcupada()) {
+      showNotice("Termine o pedido na mesa antes de trocar a fila.");
+      return;
+    }
+    if (g) setEstampaInicialUnicos(g.estampa);
+    escolherGrupo(null);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [escolherGrupo, showNotice]);
+
+  /** Únicos: volta pra grade de estampas (zera a estampa inicial, senão reabre o painel errado). */
+  const trocarEstampa = useCallback(() => {
+    if (mesaOcupada()) {
+      showNotice("Termine o pedido na mesa antes de trocar a fila.");
+      return;
+    }
+    setEstampaInicialUnicos(null);
+    escolherGrupo(null);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [escolherGrupo, showNotice]);
 
   const unicosSemApi = useCallback(() => {
     setUnicosIndisponivel(true);
@@ -1593,10 +1626,8 @@ export function Expedicao({ onBack }: Props) {
       <StepIndicator flow={flow} />
 
       <div style={layoutRow}>
-        <LiveReadPanel readLog={readLog} conf={conf} connected={rfid.connected} />
-
-        <main style={stage}>
-          {modoFila === "unicos" && canal === "ecommerce" && grupoUnicos && (
+        {unicosAtivo && grupoUnicos ? (
+          <aside style={unicosLateral}>
             <UnicosFila
               grupo={grupoUnicos}
               versao={versaoUnicos}
@@ -1605,7 +1636,8 @@ export function Expedicao({ onBack }: Props) {
                 pedidoSelecionadoRef.current = id;
                 setPedidoSelecionadoUnicos(id);
               }}
-              onTrocar={() => escolherGrupo(null)}
+              onVoltar={voltarParaTamanhos}
+              onTrocar={trocarEstampa}
               trocarDesabilitado={flow.kind === "printing" || flow.kind === "packing" || flow.kind === "done"}
               mesaLivre={!(flow.kind === "printing" || flow.kind === "packing" || flow.kind === "done")}
               onEsgotou={() => {
@@ -1614,8 +1646,13 @@ export function Expedicao({ onBack }: Props) {
                 escolherGrupo(null);
               }}
             />
-          )}
-          {modoFila === "unicos" && canal === "ecommerce" && !grupoUnicos ? (
+          </aside>
+        ) : (
+          !unicosAtivo && <LiveReadPanel readLog={readLog} conf={conf} connected={rfid.connected} />
+        )}
+
+        <main style={stage}>
+          {unicosAtivo && !grupoUnicos ? (
             <UnicosGrupos onEscolher={escolherGrupo} onIndisponivel={unicosSemApi} estampaInicial={estampaInicialUnicos} />
           ) : (
           <StageCenter
@@ -1631,14 +1668,22 @@ export function Expedicao({ onBack }: Props) {
             reprintingId={reprintingId}
             onReprint={(o) => void reprint(o, "ja_expedido")}
             canalMesa={canal}
-            unicosGrupo={modoFila === "unicos" && canal === "ecommerce" ? grupoUnicos : null}
+            unicosGrupo={unicosAtivo ? grupoUnicos : null}
+            itensGrandes={unicosAtivo}
             orderBumpNome={modoFila === "unicos" && flow.kind !== "idle" && flow.kind !== "reading" && flow.kind !== "choose" && flow.kind !== "error" && bumpDoPedido?.orderId === flow.order.id ? bumpDoPedido.nome : null}
-            onTrocarFila={() => escolherGrupo(null)}
+            onTrocarFila={unicosAtivo ? trocarEstampa : () => escolherGrupo(null)}
           />
           )}
         </main>
 
-        <HistorySidebar session={session} reprintingId={reprintingId} onReprint={(o) => void reprint(o, "historico")} />
+        {unicosAtivo ? (
+          <aside style={histPanel}>
+            <LiveReadPanel embutido readLog={readLog} conf={conf} connected={rfid.connected} />
+            <HistorySidebar embutido session={session} reprintingId={reprintingId} onReprint={(o) => void reprint(o, "historico")} />
+          </aside>
+        ) : (
+          <HistorySidebar session={session} reprintingId={reprintingId} onReprint={(o) => void reprint(o, "historico")} />
+        )}
       </div>
 
       <footer style={footer}>
@@ -1708,6 +1753,7 @@ function StageCenter({
   unicosGrupo,
   orderBumpNome,
   onTrocarFila,
+  itensGrandes,
 }: {
   flow: Flow;
   conf: Conferencia | null;
@@ -1719,6 +1765,8 @@ function StageCenter({
   /** Modo Únicos: nome do item de order bump lido junto com a peça (null = pedido sem bump). */
   orderBumpNome: string | null;
   onTrocarFila: () => void;
+  /** Modo Únicos: pedido em cards grandes. */
+  itensGrandes?: boolean;
   onChoose: (m: EpcMatch) => void;
   onForce: () => void;
   onPrint: () => void;
@@ -1790,7 +1838,7 @@ function StageCenter({
             {miniaturaLeve(flow.orderBump.imagemUrl) && (
               <img src={miniaturaLeve(flow.orderBump.imagemUrl) ?? undefined} alt="" style={{ width: 96, height: 96, borderRadius: 10, objectFit: "cover" }} />
             )}
-            <span style={{ fontSize: 20, fontWeight: 800 }}>Falta: {flow.orderBump.produtoNome}</span>
+            <span style={{ fontSize: 20, fontWeight: 800 }}>{rotuloBumpDoErro(flow.code, flow.orderBump)}</span>
           </div>
         )}
         <p style={{ ...heroHint, fontSize: 16, maxWidth: 560, color: "var(--text)" }}>{flow.message}</p>
@@ -1808,7 +1856,7 @@ function StageCenter({
                 : ja?.canal === "mercado_livre" ? "↻ Reimprimir documento" : `↻ Reimprimir ${doc === "etiqueta" ? "etiqueta" : "DANFE"}`}
             </button>
           )}
-          {flow.trocarFila && <button style={redBtn} onClick={onTrocarFila}>Trocar fila</button>}
+          {flow.trocarFila && <button style={redBtn} onClick={onTrocarFila}>Trocar estampa</button>}
           <button style={flow.trocarFila ? ghostBtn : redBtn} onClick={onRestart}>Nova leitura</button>
         </div>
       </div>
@@ -1859,7 +1907,7 @@ function StageCenter({
       )}
 
       <div style={itemsScroll} className="thin-scroll">
-        <ItemsGrid items={order.items} progress={conf?.porItem ?? new Map()} />
+        <ItemsGrid items={order.items} progress={conf?.porItem ?? new Map()} grande={itensGrandes} />
       </div>
 
       {flow.kind === "identified" && (
@@ -1973,10 +2021,10 @@ const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 
 // Grade de peças (imagem + selinho verde) — o coração da UX
 // ============================================================
-function ItemsGrid({ items, progress }: { items: OrderItem[]; progress: Map<string, number> }) {
+function ItemsGrid({ items, progress, grande }: { items: OrderItem[]; progress: Map<string, number>; grande?: boolean }) {
   if (items.length === 0) return <div style={heroHint}>Pedido sem itens cadastrados.</div>;
   return (
-    <div style={itemsGrid}>
+    <div style={grande ? itemsGridGrande : itemsGrid}>
       {items.map((it) => (
         <ItemCard key={it.id} item={it} count={progress.get(it.id) ?? 0} />
       ))}
@@ -2021,12 +2069,12 @@ function ItemCard({ item, count }: { item: OrderItem; count: number }) {
 // ============================================================
 // Leitura ao vivo (esquerda) — transparência do sistema
 // ============================================================
-function LiveReadPanel({ readLog, conf, connected }: { readLog: ReadEntry[]; conf: Conferencia | null; connected: boolean }) {
+function LiveReadPanel({ readLog, conf, connected, embutido }: { readLog: ReadEntry[]; conf: Conferencia | null; connected: boolean; embutido?: boolean }) {
   // ✓ = peça que a conferência contou pra ESTE pedido (tag da separação ou peça
   // real cobrindo um slot "Surpresa"); ! = peça que não é deste pedido.
   const contadas = conf ? new Set(conf.contadas) : null;
   return (
-    <aside style={livePanel}>
+    <aside style={embutido ? painelMetade : livePanel}>
       <div style={liveHeader}>
         <span style={{ ...liveDot, background: connected ? "var(--success-dot)" : "var(--danger-text)", animation: connected ? "berzerk-pulse-dot 1.4s ease-in-out infinite" : "none" }} />
         <span style={liveTitle}>Leitura ao vivo</span>
@@ -2059,9 +2107,9 @@ function LiveReadPanel({ readLog, conf, connected }: { readLog: ReadEntry[]; con
 // ============================================================
 // Histórico (direita) — miniaturas + Reimprimir
 // ============================================================
-function HistorySidebar({ session, reprintingId, onReprint }: { session: SessionEntry[]; reprintingId: string | null; onReprint: (o: ExpedicaoOrder) => void }) {
+function HistorySidebar({ session, reprintingId, onReprint, embutido }: { session: SessionEntry[]; reprintingId: string | null; onReprint: (o: ExpedicaoOrder) => void; embutido?: boolean }) {
   return (
-    <aside style={histPanel}>
+    <aside style={embutido ? { ...painelMetade, borderTop: "1px solid var(--border)" } : histPanel}>
       <div style={histHeader}>
         <span style={histTitle}>Histórico</span>
         <span style={histSub}>sessão</span>
@@ -2683,6 +2731,9 @@ const tagsLabel: CSSProperties = { fontFamily: "var(--font-mono)", fontSize: 12,
 
 const itemsScroll: CSSProperties = { flex: 1, minHeight: 0, overflowY: "auto", overflowX: "hidden" };
 const itemsGrid: CSSProperties = { display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(150px, 1fr))", gap: 12, paddingBottom: 4 };
+const itemsGridGrande: CSSProperties = { ...itemsGrid, gridTemplateColumns: "repeat(auto-fill, minmax(220px, 1fr))" };
+const unicosLateral: CSSProperties = { width: 340, flexShrink: 0, borderRight: "1px solid var(--border)", background: "var(--bg-elevated)", display: "flex", flexDirection: "column", minHeight: 0, padding: 10 };
+const painelMetade: CSSProperties = { flex: 1, minHeight: 0, overflow: "hidden", display: "flex", flexDirection: "column" };
 const itemCard: CSSProperties = { display: "flex", flexDirection: "column", background: "var(--bg-card)", border: "1px solid var(--border)", borderRadius: 12, overflow: "hidden", transition: "border-color 160ms" };
 const itemCardDone: CSSProperties = { borderColor: "var(--success-border)" };
 const itemImgWrap: CSSProperties = { position: "relative", aspectRatio: "1 / 1", background: "var(--bg-input)", display: "grid", placeItems: "center" };

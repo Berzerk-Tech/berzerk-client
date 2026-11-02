@@ -132,9 +132,11 @@ describe("agruparPorEstampa", () => {
     expect(r[0]).toMatchObject({ estampa: "Leg Day", pedidos: 10, prioritarios: 3, imagemUrl: "a.jpg" });
     expect(r[0].tamanhos.map((t) => t.tamanho)).toEqual(["P", "M", "XG", "ZZZ"]);
   });
-  it("mantém a ordem de primeira aparição das estampas e imagem nula quando não há", () => {
+  it("ordena estampas por pedidos (soma dos tamanhos), prioritários e nome; imagem nula quando não há", () => {
     const r = agruparPorEstampa([g("B", "M", 1), g("A", "G", 1), g("B", "G", 1)]);
     expect(r.map((e) => e.estampa)).toEqual(["B", "A"]);
+    const o = agruparPorEstampa([g("Z", "M", 6), g("Y", "M", 5), g("Y", "G", 5), g("A", "M", 6, { prioritarios: 1 }), g("C", "M", 6)]);
+    expect(o.map((e) => e.estampa)).toEqual(["Y", "A", "C", "Z"]);
     expect(r[0].imagemUrl).toBeNull();
     expect(r[0].prioritarios).toBe(0);
   });
@@ -159,6 +161,39 @@ describe("order bump", () => {
     expect(e.code).toBe("bump_sem_pedido");
     expect(e.definitivo).toBe(false);
     expect(e.message).toBe("Nenhum pedido de Oversized Leg Day G leva Touca Berzerk. Se o item não é desta caixa, tire-o da mesa e leia só a peça.");
+  });
+  it("bump_tamanho_errado é definitivo e mostra esperado x lido", () => {
+    const e = erroSepararUnico(
+      api(409, {
+        error: "bump_tamanho_errado",
+        orderBump: { produtoId: "9", produtoNome: "Oversized - Surpresa", tamanho: "GG", imagemUrl: "x.jpg" },
+        lido: { produtoId: "9", produtoNome: "Oversized - Surpresa", tamanho: "M" },
+        pedido: { numero: "1001", produtoNome: "Oversized" },
+      }),
+      { estampa: "Leg Day", tamanho: "G" },
+    );
+    expect(e.definitivo).toBe(true);
+    expect(e.trocarFila).toBeUndefined();
+    expect(e.progresso).toBeUndefined();
+    expect(e.message).toBe("O order bump do pedido #1001 é Oversized - Surpresa GG; o item lido é Oversized - Surpresa M. Troque o item.");
+    expect(e.orderBump).toEqual({ produtoNome: "Oversized - Surpresa", imagemUrl: "x.jpg", tamanho: "GG" });
+  });
+  it("bump_tamanho_errado sem tamanho não deixa espaço duplo", () => {
+    const e = erroSepararUnico(
+      api(409, { error: "bump_tamanho_errado", orderBump: { produtoNome: "Touca" }, lido: { produtoNome: "Boné", tamanho: "" }, pedido: { numero: "7" } }),
+      null,
+    );
+    expect(e.message).toBe("O order bump do pedido #7 é Touca; o item lido é Boné. Troque o item.");
+  });
+  it("so_order_bump_lido não é definitivo", () => {
+    const e = erroSepararUnico(
+      api(409, { error: "so_order_bump_lido", orderBump: { produtoId: "9", produtoNome: "Touca", tamanho: "U", imagemUrl: null } }),
+      { estampa: "Leg Day", tamanho: "G" },
+    );
+    expect(e.definitivo).toBe(false);
+    expect(e.trocarFila).toBeUndefined();
+    expect(e.message).toBe("Li só o item do order bump (Touca U). Coloque a peça junto e leia de novo.");
+    expect(e.orderBump?.produtoNome).toBe("Touca");
   });
   it("agrupa comOrderBump por estampa (ausente = 0)", () => {
     const g: UnicoGrupo[] = [

@@ -31,9 +31,35 @@ describe("UnicosFila", () => {
       ped("1002"),
     ]);
     render(<UnicosFila grupo={GRUPO} versao={0} onTrocar={() => {}} onEsgotou={() => {}} mesaLivre />);
-    expect(await screen.findByText("+ Touca Berzerk")).toBeTruthy();
-    expect(screen.getAllByText("+ Touca Berzerk")).toHaveLength(1);
+    expect(await screen.findByText("+ Touca Berzerk · U")).toBeTruthy();
+    expect(screen.getAllByText(/^\+ Touca Berzerk/)).toHaveLength(1);
     expect(screen.getByText(/2 pedidos na fila · 1 com bump/)).toBeTruthy();
+  });
+
+  it("linha mostra tipo, cor e tamanho da peça e o bump com tamanho (sem tamanho, só o nome)", async () => {
+    getUnicosPedidos.mockResolvedValue([
+      ped("1001", { tamanho: "G", cor: "Preto", orderBump: { produtoId: "b", produtoNome: "Oversized - Surpresa", tamanho: "GG" } }),
+      ped("1002", { tamanho: "G", orderBump: { produtoId: "b", produtoNome: "Touca" } }),
+    ]);
+    render(<UnicosFila grupo={GRUPO} versao={0} onTrocar={() => {}} onEsgotou={() => {}} mesaLivre />);
+    expect(await screen.findByText("Oversized · Preto · G")).toBeTruthy();
+    expect(screen.getByText("+ Oversized - Surpresa · GG")).toBeTruthy();
+    expect(screen.getByText("+ Touca")).toBeTruthy();
+  });
+
+  it("Voltar e Trocar estampa chamam os handlers e ficam desabilitados com a mesa ocupada", async () => {
+    getUnicosPedidos.mockResolvedValue([ped("1001")]);
+    const onVoltar = vi.fn();
+    const onTrocar = vi.fn();
+    const { rerender } = render(<UnicosFila grupo={GRUPO} versao={0} onVoltar={onVoltar} onTrocar={onTrocar} onEsgotou={() => {}} mesaLivre />);
+    await screen.findByText("1 pedido na fila");
+    fireEvent.click(screen.getByText("Voltar"));
+    fireEvent.click(screen.getByText("Trocar estampa"));
+    expect(onVoltar).toHaveBeenCalledTimes(1);
+    expect(onTrocar).toHaveBeenCalledTimes(1);
+    rerender(<UnicosFila grupo={GRUPO} versao={0} onVoltar={onVoltar} onTrocar={onTrocar} trocarDesabilitado onEsgotou={() => {}} mesaLivre={false} />);
+    expect((screen.getByText("Voltar") as HTMLButtonElement).disabled).toBe(true);
+    expect((screen.getByText("Trocar estampa") as HTMLButtonElement).disabled).toBe(true);
   });
 
   it("sem bump o subtítulo não cita bump", async () => {
