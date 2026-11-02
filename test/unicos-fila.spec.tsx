@@ -94,11 +94,34 @@ describe("UnicosFila seleção", () => {
   afterEach(() => cleanup());
   const props = { grupo: GRUPO, versao: 0, onTrocar: () => {}, onEsgotou: () => {}, mesaLivre: true };
 
-  it("sem seleção, seleciona o primeiro da lista ao carregar", async () => {
+  it("sem seleção, não seleciona nada: nenhuma linha selecionada e selo PRÓXIMO só na 1ª", async () => {
     getUnicosPedidos.mockResolvedValue([ped("1001"), ped("1002")]);
     const onSelecionar = vi.fn();
     render(<UnicosFila {...props} selecionadoId={null} onSelecionar={onSelecionar} />);
-    await waitFor(() => expect(onSelecionar).toHaveBeenCalledWith("1001"));
+    await screen.findByText("#1001");
+    expect(onSelecionar).not.toHaveBeenCalled();
+    const opcoes = screen.getAllByRole("option");
+    expect(opcoes.every((o) => o.getAttribute("aria-selected") === "false")).toBe(true);
+    expect(screen.getAllByText("PRÓXIMO")).toHaveLength(1);
+    expect(opcoes[0].textContent).toContain("PRÓXIMO");
+    expect(screen.getByText(/Toque num pedido pra escolher/)).toBeTruthy();
+  });
+
+  it("ocultarIds tira o pedido da lista na hora", async () => {
+    getUnicosPedidos.mockResolvedValue([ped("1001"), ped("1002")]);
+    render(<UnicosFila {...props} selecionadoId={null} onSelecionar={() => {}} ocultarIds={["1001"]} />);
+    await screen.findByText("#1002");
+    expect(screen.queryByText("#1001")).toBeNull();
+    expect(screen.getByText("1 pedido na fila")).toBeTruthy();
+  });
+
+  it("clicar no pedido já selecionado desfaz a seleção", async () => {
+    getUnicosPedidos.mockResolvedValue([ped("1001"), ped("1002")]);
+    const onSelecionar = vi.fn();
+    render(<UnicosFila {...props} selecionadoId="1002" onSelecionar={onSelecionar} />);
+    await screen.findByText("#1002");
+    fireEvent.click(screen.getAllByRole("option")[1]);
+    expect(onSelecionar).toHaveBeenCalledWith(null);
   });
 
   it("destaca o selecionado e o clique em outro chama onSelecionar", async () => {
@@ -113,7 +136,7 @@ describe("UnicosFila seleção", () => {
     expect(onSelecionar).toHaveBeenCalledWith("1001");
   });
 
-  it("recarga mantém o id se ainda existe; senão volta pro primeiro", async () => {
+  it("recarga mantém o id se ainda existe; senão limpa a seleção", async () => {
     getUnicosPedidos.mockResolvedValue([ped("1001"), ped("1002")]);
     const onSelecionar = vi.fn();
     const { rerender } = render(<UnicosFila {...props} selecionadoId="1002" onSelecionar={onSelecionar} />);
@@ -121,7 +144,7 @@ describe("UnicosFila seleção", () => {
     expect(onSelecionar).not.toHaveBeenCalled();
     getUnicosPedidos.mockResolvedValue([ped("1003"), ped("1004")]);
     rerender(<UnicosFila {...props} versao={1} selecionadoId="1002" onSelecionar={onSelecionar} />);
-    await waitFor(() => expect(onSelecionar).toHaveBeenCalledWith("1003"));
+    await waitFor(() => expect(onSelecionar).toHaveBeenCalledWith(null));
   });
 
   it("título leva o tipo do pedido selecionado; sem pedidos, só estampa e tamanho", async () => {

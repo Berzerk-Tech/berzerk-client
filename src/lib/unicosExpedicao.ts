@@ -97,11 +97,10 @@ export type ErroUnicos = {
   progresso?: string;
 };
 
-/** Mantém a seleção se o id ainda está na lista; senão o primeiro pedido (null se vazia). */
+/** Mantém a seleção só se o id ainda está na lista; senão null (o servidor puxa o primeiro). Nunca seleciona sozinho. */
 export function selecaoAposRecarga(selecionadoId: string | null, pedidos: { id: string }[]): string | null {
-  if (pedidos.length === 0) return null;
   if (selecionadoId && pedidos.some((p) => p.id === selecionadoId)) return selecionadoId;
-  return pedidos[0].id;
+  return null;
 }
 
 function str(v: unknown): string {
@@ -156,7 +155,7 @@ export function erroSepararUnico(e: unknown, grupo: GrupoEscolhido | null): Erro
       case UNICOS_ERR.PEDIDO_ESCOLHIDO_INDISPONIVEL:
         return {
           code,
-          message: "O pedido escolhido já saiu da fila. Selecionei o primeiro da lista; bipe a peça de novo.",
+          message: "O pedido escolhido já saiu da fila. Bipe a peça de novo.",
           definitivo: false,
         };
       case UNICOS_ERR.PECA_NAO_E_DO_PEDIDO: {

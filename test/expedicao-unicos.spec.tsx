@@ -53,7 +53,8 @@ vi.mock("../src/contexts/RfidContext", () => ({
     resolveEpcs: async () => new Map(),
   }),
 }));
-vi.mock("../src/lib/beep", () => ({ beepOk: () => {}, beepError: () => {} }));
+const beepError = vi.fn();
+vi.mock("../src/lib/beep", () => ({ beepOk: () => {}, beepError: () => beepError() }));
 // A impressão silenciosa é um comando Rust — no jsdom só observamos o invoke.
 vi.mock("@tauri-apps/api/core", () => ({ invoke: (...a: unknown[]) => invoke(...a) }));
 vi.mock("../src/lib/cognito", () => ({ getSessaoSync: () => null, onSessaoChange: () => () => {} }));
@@ -128,7 +129,7 @@ describe("Expedição — modo Únicos", () => {
     expect(await screen.findByText(/Trava desligada/)).toBeTruthy();
     expect(screen.getAllByText("3 pedidos", { exact: false }).length).toBeGreaterThan(0);
     fireEvent.click(await screen.findByTitle("Escolher a fila Leg Day G"));
-    expect(await screen.findByText("Oversized · Leg Day · G")).toBeTruthy();
+    expect(await screen.findByText("LEG DAY · G")).toBeTruthy();
     expect(JSON.parse(localStorage.getItem("berzerk_expedicao_unicos_grupo_v1") ?? "{}")).toEqual(GRUPO);
   });
 
@@ -190,7 +191,7 @@ describe("Expedição — modo Únicos", () => {
 
   it("bipou: chama o separar com o grupo, imprime, expede e não repete o EPC parado na mesa", async () => {
     await abrirGrupo();
-    expect(await screen.findByText("Oversized · Leg Day · G")).toBeTruthy();
+    expect(await screen.findByText("LEG DAY · G")).toBeTruthy();
     await act(async () => {
       presence?.([TAG]);
     });
@@ -230,6 +231,20 @@ describe("Expedição — modo Únicos", () => {
     });
     expect(await screen.findByText(/leia a peça junto com Touca Berzerk/)).toBeTruthy();
     expect(shipOrder).not.toHaveBeenCalled();
+  });
+
+  it("order_bump_necessario na 1ª leitura: FALTA O BUMP calmo, sem OPA e sem beep", async () => {
+    beepError.mockClear();
+    separarUnico.mockReset().mockRejectedValue(
+      new ApiError(409, "x", { error: "order_bump_necessario", orderBump: { produtoId: "b1", produtoNome: "Touca Berzerk" } }),
+    );
+    await abrirGrupo();
+    await act(async () => {
+      presence?.([TAG]);
+    });
+    expect(await screen.findByText("FALTA O BUMP")).toBeTruthy();
+    expect(screen.queryByText("OPA")).toBeNull();
+    expect(beepError).not.toHaveBeenCalled();
   });
 
   it("order_bump_necessario: mostra 1/2 peças lidas e o item que falta", async () => {

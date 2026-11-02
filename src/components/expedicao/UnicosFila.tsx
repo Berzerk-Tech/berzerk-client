@@ -2,7 +2,7 @@
 // pedidos dele, na ordem da fila. `versao` muda a cada ciclo concluído e força
 // o refetch (a contagem cai um pedido). Poll de 30 s.
 
-import { useCallback, useEffect, useRef, useState, type CSSProperties } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import { miniaturaLeve } from "../../lib/imagens";
 import { rotuloGrupo, rotuloTipo, selecaoAposRecarga, tipoBaseDoProduto, type GrupoEscolhido } from "../../lib/unicosExpedicao";
 import { getUnicosPedidos, type UnicoPedido } from "../../services/expedicao";
@@ -19,6 +19,7 @@ export function UnicosFila({
   mesaLivre,
   selecionadoId,
   onSelecionar,
+  ocultarIds,
 }: {
   grupo: GrupoEscolhido;
   versao: number;
@@ -33,14 +34,24 @@ export function UnicosFila({
   /** Pedido que o bip vai separar (null = ainda sem lista). */
   selecionadoId?: string | null;
   onSelecionar?: (id: string | null) => void;
+  /** Pedidos já expedidos nesta sessão: saem da lista na hora, sem esperar o GET. */
+  ocultarIds?: string[];
 }) {
-  const [pedidos, setPedidos] = useState<UnicoPedido[] | null>(null);
+  const [pedidosBrutos, setPedidos] = useState<UnicoPedido[] | null>(null);
+  const ocultos = ocultarIds && ocultarIds.length > 0 ? new Set(ocultarIds) : null;
+  const pedidos = useMemo(
+    () => (pedidosBrutos && ocultos ? pedidosBrutos.filter((p) => !ocultos.has(p.id)) : pedidosBrutos),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [pedidosBrutos, ocultarIds?.join(",")],
+  );
   const [erro, setErro] = useState(false);
   const esgotouAvisado = useRef(false);
   const onEsgotouRef = useRef(onEsgotou);
   onEsgotouRef.current = onEsgotou;
   const selRef = useRef<string | null>(selecionadoId ?? null);
   selRef.current = selecionadoId ?? null;
+  const ocultosRef = useRef<Set<string>>(new Set());
+  ocultosRef.current = new Set(ocultarIds ?? []);
   const onSelecionarRef = useRef(onSelecionar);
   onSelecionarRef.current = onSelecionar;
 
@@ -67,7 +78,8 @@ export function UnicosFila({
     try {
       const lista = await getUnicosPedidos(grupo.estampa, grupo.tamanho);
       setPedidos(lista);
-      const nova = selecaoAposRecarga(selRef.current, lista);
+      const visiveis = lista.filter((p) => !ocultosRef.current.has(p.id));
+      const nova = selecaoAposRecarga(selRef.current, visiveis);
       if (nova !== selRef.current) {
         selRef.current = nova;
         onSelecionarRef.current?.(nova);
@@ -102,6 +114,7 @@ export function UnicosFila({
           {pedidos ? `${pedidos.length} pedido${pedidos.length === 1 ? "" : "s"} na fila${comBump > 0 ? ` · ${comBump} com bump` : ""}` : "Carregando…"}
           {erro && " · não consegui atualizar"}
         </div>
+        <div style={dica}>Toque num pedido pra escolher · sem escolha sai o primeiro</div>
         <div style={botoes}>
           {onVoltar && (
             <button type="button" style={btn()} onClick={onVoltar} disabled={trocarDesabilitado} title={tituloDesab}>
@@ -126,9 +139,9 @@ export function UnicosFila({
               role="option"
               aria-selected={p.id === selEfetivo}
               onClick={() => {
-                if (p.id === selEfetivo) return;
-                selRef.current = p.id;
-                onSelecionarRef.current?.(p.id);
+                const novo = p.id === selEfetivo ? null : p.id;
+                selRef.current = novo;
+                onSelecionarRef.current?.(novo);
               }}
               style={{ ...linha, ...(p.orderBump ? linhaBump : {}), cursor: "pointer", ...(p.id === selEfetivo ? linhaSel : {}) }}
             >
@@ -138,6 +151,7 @@ export function UnicosFila({
                   <span style={pos}>{i + 1}</span>
                   <code style={num}>#{p.numero ?? p.id.slice(0, 8)}</code>
                   {p.prioritario && <span style={prio}>PRIORITÁRIO</span>}
+                  {i === 0 && !selEfetivo && <span style={proximo}>PRÓXIMO</span>}
                 </div>
                 <span style={cli}>{p.cliente ?? ""}</span>
                 <span style={tipo}>{tipoTxt}</span>
@@ -170,6 +184,8 @@ const num: CSSProperties = { fontWeight: 800, fontSize: 14 };
 const cli: CSSProperties = { minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", color: "var(--text-secondary)" };
 const tipo: CSSProperties = { color: "var(--text)" };
 const prio: CSSProperties = { padding: "1px 8px", borderRadius: 999, background: "var(--danger-bg, #fee2e2)", color: "var(--danger-text, #b91c1c)", fontSize: 11, fontWeight: 800 };
+const proximo: CSSProperties = { padding: "1px 8px", borderRadius: 999, background: "var(--bg-input)", border: "1px solid var(--border-strong)", color: "var(--text-secondary)", fontSize: 11, fontWeight: 800 };
+const dica: CSSProperties = { fontSize: 12, color: "var(--text-muted)" };
 const linhaSel: CSSProperties = { border: "2px solid var(--accent, #22c55e)", background: "var(--bg-input)", padding: "7px 9px" };
 const bumpThumb: CSSProperties = { width: 20, height: 20, borderRadius: 4, objectFit: "cover" };
 const linhaBump: CSSProperties = { borderLeft: "3px solid var(--info-text, #1d4ed8)" };
