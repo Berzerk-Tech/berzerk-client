@@ -33,6 +33,9 @@ type QueueMode = "puro" | "mistos";
 /** Fila escolhida: um tamanho por vez, na aba ativa. */
 type Selected = string | null;
 
+/** Intervalo mínimo entre duas recargas da contagem da fila disparadas por evento (ver efeito abaixo). */
+const COUNTS_MIN_MS = 10_000;
+
 export function Separacao({ onBack }: Props) {
   const rfid = useRfid();
   const [mode, setMode] = useState<QueueMode>("puro");
@@ -133,11 +136,33 @@ export function Separacao({ onBack }: Props) {
     };
     recarregarRef.current = load;
     load();
-    const unsubscribe = subscribeQueueChanged(load);
-    const id = setInterval(load, 60_000);
+    // `queue.changed` chega a cada claim/complete/sync de QUALQUER mesa; no
+    // lançamento de 01/11 eram 8 mesas recarregando a contagem a cada ~2,5 s
+    // (1.944 GET /separacao/queues em 10 min, 2 a 14 s cada) e o banco foi a
+    // 100 %. No máximo uma recarga por COUNTS_MIN_MS, com a última pendente
+    // garantida (trailing); o refresh manual (`recarregarRef`) segue imediato.
+    let ultimaEm = 0;
+    let pendente: number | null = null;
+    const loadLimitado = () => {
+      const falta = COUNTS_MIN_MS - (Date.now() - ultimaEm);
+      if (falta <= 0) {
+        ultimaEm = Date.now();
+        load();
+        return;
+      }
+      if (pendente !== null) return;
+      pendente = window.setTimeout(() => {
+        pendente = null;
+        ultimaEm = Date.now();
+        load();
+      }, falta);
+    };
+    const unsubscribe = subscribeQueueChanged(loadLimitado);
+    const id = setInterval(loadLimitado, 60_000);
     return () => {
       alive = false;
       clearInterval(id);
+      if (pendente !== null) clearTimeout(pendente);
       unsubscribe();
     };
   }, [canal]);

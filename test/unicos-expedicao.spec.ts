@@ -253,17 +253,18 @@ describe("tipo e cor", () => {
 describe("pedido selecionado e erros novos", () => {
   const api = (status: number, body: unknown) => new ApiError(status, "x", body);
   const g = { estampa: "Baki", tamanho: "G" };
-  it("selecaoAposRecarga mantém o id existente, senão o primeiro, senão null", () => {
+  it("selecaoAposRecarga mantém o id existente, senão null (nunca seleciona sozinho)", () => {
     const l = [{ id: "a" }, { id: "b" }];
     expect(selecaoAposRecarga("b", l)).toBe("b");
-    expect(selecaoAposRecarga("x", l)).toBe("a");
-    expect(selecaoAposRecarga(null, l)).toBe("a");
+    expect(selecaoAposRecarga("x", l)).toBeNull();
+    expect(selecaoAposRecarga(null, l)).toBeNull();
     expect(selecaoAposRecarga("a", [])).toBeNull();
   });
   it("pedido_escolhido_indisponivel não é definitivo", () => {
     const e = erroSepararUnico(api(409, { error: "pedido_escolhido_indisponivel", estampa: "Baki", tamanho: "G", produtoNome: "Oversized" }), g);
     expect(e.code).toBe("pedido_escolhido_indisponivel");
     expect(e.definitivo).toBe(false);
+    expect(e.message).toBe("O pedido escolhido já saiu da fila. Bipe a peça de novo.");
   });
   it("peca_nao_e_do_pedido é definitiva e cita as duas peças", () => {
     const e = erroSepararUnico(

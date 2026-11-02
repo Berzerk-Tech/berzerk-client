@@ -141,6 +141,8 @@ type Flow =
       /** Order bump: peças lidas/total e o item que falta. */
       progresso?: string;
       orderBump?: { produtoNome: string; imagemUrl: string | null; tamanho?: string | null };
+      /** Order bump na 1ª leitura: falta a outra tag, sem susto (sem OPA vermelho nem beep). */
+      aguardando?: boolean;
     };
 
 const PACKING_MS = 5000;
@@ -436,6 +438,9 @@ export function Expedicao({ onBack }: Props) {
         setModoFila("pedidos");
         setModoFilaState("pedidos");
       }
+      // A escolha da fila Únicos não sobrevive à troca: outra mesa pode levar o pedido enquanto isso.
+      pedidoSelecionadoRef.current = null;
+      setPedidoSelecionadoUnicos(null);
       reiniciar();
     },
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -456,6 +461,8 @@ export function Expedicao({ onBack }: Props) {
       }
       setModoFila(novo);
       setModoFilaState(novo);
+      pedidoSelecionadoRef.current = null;
+      setPedidoSelecionadoUnicos(null);
       reiniciar();
     },
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -693,8 +700,14 @@ export function Expedicao({ onBack }: Props) {
         }
       }
       const falha = (e: ReturnType<typeof erroSepararUnico>, tentarDeNovo: boolean) => {
-        if (!retrying) beepError();
-        setFlow({ kind: "error", code: e.code, message: e.message, trocarFila: e.trocarFila, progresso: e.progresso, orderBump: e.orderBump });
+        const faltaTag = e.code === UNICOS_ERR.ORDER_BUMP_NECESSARIO || e.code === UNICOS_ERR.SO_ORDER_BUMP_LIDO;
+        const antes = flowRef.current;
+        const aguardando = faltaTag && !retrying;
+        if (faltaTag) {
+          // 1ª tentativa: calmo. Retry com o mesmo erro: avisa UMA vez.
+          if (retrying && antes.kind === "error" && antes.aguardando) beepError();
+        } else if (!retrying) beepError();
+        setFlow({ kind: "error", code: e.code, message: e.message, trocarFila: e.trocarFila, progresso: e.progresso, orderBump: e.orderBump, aguardando });
         unicoFalhaDefinitivaRef.current = !tentarDeNovo;
         lastFailSigRef.current = sigNow;
         if (tentarDeNovo) scheduleRetry();
@@ -713,9 +726,16 @@ export function Expedicao({ onBack }: Props) {
         const er = erroSepararUnico(e, g);
         if (unicosRotaAusente(e)) unicosSemApi();
         if (er.code === UNICOS_ERR.PEDIDO_ESCOLHIDO_INDISPONIVEL) {
+          const tinhaEscolha = pedidoSelecionadoRef.current !== null;
           pedidoSelecionadoRef.current = null;
           setPedidoSelecionadoUnicos(null);
           setVersaoUnicos((v) => v + 1);
+          // A próxima tentativa já vai sem `orderId` (o servidor puxa o próximo da
+          // fila): repete NA HORA, em silêncio, em vez de OPA + beep + 4 s de espera.
+          if (tinhaEscolha && !retrying) {
+            await resolverUnico(epcs, gen, true, scheduleRetry, sigNow);
+            return;
+          }
         }
         falha(er, !er.definitivo);
         return;
@@ -990,6 +1010,11 @@ export function Expedicao({ onBack }: Props) {
 
     const registra = (enfileirado: boolean) => {
       concluindoRef.current = false;
+      // O pedido escolhido acabou de sair: a próxima peça não pode ir com o id dele.
+      if (pedidoSelecionadoRef.current === order.id) {
+        pedidoSelecionadoRef.current = null;
+        setPedidoSelecionadoUnicos(null);
+      }
       setVersaoUnicos((v) => v + 1);
       setSession((s) => [{ order, at: new Date(), modo: modoRef.current }, ...s].slice(0, 12));
       setFlow({ kind: "done", order, modo: modoRef.current, enfileirado });
@@ -1632,6 +1657,7 @@ export function Expedicao({ onBack }: Props) {
               grupo={grupoUnicos}
               versao={versaoUnicos}
               selecionadoId={pedidoSelecionadoUnicos}
+              ocultarIds={session.map((s) => s.order.id)}
               onSelecionar={(id) => {
                 pedidoSelecionadoRef.current = id;
                 setPedidoSelecionadoUnicos(id);
@@ -1823,9 +1849,9 @@ function StageCenter({
     const semEtiqueta = flow.code === "sem_etiqueta";
     return (
       <div style={{ ...centerBlock, padding: "0 24px" }}>
-        <div style={{ ...heroDot, background: "var(--danger-text)" }} />
-        <h1 style={{ ...heroDisplay, fontSize: 56, color: "var(--danger-text)" }}>
-          {semEtiqueta ? "SEM ETIQUETA" : "OPA"}
+        <div style={flow.aguardando ? heroDot : { ...heroDot, background: "var(--danger-text)" }} />
+        <h1 style={{ ...heroDisplay, fontSize: 56, color: flow.aguardando ? "var(--text)" : "var(--danger-text)" }}>
+          {semEtiqueta ? "SEM ETIQUETA" : flow.aguardando ? (flow.code === UNICOS_ERR.SO_ORDER_BUMP_LIDO ? "FALTA A PEÇA" : "FALTA O BUMP") : "OPA"}
         </h1>
         {semEtiqueta && flow.order && (
           <div style={{ ...heroDisplay, fontSize: 72, lineHeight: 1.1 }}>#{flow.order.numero ?? "?"}</div>
@@ -1856,8 +1882,8 @@ function StageCenter({
                 : ja?.canal === "mercado_livre" ? "↻ Reimprimir documento" : `↻ Reimprimir ${doc === "etiqueta" ? "etiqueta" : "DANFE"}`}
             </button>
           )}
-          {flow.trocarFila && <button style={redBtn} onClick={onTrocarFila}>Trocar estampa</button>}
-          <button style={flow.trocarFila ? ghostBtn : redBtn} onClick={onRestart}>Nova leitura</button>
+          {flow.trocarFila && !flow.aguardando && <button style={redBtn} onClick={onTrocarFila}>Trocar estampa</button>}
+          <button style={flow.trocarFila && !flow.aguardando ? ghostBtn : redBtn} onClick={onRestart}>Nova leitura</button>
         </div>
       </div>
     );
