@@ -89,10 +89,10 @@ export type ErroUnicos = {
   message: string;
   /** Erro que só muda com a mesa: não adianta o retry automático. */
   definitivo: boolean;
-  /** Mostra o botão "Trocar fila" no painel de erro. */
+  /** Mostra o botão "Trocar estampa" no painel de erro. */
   trocarFila?: boolean;
   /** order_bump_necessario: item que falta ler junto (nome + foto). */
-  orderBump?: { produtoNome: string; imagemUrl: string | null };
+  orderBump?: { produtoNome: string; imagemUrl: string | null; tamanho?: string | null };
   /** order_bump_necessario: peças lidas / total, ex. "1/2". */
   progresso?: string;
 };
@@ -175,6 +175,30 @@ export function erroSepararUnico(e: unknown, grupo: GrupoEscolhido | null): Erro
           code,
           message: `Nenhum pedido de ${peca || "esta peça"} leva ${nome}. Se o item não é desta caixa, tire-o da mesa e leia só a peça.`,
           definitivo: false,
+        };
+      }
+      case UNICOS_ERR.BUMP_TAMANHO_ERRADO: {
+        const ob = b.orderBump && typeof b.orderBump === "object" ? (b.orderBump as Record<string, unknown>) : {};
+        const ld = b.lido && typeof b.lido === "object" ? (b.lido as Record<string, unknown>) : {};
+        const pd = b.pedido && typeof b.pedido === "object" ? (b.pedido as Record<string, unknown>) : {};
+        const juntar = (...p: string[]) => p.filter(Boolean).join(" ");
+        const esperado = juntar(str(ob.produtoNome), str(ob.tamanho));
+        const lidoTxt = juntar(str(ld.produtoNome), str(ld.tamanho));
+        return {
+          code,
+          message: `O order bump do pedido${str(pd.numero) ? ` #${str(pd.numero)}` : ""} é ${esperado || "outro item"}; o item lido é ${lidoTxt || "outro"}. Troque o item.`,
+          definitivo: true,
+          orderBump: { produtoNome: str(ob.produtoNome) || "o item do order bump", imagemUrl: str(ob.imagemUrl) || null, tamanho: str(ob.tamanho) || null },
+        };
+      }
+      case UNICOS_ERR.SO_ORDER_BUMP_LIDO: {
+        const ob = b.orderBump && typeof b.orderBump === "object" ? (b.orderBump as Record<string, unknown>) : {};
+        const item = [str(ob.produtoNome), str(ob.tamanho)].filter(Boolean).join(" ") || "o item do order bump";
+        return {
+          code,
+          message: `Li só o item do order bump (${item}). Coloque a peça junto e leia de novo.`,
+          definitivo: false,
+          orderBump: { produtoNome: str(ob.produtoNome) || "o item do order bump", imagemUrl: str(ob.imagemUrl) || null, tamanho: str(ob.tamanho) || null },
         };
       }
       case "missing_permission":
@@ -317,7 +341,7 @@ export type EstampaAgrupada = {
   tamanhos: UnicoGrupo[];
 };
 
-/** Agrupa os grupos estampa × tamanho por estampa, mantendo a ordem de primeira aparição. */
+/** Agrupa os grupos estampa × tamanho por estampa, ordenadas por pedidos (desc), prioritários (desc) e nome. */
 export function agruparPorEstampa(grupos: UnicoGrupo[]): EstampaAgrupada[] {
   const mapa = new Map<string, EstampaAgrupada>();
   for (const g of grupos) {
@@ -332,6 +356,7 @@ export function agruparPorEstampa(grupos: UnicoGrupo[]): EstampaAgrupada[] {
     e.tamanhos.push(g);
   }
   const lista = Array.from(mapa.values());
+  lista.sort((a, b) => b.pedidos - a.pedidos || b.prioritarios - a.prioritarios || a.estampa.localeCompare(b.estampa, "pt-BR"));
   for (const e of lista) {
     e.tamanhos.sort((a, b) => ordenarTamanhos(a.tamanho, b.tamanho));
     const t = tiposDaEstampa(e.tamanhos);

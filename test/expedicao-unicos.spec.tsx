@@ -244,7 +244,7 @@ describe("Expedição — modo Únicos", () => {
     expect(await screen.findByText("Falta: Touca Berzerk")).toBeTruthy();
   });
 
-  it("peça de outra fila: avisa, oferece Trocar fila e não expede", async () => {
+  it("peça de outra fila: avisa, oferece Trocar estampa e não expede", async () => {
     separarUnico.mockReset().mockRejectedValue(
       new ApiError(409, "x", { error: "peca_de_outra_fila", estampa: "Ember", tamanho: "M", produtoNome: "Oversized" }),
     );
@@ -253,7 +253,7 @@ describe("Expedição — modo Únicos", () => {
       presence?.([TAG]);
     });
     expect(await screen.findByText(/Esta peça é Ember M\. A fila escolhida é LEG DAY · G\./)).toBeTruthy();
-    fireEvent.click(screen.getAllByRole("button", { name: "Trocar fila" }).at(-1)!);
+    fireEvent.click(screen.getAllByRole("button", { name: "Trocar estampa" }).at(-1)!);
     expect(localStorage.getItem("berzerk_expedicao_unicos_grupo_v1")).toBeNull();
     expect(shipOrder).not.toHaveBeenCalled();
   });
@@ -292,7 +292,7 @@ describe("Expedição — modo Únicos", () => {
     });
     await waitFor(() => expect(separarUnico).toHaveBeenCalledTimes(1));
     // Impressão/embalagem em curso (não chega ao ship tão cedo).
-    const btn = (await screen.findByRole("button", { name: "Trocar fila" })) as HTMLButtonElement;
+    const btn = (await screen.findByRole("button", { name: "Trocar estampa" })) as HTMLButtonElement;
     await waitFor(() => expect(btn.disabled).toBe(true));
     fireEvent.click(btn);
     expect(JSON.parse(localStorage.getItem("berzerk_expedicao_unicos_grupo_v1") ?? "null")).toEqual(GRUPO);
