@@ -4,6 +4,7 @@ import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/re
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { UnicosFila } from "../src/components/expedicao/UnicosFila";
 import { UnicosGrupos } from "../src/components/expedicao/UnicosGrupos";
+import { chaveEstampa } from "../src/lib/unicosExpedicao";
 
 const getUnicos = vi.fn();
 const getUnicosPedidos = vi.fn();
@@ -24,6 +25,20 @@ const ped = (id: string, extra: Record<string, unknown> = {}) => ({ id, numero: 
 describe("UnicosFila", () => {
   beforeEach(() => getUnicosPedidos.mockReset());
   afterEach(() => cleanup());
+
+  it("busca os pedidos com a cor do grupo", async () => {
+    getUnicosPedidos.mockResolvedValue([ped("1001")]);
+    render(<UnicosFila grupo={{ estampa: "Symbol", tamanho: "M", cor: "PRETO" }} versao={0} onVoltar={() => {}} onTrocar={() => {}} onEsgotou={() => {}} mesaLivre />);
+    await screen.findByText("1 pedido na fila");
+    expect(getUnicosPedidos).toHaveBeenCalledWith("Symbol", "M", "PRETO");
+  });
+
+  it("grupo sem cor (null) busca os pedidos com cor vazia", async () => {
+    getUnicosPedidos.mockResolvedValue([ped("1001")]);
+    render(<UnicosFila grupo={{ estampa: "Symbol", tamanho: "M", cor: null }} versao={0} onVoltar={() => {}} onTrocar={() => {}} onEsgotou={() => {}} mesaLivre />);
+    await screen.findByText("1 pedido na fila");
+    expect(getUnicosPedidos).toHaveBeenCalledWith("Symbol", "M", null);
+  });
 
   it("mostra o order bump na linha e no subtítulo; linha sem bump não mostra", async () => {
     getUnicosPedidos.mockResolvedValue([
@@ -176,23 +191,33 @@ describe("UnicosGrupos com estampaInicial", () => {
 
   it("abre o painel de tamanhos da estampa depois do fetch", async () => {
     getUnicos.mockResolvedValue({ grupos: [g("Baki", "P"), g("Baki", "GG"), g("Rux", "M")], totalPedidos: 6, filaUnicosAtiva: true });
-    render(<UnicosGrupos onEscolher={() => {}} onIndisponivel={() => {}} estampaInicial="Baki" />);
+    render(<UnicosGrupos onEscolher={() => {}} onIndisponivel={() => {}} estampaInicial={chaveEstampa("Baki", null)} />);
     expect(await screen.findByText("← Voltar")).toBeTruthy();
     expect(screen.getByTitle("Escolher a fila Baki P")).toBeTruthy();
     expect(screen.getByTitle("Escolher a fila Baki GG")).toBeTruthy();
   });
 
+  it("duas cores da mesma estampa: a chave abre o painel da cor certa", async () => {
+    const gc = (cor: string, tamanho: string) => ({ ...g("Symbol", tamanho), cor });
+    getUnicos.mockResolvedValue({ grupos: [gc("PRETO", "M"), gc("PRETO", "G"), gc("MARINHO", "P"), gc("MARINHO", "GG")], totalPedidos: 8, filaUnicosAtiva: true });
+    render(<UnicosGrupos onEscolher={() => {}} onIndisponivel={() => {}} estampaInicial={chaveEstampa("Symbol", "MARINHO")} />);
+    expect(await screen.findByText("← Voltar")).toBeTruthy();
+    expect(screen.getByTitle("Escolher a fila Symbol MARINHO P")).toBeTruthy();
+    expect(screen.getByTitle("Escolher a fila Symbol MARINHO GG")).toBeTruthy();
+    expect(screen.queryByTitle("Escolher a fila Symbol PRETO M")).toBeNull();
+  });
+
   it("estampa com um único tamanho restante mostra o painel mesmo assim", async () => {
     getUnicos.mockResolvedValue({ grupos: [g("Baki", "P")], totalPedidos: 2, filaUnicosAtiva: true });
     const onEscolher = vi.fn();
-    render(<UnicosGrupos onEscolher={onEscolher} onIndisponivel={() => {}} estampaInicial="Baki" />);
+    render(<UnicosGrupos onEscolher={onEscolher} onIndisponivel={() => {}} estampaInicial={chaveEstampa("Baki", null)} />);
     expect(await screen.findByText("← Voltar")).toBeTruthy();
     expect(onEscolher).not.toHaveBeenCalled();
   });
 
   it("estampa que não existe mais cai na grade", async () => {
     getUnicos.mockResolvedValue({ grupos: [g("Rux", "M")], totalPedidos: 2, filaUnicosAtiva: true });
-    render(<UnicosGrupos onEscolher={() => {}} onIndisponivel={() => {}} estampaInicial="Baki" />);
+    render(<UnicosGrupos onEscolher={() => {}} onIndisponivel={() => {}} estampaInicial={chaveEstampa("Baki", null)} />);
     expect(await screen.findByTitle("Escolher a fila Rux M")).toBeTruthy();
     expect(screen.queryByText("← Voltar")).toBeNull();
   });

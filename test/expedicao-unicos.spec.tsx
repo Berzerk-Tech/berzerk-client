@@ -102,7 +102,7 @@ describe("Expedição — modo Únicos", () => {
     localStorage.clear();
     localStorage.setItem("berzerk_expedicao_modo_v1", "oficial");
     localStorage.setItem("berzerk_expedicao_fila_v1", "unicos");
-    localStorage.setItem("berzerk_expedicao_unicos_grupo_v1", JSON.stringify(GRUPO));
+    localStorage.setItem("berzerk_expedicao_unicos_grupo_v2", JSON.stringify(GRUPO));
     presence = null;
     epcMatch.mockReset();
     separarUnico.mockReset().mockResolvedValue({ order: pedidoUnico(), replay: false, grupo: GRUPO });
@@ -124,17 +124,17 @@ describe("Expedição — modo Únicos", () => {
   afterEach(() => cleanup());
 
   it("estampa com um tamanho: mostra o card, o aviso da trava e o clique escolhe direto", async () => {
-    localStorage.removeItem("berzerk_expedicao_unicos_grupo_v1");
+    localStorage.removeItem("berzerk_expedicao_unicos_grupo_v2");
     render(<Expedicao onBack={() => {}} />);
     expect(await screen.findByText(/Trava desligada/)).toBeTruthy();
     expect(screen.getAllByText("3 pedidos", { exact: false }).length).toBeGreaterThan(0);
     fireEvent.click(await screen.findByTitle("Escolher a fila Leg Day G"));
     expect(await screen.findByText("LEG DAY · G")).toBeTruthy();
-    expect(JSON.parse(localStorage.getItem("berzerk_expedicao_unicos_grupo_v1") ?? "{}")).toEqual(GRUPO);
+    expect(JSON.parse(localStorage.getItem("berzerk_expedicao_unicos_grupo_v2") ?? "{}")).toEqual(GRUPO);
   });
 
   it("estampa com dois tamanhos: o card abre o painel, Voltar fecha e o botão escolhe o tamanho", async () => {
-    localStorage.removeItem("berzerk_expedicao_unicos_grupo_v1");
+    localStorage.removeItem("berzerk_expedicao_unicos_grupo_v2");
     getUnicos.mockResolvedValue({
       grupos: [
         { ...GRUPO, pedidos: 3, prioritarios: 1, imagemUrl: null },
@@ -153,11 +153,11 @@ describe("Expedição — modo Únicos", () => {
     fireEvent.click(screen.getByTitle("Abrir Leg Day"));
     fireEvent.click(await screen.findByTitle("Escolher a fila Leg Day P"));
     expect(await screen.findByText("LEG DAY · P")).toBeTruthy();
-    expect(JSON.parse(localStorage.getItem("berzerk_expedicao_unicos_grupo_v1") ?? "{}")).toEqual({ estampa: "Leg Day", tamanho: "P" });
+    expect(JSON.parse(localStorage.getItem("berzerk_expedicao_unicos_grupo_v2") ?? "{}")).toEqual({ estampa: "Leg Day", tamanho: "P" });
   });
 
   it("card mostra tipo e cor acima da estampa; com dois tipos mostra contagens e a foto do dominante", async () => {
-    localStorage.removeItem("berzerk_expedicao_unicos_grupo_v1");
+    localStorage.removeItem("berzerk_expedicao_unicos_grupo_v2");
     getUnicos.mockResolvedValue({
       grupos: [
         { ...GRUPO, pedidos: 3, imagemUrl: "https://cdn.shopify.com/s/files/grupo.jpg", tipos: [{ produtoId: "p", produtoNome: "Oversized - Leg Day", cor: "Preto", pedidos: 3, imagemUrl: "https://cdn.shopify.com/s/files/preto.jpg" }] },
@@ -187,6 +187,27 @@ describe("Expedição — modo Únicos", () => {
     fireEvent.click(await screen.findByTitle("Abrir Leg Day"));
     expect(await screen.findByText("Poliamida · Azul")).toBeTruthy();
     expect(screen.getByText("Oversized · Preto")).toBeTruthy();
+  });
+
+  it("bipou com grupo de cor: o separar recebe cor PRETO", async () => {
+    localStorage.setItem("berzerk_expedicao_unicos_grupo_v2", JSON.stringify({ ...GRUPO, cor: "PRETO" }));
+    await abrirGrupo();
+    expect(await screen.findByText("LEG DAY · PRETO · G")).toBeTruthy();
+    await act(async () => {
+      presence?.([TAG]);
+    });
+    await waitFor(() => expect(separarUnico).toHaveBeenCalledTimes(1));
+    expect(separarUnico.mock.calls[0][0]).toMatchObject({ estampa: "Leg Day", tamanho: "G", cor: "PRETO" });
+  });
+
+  it("bipou com grupo sem cor (null): o separar recebe cor null (o serviço manda vazio)", async () => {
+    localStorage.setItem("berzerk_expedicao_unicos_grupo_v2", JSON.stringify({ ...GRUPO, cor: null }));
+    await abrirGrupo();
+    await act(async () => {
+      presence?.([TAG]);
+    });
+    await waitFor(() => expect(separarUnico).toHaveBeenCalledTimes(1));
+    expect(separarUnico.mock.calls[0][0].cor).toBeNull();
   });
 
   it("bipou: chama o separar com o grupo, imprime, expede e não repete o EPC parado na mesa", async () => {
@@ -269,7 +290,7 @@ describe("Expedição — modo Únicos", () => {
     });
     expect(await screen.findByText(/Esta peça é Ember M\. A fila escolhida é LEG DAY · G\./)).toBeTruthy();
     fireEvent.click(screen.getAllByRole("button", { name: "Trocar estampa" }).at(-1)!);
-    expect(localStorage.getItem("berzerk_expedicao_unicos_grupo_v1")).toBeNull();
+    expect(localStorage.getItem("berzerk_expedicao_unicos_grupo_v2")).toBeNull();
     expect(shipOrder).not.toHaveBeenCalled();
   });
 
@@ -310,7 +331,7 @@ describe("Expedição — modo Únicos", () => {
     const btn = (await screen.findByRole("button", { name: "Trocar estampa" })) as HTMLButtonElement;
     await waitFor(() => expect(btn.disabled).toBe(true));
     fireEvent.click(btn);
-    expect(JSON.parse(localStorage.getItem("berzerk_expedicao_unicos_grupo_v1") ?? "null")).toEqual(GRUPO);
+    expect(JSON.parse(localStorage.getItem("berzerk_expedicao_unicos_grupo_v2") ?? "null")).toEqual(GRUPO);
   });
 
   it("erro 4xx desconhecido não refaz o POST", async () => {

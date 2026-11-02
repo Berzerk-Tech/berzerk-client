@@ -59,7 +59,7 @@ export function UnicosFila({
   useEffect(() => {
     setPedidos(null);
     esgotouAvisado.current = false;
-  }, [grupo.estampa, grupo.tamanho]);
+  }, [grupo.estampa, grupo.tamanho, grupo.cor]);
 
   // Lista vazia com a mesa livre: avisa UMA vez; se a mesa estiver ocupada, tenta quando liberar.
   useEffect(() => {
@@ -76,7 +76,7 @@ export function UnicosFila({
 
   const carregar = useCallback(async () => {
     try {
-      const lista = await getUnicosPedidos(grupo.estampa, grupo.tamanho);
+      const lista = await getUnicosPedidos(grupo.estampa, grupo.tamanho, grupo.cor);
       setPedidos(lista);
       const visiveis = lista.filter((p) => !ocultosRef.current.has(p.id));
       const nova = selecaoAposRecarga(selRef.current, visiveis);
@@ -88,7 +88,7 @@ export function UnicosFila({
     } catch {
       setErro(true);
     }
-  }, [grupo.estampa, grupo.tamanho]);
+  }, [grupo.estampa, grupo.tamanho, grupo.cor]);
 
   useEffect(() => {
     void carregar();
@@ -99,7 +99,7 @@ export function UnicosFila({
   const selEfetivo = selecaoAposRecarga(selecionadoId ?? null, pedidos ?? []);
   const pedidoSel = (pedidos ?? []).find((p) => p.id === selEfetivo) ?? null;
   const tituloGrupo = pedidoSel
-    ? `${tipoBaseDoProduto(pedidoSel.produtoNome, grupo.estampa)} · ${grupo.estampa} · ${grupo.tamanho}`
+    ? `${tipoBaseDoProduto(pedidoSel.produtoNome, grupo.estampa)} · ${grupo.estampa}${grupo.cor ? ` · ${grupo.cor}` : ""} · ${grupo.tamanho}`
     : rotuloGrupo(grupo);
   const comBump = (pedidos ?? []).filter((p) => p.orderBump).length;
 
