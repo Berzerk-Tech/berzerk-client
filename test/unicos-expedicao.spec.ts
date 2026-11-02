@@ -5,6 +5,8 @@ import {
   erroSepararUnico,
   selecaoAposRecarga,
   filtrarGrupos,
+  mesmoGrupo,
+  chaveEstampa,
   getGrupoEscolhido,
   getModoFila,
   matchDoSeparar,
@@ -116,6 +118,67 @@ describe("ordenarTamanhos", () => {
   it("segue PP…U, ignora caixa/espaço e põe desconhecidos no fim em ordem alfabética", () => {
     const l = ["U", "xg", " M ", "ZZ", "PP", "AA", "G", "P"].sort(ordenarTamanhos).map((t) => t.trim().toUpperCase());
     expect(l).toEqual(["PP", "P", "M", "G", "XG", "U", "AA", "ZZ"]);
+  });
+});
+
+describe("cor no grupo (estampa × cor × tamanho)", () => {
+  const g = (estampa: string, tamanho: string, pedidos: number, extra: Partial<UnicoGrupo> = {}): UnicoGrupo => ({ estampa, tamanho, pedidos, ...extra });
+  it("agruparPorEstampa separa Symbol/PRETO de Symbol/MARINHO e junta a mesma estampa + cor", () => {
+    const r = agruparPorEstampa([
+      g("Symbol", "M", 3, { cor: "PRETO", imagemUrl: "preto.jpg" }),
+      g("Symbol", "G", 2, { cor: "PRETO" }),
+      g("Symbol", "M", 4, { cor: "MARINHO", imagemUrl: "marinho.jpg" }),
+      g("Symbol", "P", 1, { cor: null }),
+    ]);
+    expect(r.map((e) => [e.cor, e.pedidos, e.imagemUrl, e.tamanhos.map((t) => t.tamanho)])).toEqual([
+      ["MARINHO", 4, "marinho.jpg", ["M"]],
+      ["PRETO", 5, "preto.jpg", ["M", "G"]],
+      [null, 1, null, ["P"]],
+    ].sort((a, b) => (b[1] as number) - (a[1] as number)));
+    expect(r.map((e) => e.chave)).toEqual(["Symbol|preto", "Symbol|marinho", "Symbol|"]);
+  });
+  it("empate de pedidos desempata por cor, sem cor por último", () => {
+    const r = agruparPorEstampa([g("S", "M", 2, { cor: null }), g("S", "M", 2, { cor: "PRETO" }), g("S", "M", 2, { cor: "AZUL" })]);
+    expect(r.map((e) => e.cor)).toEqual(["AZUL", "PRETO", null]);
+  });
+  it("chaveEstampa ignora caixa e espaços da cor", () => {
+    expect(chaveEstampa("Symbol", " Preto ")).toBe(chaveEstampa("Symbol", "PRETO"));
+    expect(chaveEstampa("Symbol", null)).toBe(chaveEstampa("Symbol"));
+  });
+  it("mesmoGrupo distingue cor e trata null/ausente/caixa", () => {
+    const a = { estampa: "Symbol", tamanho: "M", cor: "PRETO" };
+    expect(mesmoGrupo(a, { ...a, cor: "preto" })).toBe(true);
+    expect(mesmoGrupo(a, { ...a, cor: "MARINHO" })).toBe(false);
+    expect(mesmoGrupo(a, { estampa: "Symbol", tamanho: "M" })).toBe(false);
+    expect(mesmoGrupo({ estampa: "Symbol", tamanho: "M", cor: null }, { estampa: "Symbol", tamanho: "M" })).toBe(true);
+  });
+  it("rotuloGrupo com e sem cor", () => {
+    expect(rotuloGrupo({ estampa: "Symbol", tamanho: "M", cor: "Preto" })).toBe("SYMBOL · PRETO · M");
+    expect(rotuloGrupo({ estampa: "Symbol", tamanho: "M" })).toBe("SYMBOL · M");
+  });
+  it("filtrarGrupos acha pela cor", () => {
+    const gs = [g("Symbol", "M", 1, { cor: "PRETO" }), g("Symbol", "M", 1, { cor: "MARINHO" })];
+    expect(filtrarGrupos(gs, "marinho").map((x) => x.cor)).toEqual(["MARINHO"]);
+  });
+  it("peca_de_outra_fila traz a cor na mensagem", () => {
+    const e = erroSepararUnico(
+      new ApiError(409, "x", { error: "peca_de_outra_fila", estampa: "Symbol", cor: "MARINHO", tamanho: "M", produtoNome: "Poliamida" }),
+      { estampa: "Symbol", tamanho: "M", cor: "PRETO" },
+    );
+    expect(e.message).toBe("Esta peça é Symbol MARINHO M. A fila escolhida é SYMBOL · PRETO · M.");
+  });
+  it("getGrupoEscolhido preserva cor string, null e undefined", () => {
+    setGrupoEscolhido({ estampa: "Leg Day", tamanho: "G", cor: "PRETO" });
+    expect(getGrupoEscolhido()).toEqual({ estampa: "Leg Day", tamanho: "G", cor: "PRETO" });
+    setGrupoEscolhido({ estampa: "Leg Day", tamanho: "G", cor: null });
+    expect(getGrupoEscolhido()).toEqual({ estampa: "Leg Day", tamanho: "G", cor: null });
+    setGrupoEscolhido({ estampa: "Leg Day", tamanho: "G" });
+    expect(getGrupoEscolhido()).toEqual({ estampa: "Leg Day", tamanho: "G" });
+  });
+  it("registro antigo (chave v1, sem cor) é ignorado: a mesa escolhe a fila de novo", () => {
+    localStorage.clear();
+    localStorage.setItem("berzerk_expedicao_unicos_grupo_v1", JSON.stringify({ estampa: "Leg Day", tamanho: "G" }));
+    expect(getGrupoEscolhido()).toBeNull();
   });
 });
 

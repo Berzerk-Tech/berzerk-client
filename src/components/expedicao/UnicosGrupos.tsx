@@ -28,7 +28,7 @@ export function UnicosGrupos({
   onEscolher: (g: GrupoEscolhido) => void;
   /** API ainda sem a fila (404): a tela desabilita o modo. */
   onIndisponivel: () => void;
-  /** Estampa cujo painel de tamanhos abre direto (a fila do tamanho acabou). */
+  /** Chave (`chaveEstampa`: estampa + cor) cujo painel de tamanhos abre direto (a fila do tamanho acabou). */
   estampaInicial?: string | null;
 }) {
   const [dados, setDados] = useState<UnicosResponse | null>(null);
@@ -74,7 +74,7 @@ export function UnicosGrupos({
 
   const grupos = useMemo(() => filtrarGrupos(dados?.grupos ?? [], busca), [dados, busca]);
   const estampas = useMemo(() => agruparPorEstampa(grupos), [grupos]);
-  const aberta = estampaAberta ? (estampas.find((e) => e.estampa === estampaAberta) ?? null) : null;
+  const aberta = estampaAberta ? (estampas.find((e) => e.chave === estampaAberta) ?? null) : null;
 
   // Estampa aberta sumiu (acabaram os pedidos no poll) ou deixou de casar com a busca: volta pra grade.
   useEffect(() => {
@@ -83,8 +83,8 @@ export function UnicosGrupos({
   }, [dados, estampaAberta, aberta]);
 
   const clicarEstampa = (e: EstampaAgrupada) => {
-    if (e.tamanhos.length === 1) onEscolher({ estampa: e.estampa, tamanho: e.tamanhos[0].tamanho });
-    else setEstampaAberta(e.estampa);
+    if (e.tamanhos.length === 1) onEscolher({ estampa: e.estampa, tamanho: e.tamanhos[0].tamanho, cor: e.cor });
+    else setEstampaAberta(e.chave);
   };
 
   return (
@@ -130,7 +130,7 @@ export function UnicosGrupos({
       ) : (
         <div style={grade} className="thin-scroll">
           {estampas.map((e) => (
-            <CardEstampa key={e.estampa} e={e} onClick={() => clicarEstampa(e)} />
+            <CardEstampa key={e.chave} e={e} onClick={() => clicarEstampa(e)} />
           ))}
         </div>
       )}
@@ -165,17 +165,19 @@ function TiposLinha({ e }: { e: EstampaAgrupada }) {
 function CardEstampa({ e, onClick }: { e: EstampaAgrupada; onClick: () => void }) {
   const img = miniaturaLeve(e.imagemUrl);
   const unico = e.tamanhos.length === 1 ? e.tamanhos[0].tamanho : null;
+  const nome = e.cor ? `${e.estampa} ${e.cor}` : e.estampa;
   return (
     <button
       type="button"
       style={card}
       onClick={onClick}
-      title={unico ? `Escolher a fila ${e.estampa} ${unico}` : `Abrir ${e.estampa}`}
+      title={unico ? `Escolher a fila ${nome} ${unico}` : `Abrir ${nome}`}
     >
       <div style={fotoBox}>{img ? <img src={img} alt="" style={foto} loading="lazy" /> : <span style={semFoto}>sem foto</span>}</div>
       <div style={cardCorpo}>
         <TiposLinha e={e} />
         <div style={estampaTxt}>{e.estampa}</div>
+        {e.cor && <div style={corTxt}>{e.cor}</div>}
         <div style={contagem}>
           {e.pedidos} pedido{e.pedidos === 1 ? "" : "s"}
           <Prioritarios n={e.prioritarios} />
@@ -221,6 +223,7 @@ function EscolherTamanho({
         <div style={cardCorpo}>
           <TiposLinha e={e} />
           <div style={estampaGrande}>{e.estampa}</div>
+          {e.cor && <div style={corGrande}>{e.cor}</div>}
           <div style={contagem}>
             {e.pedidos} pedido{e.pedidos === 1 ? "" : "s"}
             <Prioritarios n={e.prioritarios} />
@@ -236,8 +239,8 @@ function EscolherTamanho({
               key={g.tamanho}
               type="button"
               style={tamanhoBtn}
-              onClick={() => onEscolher({ estampa: e.estampa, tamanho: g.tamanho })}
-              title={`Escolher a fila ${e.estampa} ${g.tamanho}`}
+              onClick={() => onEscolher({ estampa: e.estampa, tamanho: g.tamanho, cor: e.cor })}
+              title={`Escolher a fila ${e.cor ? `${e.estampa} ${e.cor}` : e.estampa} ${g.tamanho}`}
             >
               <div style={tamanhoGrande}>{g.tamanho}</div>
               <div style={contagem}>
@@ -275,6 +278,8 @@ const foto: CSSProperties = { width: "100%", height: "100%", objectFit: "cover" 
 const semFoto: CSSProperties = { fontSize: 11, color: "var(--text-muted)" };
 const cardCorpo: CSSProperties = { display: "flex", flexDirection: "column", gap: 4, minWidth: 0 };
 const estampaTxt: CSSProperties = { fontSize: 19, fontWeight: 800, lineHeight: 1.15, overflowWrap: "anywhere" };
+const corTxt: CSSProperties = { fontSize: 15, fontWeight: 700, color: "var(--text-secondary)", overflowWrap: "anywhere" };
+const corGrande: CSSProperties = { fontSize: 22, fontWeight: 700, color: "var(--text-secondary)", overflowWrap: "anywhere" };
 const contagem: CSSProperties = { fontSize: 13, color: "var(--text-secondary)", fontWeight: 700, display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap" };
 const prioBadge: CSSProperties = { padding: "1px 7px", borderRadius: 999, background: "var(--danger-bg, #fee2e2)", color: "var(--danger-text, #b91c1c)", fontSize: 11 };
 const tiposTxt: CSSProperties = { fontSize: 12, color: "var(--text-secondary)", maxWidth: 190, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" };

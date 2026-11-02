@@ -521,6 +521,8 @@ export type UnicoTipo = {
 export type UnicoGrupo = {
   estampa: string;
   tamanho: string;
+  /** Cor cadastrada da variante (API 0.9.62+: o grupo é estampa × cor × tamanho). Ausente/null = sem cor. */
+  cor?: string | null;
   pedidos: number;
   prioritarios?: number;
   imagemUrl?: string | null;
@@ -564,7 +566,7 @@ export type UnicoSepararResponse = {
   order: ExpedicaoOrder;
   /** true = o EPC já tinha separado/expedido um pedido: nada foi duplicado. */
   replay?: boolean;
-  grupo?: { estampa: string; tamanho: string };
+  grupo?: { estampa: string; tamanho: string; cor?: string | null };
   /** Pedido com order bump: o item do bump foi lido junto com a peça principal. */
   orderBump?: { produtoId: string; produtoNome: string; imagemUrl?: string | null } | null;
 };
@@ -611,9 +613,12 @@ export async function buscarProdutosOrderBump(busca: string, limite = 20): Promi
   return r.produtos ?? [];
 }
 
-export async function getUnicosPedidos(estampa: string, tamanho: string): Promise<UnicoPedido[]> {
-  if (isExpedicaoSimulacao()) return mockUnicosPedidos(estampa, tamanho);
-  const r = await apiRequest<{ pedidos?: UnicoPedido[] }>("/expedicao/unicos/pedidos", { query: { estampa, tamanho } });
+export async function getUnicosPedidos(estampa: string, tamanho: string, cor?: string | null): Promise<UnicoPedido[]> {
+  if (isExpedicaoSimulacao()) return mockUnicosPedidos(estampa, tamanho, cor);
+  const r = await apiRequest<{ pedidos?: UnicoPedido[] }>("/expedicao/unicos/pedidos", {
+    // undefined = API velha (omite → todas as cores); null = grupo sem cor (`cor=` vazio → só os sem cor).
+    query: { estampa, tamanho, ...(cor === undefined ? {} : { cor: cor ?? "" }) },
+  });
   return r.pedidos ?? [];
 }
 
@@ -626,13 +631,15 @@ export function separarUnico(args: {
   rfidTags: string[];
   estampa?: string;
   tamanho?: string;
+  /** Cor da fila escolhida: undefined omite (todas); null manda "" (só sem cor); string manda a cor. */
+  cor?: string | null;
   leituras?: LeituraResolvida[];
   /** Pedido escolhido na fila: o servidor separa ESSE pedido (se a peça casar). */
   orderId?: string;
 }): Promise<UnicoSepararResponse> {
   if (isExpedicaoSimulacao()) {
     const order = mockOrderFor(args.rfidTags);
-    return Promise.resolve({ order, replay: false, grupo: { estampa: args.estampa ?? "Simulação", tamanho: args.tamanho ?? "M" } });
+    return Promise.resolve({ order, replay: false, grupo: { estampa: args.estampa ?? "Simulação", tamanho: args.tamanho ?? "M", cor: args.cor ?? null } });
   }
   const estacao = estacaoId();
   return apiRequest<UnicoSepararResponse>("/expedicao/unicos/separar", {
@@ -642,6 +649,7 @@ export function separarUnico(args: {
       ...(estacao ? { estacaoId: estacao } : {}),
       ...(args.estampa ? { estampa: args.estampa } : {}),
       ...(args.tamanho ? { tamanho: args.tamanho } : {}),
+      ...(args.cor === undefined ? {} : { cor: args.cor ?? "" }),
       ...(args.orderId ? { orderId: args.orderId } : {}),
       ...(args.leituras && args.leituras.length > 0 ? { leituras: args.leituras } : {}),
     },
@@ -836,17 +844,17 @@ function mockOrderFor(epcs: string[]): ExpedicaoOrder {
 function mockUnicos(): UnicosResponse {
   return {
     grupos: [
-      { estampa: "Simulação", tamanho: "M", pedidos: 3, prioritarios: 1, imagemUrl: null, tipos: [{ produtoId: "mock-1", produtoNome: "Oversized", cor: null, pedidos: 3 }] },
-      { estampa: "Simulação", tamanho: "G", pedidos: 2, prioritarios: 0, imagemUrl: null, tipos: [{ produtoId: "mock-2", produtoNome: "Regata", cor: null, pedidos: 2 }] },
+      { estampa: "Simulação", tamanho: "M", cor: "PRETO", pedidos: 3, prioritarios: 1, imagemUrl: null, tipos: [{ produtoId: "mock-1", produtoNome: "Oversized", cor: null, pedidos: 3 }] },
+      { estampa: "Simulação", tamanho: "G", cor: null, pedidos: 2, prioritarios: 0, imagemUrl: null, tipos: [{ produtoId: "mock-2", produtoNome: "Regata", cor: null, pedidos: 2 }] },
     ],
     totalPedidos: 5,
     filaUnicosAtiva: true,
   };
 }
 
-function mockUnicosPedidos(estampa: string, tamanho: string): UnicoPedido[] {
+function mockUnicosPedidos(estampa: string, tamanho: string, cor?: string | null): UnicoPedido[] {
   return [1, 2, 3].map((i) => ({
-    id: `mock-un-${estampa}-${tamanho}-${i}`,
+    id: `mock-un-${estampa}-${cor ?? ""}-${tamanho}-${i}`,
     numero: `BRZ-${1000 + i}`,
     cliente: "Cliente Demonstração",
     produtoNome: "Oversized",

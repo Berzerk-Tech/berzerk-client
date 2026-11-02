@@ -1,5 +1,5 @@
 // Modo "Únicos" da Expedição (27/10): fila de pedidos e-commerce de UMA peça,
-// agrupada por estampa × tamanho. Aqui só o que é puro (testável sem tela):
+// agrupada por estampa × cor × tamanho. Aqui só o que é puro (testável sem tela):
 // persistência do modo/grupo, busca, mensagens de erro e a montagem do match.
 
 import { ApiError } from "./api";
@@ -13,9 +13,23 @@ export const UNICOS_MAX_TAGS = 10;
 
 // Chave própria: `berzerk_expedicao_modo_v1` já é o modo oficial/teste (services/expedicaoMode).
 const MODO_KEY = "berzerk_expedicao_fila_v1";
-const GRUPO_KEY = "berzerk_expedicao_unicos_grupo_v1";
+// v2 (0.9.67): grupo passou a ter cor; o registro v1 é ignorado e a mesa escolhe a fila de novo uma vez.
+const GRUPO_KEY = "berzerk_expedicao_unicos_grupo_v2";
 
-export type GrupoEscolhido = { estampa: string; tamanho: string };
+/**
+ * `cor`: undefined = veio de API velha (não manda nada); null = API nova, grupo SEM cor
+ * (manda `cor: ""`); string = a cor do grupo.
+ */
+export type GrupoEscolhido = { estampa: string; tamanho: string; cor?: string | null };
+
+function normCor(cor?: string | null): string {
+  return (cor ?? "").trim().toLowerCase();
+}
+
+/** Identidade de um card de estampa: a mesma estampa em cores diferentes são cards diferentes. */
+export function chaveEstampa(estampa: string, cor?: string | null): string {
+  return `${estampa}|${normCor(cor)}`;
+}
 
 export function getModoFila(): ModoFila {
   try {
@@ -39,6 +53,8 @@ export function getGrupoEscolhido(): GrupoEscolhido | null {
     if (!raw) return null;
     const g = JSON.parse(raw) as Partial<GrupoEscolhido>;
     if (typeof g.estampa === "string" && g.estampa && typeof g.tamanho === "string" && g.tamanho) {
+      if (typeof g.cor === "string" && g.cor) return { estampa: g.estampa, tamanho: g.tamanho, cor: g.cor };
+      if (g.cor === null) return { estampa: g.estampa, tamanho: g.tamanho, cor: null };
       return { estampa: g.estampa, tamanho: g.tamanho };
     }
   } catch {
@@ -65,21 +81,22 @@ export function normalizarBusca(s: string): string {
     .trim();
 }
 
-/** "LEG DAY · G" — o título grande do cabeçalho. */
+/** "LEG DAY · PRETO · G" (sem cor: "LEG DAY · G") — o título grande do cabeçalho. */
 export function rotuloGrupo(g: GrupoEscolhido): string {
-  return `${g.estampa} · ${g.tamanho}`.toUpperCase();
+  const cor = g.cor?.trim();
+  return (cor ? `${g.estampa} · ${cor} · ${g.tamanho}` : `${g.estampa} · ${g.tamanho}`).toUpperCase();
 }
 
 export function mesmoGrupo(a: GrupoEscolhido | null | undefined, b: GrupoEscolhido | null | undefined): boolean {
-  return !!a && !!b && a.estampa === b.estampa && a.tamanho === b.tamanho;
+  return !!a && !!b && a.estampa === b.estampa && a.tamanho === b.tamanho && normCor(a.cor) === normCor(b.cor);
 }
 
-/** Filtra os grupos por estampa, tamanho ou tipo de peça (cada palavra da busca precisa casar). */
+/** Filtra os grupos por estampa, cor, tamanho ou tipo de peça (cada palavra da busca precisa casar). */
 export function filtrarGrupos(grupos: UnicoGrupo[], busca: string): UnicoGrupo[] {
   const palavras = normalizarBusca(busca).split(/\s+/).filter(Boolean);
   if (palavras.length === 0) return grupos;
   return grupos.filter((g) => {
-    const alvo = normalizarBusca([g.estampa, g.tamanho, ...(g.tipos ?? []).map((t) => t.produtoNome)].join(" "));
+    const alvo = normalizarBusca([g.estampa, g.cor ?? "", g.tamanho, ...(g.tipos ?? []).map((t) => t.produtoNome)].join(" "));
     return palavras.every((p) => alvo.includes(p));
   });
 }
@@ -129,7 +146,7 @@ export function erroSepararUnico(e: unknown, grupo: GrupoEscolhido | null): Erro
       case UNICOS_ERR.PECA_DE_OUTRA_FILA:
         return {
           code,
-          message: `Esta peça é ${[str(b.estampa), str(b.tamanho)].filter(Boolean).join(" ")}. A fila escolhida é ${grupo ? rotuloGrupo(grupo) : "outra"}.`,
+          message: `Esta peça é ${[str(b.estampa), str(b.cor), str(b.tamanho)].filter(Boolean).join(" ")}. A fila escolhida é ${grupo ? rotuloGrupo(grupo) : "outra"}.`,
           definitivo: true,
           trocarFila: true,
         };
@@ -329,7 +346,11 @@ export function tiposDaEstampa(grupos: UnicoGrupo[]): { tipos: UnicoTipo[]; imag
 }
 
 export type EstampaAgrupada = {
+  /** `chaveEstampa(estampa, cor)`: identidade do card. */
+  chave: string;
   estampa: string;
+  /** undefined = API velha; null = sem cor. */
+  cor: string | null | undefined;
   imagemUrl: string | null;
   /** Tipos de peça da estampa (todos os tamanhos), mais pedidos primeiro. */
   tipos: UnicoTipo[];
@@ -340,14 +361,15 @@ export type EstampaAgrupada = {
   tamanhos: UnicoGrupo[];
 };
 
-/** Agrupa os grupos estampa × tamanho por estampa, ordenadas por pedidos (desc), prioritários (desc) e nome. */
+/** Agrupa os grupos estampa × cor × tamanho por estampa + cor, ordenadas por pedidos (desc), prioritários (desc), nome e cor (sem cor por último). */
 export function agruparPorEstampa(grupos: UnicoGrupo[]): EstampaAgrupada[] {
   const mapa = new Map<string, EstampaAgrupada>();
   for (const g of grupos) {
-    let e = mapa.get(g.estampa);
+    const chave = chaveEstampa(g.estampa, g.cor);
+    let e = mapa.get(chave);
     if (!e) {
-      e = { estampa: g.estampa, imagemUrl: null, tipos: [], pedidos: 0, prioritarios: 0, comOrderBump: 0, tamanhos: [] };
-      mapa.set(g.estampa, e);
+      e = { chave, estampa: g.estampa, cor: g.cor === undefined ? undefined : g.cor?.trim() ? g.cor : null, imagemUrl: null, tipos: [], pedidos: 0, prioritarios: 0, comOrderBump: 0, tamanhos: [] };
+      mapa.set(chave, e);
     }
     e.pedidos += g.pedidos;
     e.prioritarios += g.prioritarios ?? 0;
@@ -355,7 +377,13 @@ export function agruparPorEstampa(grupos: UnicoGrupo[]): EstampaAgrupada[] {
     e.tamanhos.push(g);
   }
   const lista = Array.from(mapa.values());
-  lista.sort((a, b) => b.pedidos - a.pedidos || b.prioritarios - a.prioritarios || a.estampa.localeCompare(b.estampa, "pt-BR"));
+  lista.sort(
+    (a, b) =>
+      b.pedidos - a.pedidos ||
+      b.prioritarios - a.prioritarios ||
+      a.estampa.localeCompare(b.estampa, "pt-BR") ||
+      (!a.cor ? (!b.cor ? 0 : 1) : !b.cor ? -1 : a.cor.localeCompare(b.cor, "pt-BR")),
+  );
   for (const e of lista) {
     e.tamanhos.sort((a, b) => ordenarTamanhos(a.tamanho, b.tamanho));
     const t = tiposDaEstampa(e.tamanhos);

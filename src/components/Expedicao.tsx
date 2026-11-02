@@ -42,6 +42,7 @@ import {
   matchDoSeparar,
   replayJaExpedido,
   unicosRotaAusente,
+  chaveEstampa,
   setGrupoEscolhido,
   setModoFila,
   type GrupoEscolhido,
@@ -496,7 +497,7 @@ export function Expedicao({ onBack }: Props) {
       showNotice("Termine o pedido na mesa antes de trocar a fila.");
       return;
     }
-    if (g) setEstampaInicialUnicos(g.estampa);
+    if (g) setEstampaInicialUnicos(chaveEstampa(g.estampa, g.cor));
     escolherGrupo(null);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [escolherGrupo, showNotice]);
@@ -720,7 +721,7 @@ export function Expedicao({ onBack }: Props) {
       if (gen !== resolveGenRef.current || mesaOcupada()) return;
       let r;
       try {
-        r = await separarUnico({ rfidTags: epcs, estampa: g.estampa, tamanho: g.tamanho, leituras, orderId: pedidoSelecionadoRef.current ?? undefined });
+        r = await separarUnico({ rfidTags: epcs, estampa: g.estampa, tamanho: g.tamanho, cor: g.cor, leituras, orderId: pedidoSelecionadoRef.current ?? undefined });
       } catch (e) {
         if (gen !== resolveGenRef.current || mesaOcupada()) return;
         const er = erroSepararUnico(e, g);
@@ -1668,7 +1669,7 @@ export function Expedicao({ onBack }: Props) {
               mesaLivre={!(flow.kind === "printing" || flow.kind === "packing" || flow.kind === "done")}
               onEsgotou={() => {
                 if (mesaOcupada()) return;
-                setEstampaInicialUnicos(grupoUnicos.estampa);
+                setEstampaInicialUnicos(chaveEstampa(grupoUnicos.estampa, grupoUnicos.cor));
                 escolherGrupo(null);
               }}
             />
