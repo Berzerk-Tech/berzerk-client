@@ -30,6 +30,13 @@ import { onBeforeForcedLogout } from "../lib/idleSession";
 import { onAntesDeBloquear } from "../lib/updateGate";
 import { SupervisorModal, type SobressalenteInfo } from "./SupervisorModal";
 import { ConfirmDialog } from "./ConfirmDialog";
+import { SoltarPedidoDialog } from "./SoltarPedidoDialog";
+import {
+  MSG_SERVIDOR_EXIGE_SUPERVISOR,
+  ehListaImpressaSemSuporte,
+  podeSoltarSemPin,
+  textoPedidoSolto,
+} from "../lib/soltar-pedido";
 import { PickingGeralModal } from "./PickingGeralModal";
 import { ItensFaltantesModal } from "./ItensFaltantesModal";
 import { nomeDaOperadora } from "./OperatorChip";
@@ -58,6 +65,8 @@ import {
   type LeituraResolvida,
   type LiberacaoSupervisor,
   type Order,
+  type ReleaseBody,
+  type ReleaseResponse,
   type OrderItem,
   type CanalSeparacao,
   type QueueDatesResponse,
@@ -1069,6 +1078,41 @@ export function SeparacaoRunner({
     await puxarLote({ depoisDe: ord.id });
   }, [completing, puxarLote, showNotice]);
 
+  // === Soltar UM pedido da lista impressa (falta peça), sem PIN ===
+  const [soltarOpen, setSoltarOpen] = useState(false);
+  const soltarAtual = useCallback(
+    async (body: ReleaseBody) => {
+      const ord = orderRef.current;
+      if (!ord) return;
+      let r: ReleaseResponse;
+      try {
+        r = await releaseSeparacao(ord.id, body);
+      } catch (e) {
+        if (ehListaImpressaSemSuporte(e)) {
+          // Nexus sem suporte: volta ao caminho do supervisor.
+          setSoltarOpen(false);
+          showNotice(MSG_SERVIDOR_EXIGE_SUPERVISOR);
+          setDevolverListaOpen(true);
+          return;
+        }
+        throw e;
+      }
+      setSoltarOpen(false);
+      const resto = loteRef.current.filter((o) => o.id !== ord.id);
+      const restantes = typeof r.restantesNaLista === "number" ? r.restantesNaLista : resto.filter((o) => !!o.listaEm).length;
+      // Sem pedido de lista em mãos o modo "lista" cai e a mesa volta a puxar lote.
+      if (restantes === 0 && !resto.some((o) => !!o.listaEm)) presaNaListaRef.current = false;
+      showNotice(textoPedidoSolto(ord.numero, { restantesNaLista: restantes }));
+      setPhase("loading");
+      orderRef.current = null;
+      setOrder(null);
+      loteRef.current = resto;
+      setLote(resto);
+      await puxarLote({ depoisDe: ord.id });
+    },
+    [puxarLote, showNotice],
+  );
+
   /**
    * PULAR (27/08): a peça ainda não chegou da dobra. O pedido CONTINUA dela —
    * nenhuma chamada ao servidor além do `iniciar` que o próximo disparar — só
@@ -2005,6 +2049,7 @@ export function SeparacaoRunner({
               onComplete={() => void finish()}
               onRestart={restartLeitura}
               onSkip={() => void devolverAtual()}
+              onSoltar={podeSoltarSemPin(order, getSessaoSync()?.sub) ? () => setSoltarOpen(true) : undefined}
               onPular={pularAtual}
               onSupervisor={liberarOuConcluir}
               onFaltantes={() => setFaltantesOpen(true)}
@@ -2026,6 +2071,9 @@ export function SeparacaoRunner({
           }}
           onConfirm={supervisorConfirm}
         />
+      )}
+      {soltarOpen && order && (
+        <SoltarPedidoDialog numero={order.numero} onConfirm={soltarAtual} onCancel={() => setSoltarOpen(false)} />
       )}
       {devolverListaOpen && (
         <SupervisorModal
@@ -2924,6 +2972,7 @@ function OrderView({
   onComplete,
   onRestart,
   onSkip,
+  onSoltar,
   onPular,
   onSupervisor,
   onFaltantes,
@@ -2941,6 +2990,8 @@ function OrderView({
   onComplete: () => void;
   onRestart: () => void;
   onSkip: () => void;
+  /** Só com pedido de lista que é dela: solta sem PIN (falta peça). */
+  onSoltar?: () => void;
   onPular: () => void;
   onSupervisor: () => void;
   onFaltantes: () => void;
@@ -3053,6 +3104,11 @@ function OrderView({
         <button style={ghostBtn} onClick={onSkip} disabled={completing}>
           Devolver à fila
         </button>
+        {onSoltar && (
+          <button style={ghostBtn} onClick={onSoltar} disabled={completing}>
+            Falta peça — soltar pedido
+          </button>
+        )}
         {/* PULAR ≠ devolver: a peça ainda não chegou da dobra, o pedido
             continua reservado pra ela e só vai pro fim do lote. */}
         <button
