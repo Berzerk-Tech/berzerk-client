@@ -49,6 +49,8 @@ export type OrderItem = {
   ean: string | null;
   sku: string | null;
   nome: string | null;
+  /** Nome do PRODUTO sem o tamanho (nexus novo). Ausente: o app deriva do nome. */
+  produto?: string | null;
   tamanho: string | null;
   quantidade: number;
   /** URL da imagem do produto (catálogo do nexus, via Shopify). null = sem match. */
@@ -217,6 +219,13 @@ export type QueueFilters = {
   dateTo?: string;
   includeProducts?: string[];
   excludeProducts?: string[];
+  /**
+   * Filtro Mistos (só `mode: "total"`): PRODUTOS (nome sem o tamanho, ver
+   * `src/lib/mistos.ts`) que ficam nesta separação em todos os tamanhos. Só
+   * passa o misto cujas peças de OUTRO tamanho são todas desses produtos, em
+   * P–XG. Contrato em NEXUS_FILTRO_MISTOS.md.
+   */
+  mistosProdutos?: string[];
 };
 
 /** Filtros → campos do body do claim (arrays vão como estão). */
@@ -227,6 +236,7 @@ function filtersBody(f?: QueueFilters): Record<string, unknown> {
   if (f.dateTo) out.dateTo = f.dateTo;
   if (f.includeProducts?.length) out.includeProducts = f.includeProducts;
   if (f.excludeProducts?.length) out.excludeProducts = f.excludeProducts;
+  if (f.mistosProdutos?.length) out.mistosProdutos = f.mistosProdutos;
   return out;
 }
 
@@ -282,6 +292,8 @@ export function claimNextMixed(
 export type QueueProduct = {
   /** Nome do item como aparece nos pedidos — é o termo usado nos filtros. */
   nome: string;
+  /** Nome do PRODUTO sem o tamanho (nexus novo, NEXUS_FILTRO_MISTOS.md). Ausente: o app deriva do nome. */
+  produto?: string | null;
   tamanho: string | null;
   ean: string | null;
   imagemUrl: string | null;

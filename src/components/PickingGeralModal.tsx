@@ -7,6 +7,11 @@
 // vêm de tamanhos variados e as seções aparecem todas) e o RECORTE: nos mistos
 // o tamanho da própria bancada fica de fora, porque aquelas peças já estão ali.
 //
+// Com o Filtro Mistos ativo (só filas de mistos) a folha muda de forma: em vez
+// de seções por tamanho, uma linha por PRODUTO com a grade das peças de OUTRO
+// tamanho dos pedidos da lista (`lib/mistos.ts`) e a etiqueta sai por
+// `lib/mistosPdf.ts`.
+//
 // Impressão pelo caminho silencioso do app (lib/printer.ts + lib/pickingPdf.ts),
 // em ETIQUETA 100×150 mm e na impressora de etiquetas configurada — é a única
 // que as bancadas têm.
@@ -16,6 +21,17 @@ import { ApiError } from "../lib/api";
 import { SEM_TAMANHO, queueFor } from "../lib/filas";
 import { agregarLote } from "../lib/agregarLote";
 import { gerarPickingPdf, type PickingSecao } from "../lib/pickingPdf";
+import {
+  TAMANHOS_MISTOS,
+  fechamCom,
+  pedidoMistoDoLote,
+  pedidosMistos,
+  pickingMistos,
+  totalDele,
+  totalFora,
+} from "../lib/mistos";
+import { gerarMistosPdf } from "../lib/mistosPdf";
+import { miniatura } from "../lib/imagens";
 import { printPdfBase64 } from "../lib/printer";
 import { getLabelPrinter } from "../services/printerConfig";
 import {
@@ -249,6 +265,22 @@ export function PickingGeralModal({
     [secoes, secaoEmConferencia],
   );
 
+  // ---- Filtro Mistos: visão por produto ----
+  const mistosAtivos = queue.mode === "total" && (filters.mistosProdutos?.length ?? 0) > 0;
+  const pedidosM = useMemo(() => {
+    if (!mistosAtivos) return [];
+    if (escopo === "lote") {
+      // O pedido em conferência (fora do recorte) NÃO entra: não está no carimbo
+      // da folha, e o recorte nunca se mistura com ele.
+      return lote.map((o) => pedidoMistoDoLote(o, queue.size));
+    }
+    return fechamCom(
+      pedidosMistos({ fila: products ?? [], lote, size: queue.size, sizes: queue.sizes }),
+      filters.mistosProdutos ?? [],
+    );
+  }, [mistosAtivos, escopo, lote, products, queue.size, queue.sizes, filters.mistosProdutos]);
+  const linhasMistos = useMemo(() => pickingMistos(pedidosM, queue.size), [pedidosM, queue.size]);
+
   // Totais: os da API quando vierem (fila inteira), senão recalculados aqui.
   // Filtro de produto ou recorte da bancada ⇒ o resumo da API conta demais.
   const filtrando = (filters.includeProducts?.length ?? 0) + (filters.excludeProducts?.length ?? 0) > 0;
@@ -283,7 +315,7 @@ export function PickingGeralModal({
   const imprimir = async (apenas?: Secao) => {
     if (imprimindo) return;
     const alvo = apenas ? [apenas] : secoesVisiveis;
-    if (alvo.length === 0) {
+    if (mistosAtivos ? linhasMistos.length === 0 : alvo.length === 0) {
       setStatus("Nada pra imprimir nesta fila.");
       return;
     }
@@ -305,10 +337,12 @@ export function PickingGeralModal({
               orderIds: idsCarimbados,
               escopo: apenas ? "secao" : "lote",
               filtros: filters,
-              secoes: alvo.map((s) => ({
-                tamanho: s.rotulo ?? s.tamanho,
-                linhas: s.produtos.map((p) => ({ produto: p.nome, qtd: p.quantidade })),
-              })),
+              secoes: mistosAtivos
+                ? [{ tamanho: "MISTOS", linhas: linhasMistos.map((l) => ({ produto: l.produto, qtd: l.total })) }]
+                : alvo.map((s) => ({
+                    tamanho: s.rotulo ?? s.tamanho,
+                    linhas: s.produtos.map((p) => ({ produto: p.nome, qtd: p.quantidade })),
+                  })),
             });
             presos = resultado.presos;
             listaIdCarimbo = resultado.listaId;
@@ -323,25 +357,36 @@ export function PickingGeralModal({
         }
       }
       setStatus("Enviando pra impressora…");
-      const base64 = gerarPickingPdf({
-        operadora,
-        fila: filaLabel,
-        escopo: `${escopo === "lote" ? nomeDoLote : "Fila inteira"} · ${dataLabel}`,
-        observacao: semBancada,
-        secoes: alvo.map<PickingSecao>((s) => ({
-          tamanho: s.tamanho,
-          produtos: s.produtos.length,
-          itens: s.itens,
-          pedidos: s.pedidos,
-          linhas: s.produtos.map((p) => ({ produto: p.nome, qtd: p.quantidade })),
-        })),
-      });
+      const base64 = mistosAtivos
+        ? gerarMistosPdf({
+            fila: queue.size,
+            pedidos: pedidosM.length,
+            linhas: linhasMistos,
+            consulta: escopo === "fila",
+          })
+        : gerarPickingPdf({
+            operadora,
+            fila: filaLabel,
+            escopo: `${escopo === "lote" ? nomeDoLote : "Fila inteira"} · ${dataLabel}`,
+            observacao: semBancada,
+            secoes: alvo.map<PickingSecao>((s) => ({
+              tamanho: s.tamanho,
+              produtos: s.produtos.length,
+              itens: s.itens,
+              pedidos: s.pedidos,
+              linhas: s.produtos.map((p) => ({ produto: p.nome, qtd: p.quantidade })),
+            })),
+          });
       // A impressora de ETIQUETAS configurada em Configurações — a mesma da
       // etiqueta J&T e da DANFE. Cair na "padrão do Windows" foi o que mandou
       // a folha A4 pra térmica de 100×150 e a deixou ilegível.
       const out = await printPdfBase64(base64, {
         printer: getLabelPrinter(),
-        jobName: apenas ? `Picking ${apenas.tamanho}` : `Picking Geral ${queue.size}`,
+        jobName: mistosAtivos
+          ? `Mistos ${queue.size}${escopo === "fila" ? " (consulta)" : ""}`
+          : apenas
+            ? `Picking ${apenas.tamanho}`
+            : `Picking Geral ${queue.size}`,
       });
       setStatus(
         out.ok
@@ -368,7 +413,18 @@ export function PickingGeralModal({
         <div style={headerRow}>
           <div style={headerText}>
             <h2 style={titulo}>Picking Geral — {operadora}</h2>
-            <span style={sub}>{products === null ? "Carregando a fila…" : subtitulo}</span>
+            <span style={sub}>
+              {products === null
+                ? "Carregando a fila…"
+                : mistosAtivos
+                  ? `${filaLabel} · ${escopoLabel} · ${dataLabel}`
+                  : subtitulo}
+            </span>
+            {mistosAtivos && products !== null && (
+              <span style={sub}>
+                Peças de outro tamanho dos {pedidosM.length} pedidos da lista, do maior pro menor.
+              </span>
+            )}
           </div>
           <div style={escopoTabs}>
             {(["lote", "fila"] as const).map((e) => (
@@ -430,7 +486,58 @@ export function PickingGeralModal({
 
         <div className="thin-scroll" style={corpo}>
           {products === null && !erro && <span style={vazio}>Carregando produtos da fila…</span>}
-          {products !== null && secoesVisiveis.length === 0 && !erro && (
+          {mistosAtivos && products !== null && (
+            <>
+              <div style={numsRow}>
+                <div style={numCardAmbar}>
+                  <small style={numLabel}>PEÇAS DO FILTRO MISTOS</small>
+                  <b style={numGrandeAmbar}>{totalFora(pedidosM)}</b>
+                </div>
+                <div style={numCard}>
+                  <small style={numLabel}>PEÇAS DA FILA DO {queue.size}</small>
+                  <b style={numGrande}>{totalDele(pedidosM)}</b>
+                </div>
+              </div>
+              {escopo === "lote" && emConferencia && (
+                <span style={mistoSub}>
+                  Pedido #{emConferencia.numero ?? emConferencia.tinyOrderId ?? emConferencia.id.slice(0, 8)} em
+                  conferência está fora do filtro e não entra nesta folha.
+                </span>
+              )}
+              {linhasMistos.length === 0 && !erro && <span style={vazio}>Nenhuma peça de outro tamanho nesta lista.</span>}
+              {linhasMistos.map((l) => (
+                <div key={l.produto} style={mistoLinha}>
+                  {l.imagemUrl ? (
+                    <img src={miniatura(l.imagemUrl) ?? undefined} alt="" style={mistoFoto} loading="lazy" decoding="async" />
+                  ) : (
+                    <span style={{ ...mistoFoto, display: "grid", placeItems: "center", color: "var(--text-faint)", fontWeight: 700 }}>?</span>
+                  )}
+                  <div style={mistoMeio}>
+                    <span style={mistoNome}>{l.produto}</span>
+                    <small style={mistoSub}>
+                      em {l.pedidos} {l.pedidos === 1 ? "pedido" : "pedidos"}
+                    </small>
+                    <div style={mistoGrade}>
+                      {TAMANHOS_MISTOS.map((t) => {
+                        const daFila = t === queue.size.toUpperCase();
+                        const n = daFila ? 0 : (l.grade[t] ?? 0);
+                        return (
+                          <span key={t} style={n ? mistoCaixa : mistoCaixaZero}>
+                            <b>{t}</b> {n}
+                          </span>
+                        );
+                      })}
+                    </div>
+                  </div>
+                  <div style={mistoTot}>
+                    <b style={mistoTotNum}>{l.total}</b>
+                    <small style={mistoSub}>peças</small>
+                  </div>
+                </div>
+              ))}
+            </>
+          )}
+          {!mistosAtivos && products !== null && secoesVisiveis.length === 0 && !erro && (
             // "Vazio" quase nunca é a fila estar vazia: é filtro herdado. Os
             // filtros ficam no localStorage da ESTAÇÃO e sobrevivem à troca de
             // fila, então dá pra entrar na fila M com a data de ontem ainda
@@ -451,7 +558,7 @@ export function PickingGeralModal({
                   : "Nenhum produto nesta fila."}
             </span>
           )}
-          {secoesVisiveis.map((s) => (
+          {!mistosAtivos && secoesVisiveis.map((s) => (
             <section key={s.tamanho} style={secaoWrap}>
               <div style={secaoHeader}>
                 <span style={s.rotulo ? foraChip : tamChip}>{s.rotulo ?? s.tamanho}</span>
@@ -775,4 +882,99 @@ const tdQtd: CSSProperties = {
   fontWeight: 800,
   color: "var(--text)",
   flexShrink: 0,
+};
+
+// ---- Filtro Mistos: visão por produto ----
+
+const numsRow: CSSProperties = { display: "flex", gap: 10 };
+
+const numCard: CSSProperties = {
+  flex: 1,
+  display: "flex",
+  flexDirection: "column",
+  gap: 2,
+  padding: "10px 14px",
+  background: "var(--bg-card)",
+  border: "1px solid var(--border)",
+  borderRadius: 10,
+};
+
+const numCardAmbar: CSSProperties = {
+  ...numCard,
+  background: "var(--warning-bg)",
+  border: "1px solid var(--warning-border)",
+};
+
+const numLabel: CSSProperties = { fontSize: 10, fontWeight: 800, letterSpacing: 1, color: "var(--text-muted)" };
+
+const numGrande: CSSProperties = {
+  fontFamily: "var(--font-mono)",
+  fontSize: 32,
+  fontWeight: 700,
+  color: "var(--text)",
+  lineHeight: 1.1,
+};
+
+const numGrandeAmbar: CSSProperties = { ...numGrande, color: "var(--warning-text)" };
+
+const mistoLinha: CSSProperties = {
+  display: "flex",
+  alignItems: "center",
+  gap: 12,
+  padding: "8px 12px",
+  background: "var(--bg-card)",
+  border: "1px solid var(--border)",
+  borderRadius: 10,
+};
+
+const mistoFoto: CSSProperties = {
+  width: 56,
+  height: 56,
+  borderRadius: 8,
+  objectFit: "cover",
+  background: "var(--bg-input)",
+  border: "1px solid var(--border)",
+  flexShrink: 0,
+};
+
+const mistoMeio: CSSProperties = { flex: 1, minWidth: 0, display: "flex", flexDirection: "column", gap: 3 };
+
+const mistoNome: CSSProperties = {
+  fontSize: 13,
+  fontWeight: 800,
+  color: "var(--text)",
+  textTransform: "uppercase",
+  overflow: "hidden",
+  textOverflow: "ellipsis",
+  whiteSpace: "nowrap",
+};
+
+const mistoSub: CSSProperties = { fontSize: 11, color: "var(--text-muted)" };
+
+const mistoGrade: CSSProperties = { display: "flex", flexWrap: "wrap", gap: 5, marginTop: 2 };
+
+const mistoCaixa: CSSProperties = {
+  fontFamily: "var(--font-mono)",
+  fontSize: 12,
+  padding: "2px 9px",
+  borderRadius: 6,
+  background: "var(--bg-input)",
+  border: "1px solid var(--border-strong)",
+  color: "var(--text)",
+};
+
+const mistoCaixaZero: CSSProperties = {
+  ...mistoCaixa,
+  opacity: 0.35,
+  border: "1px dashed var(--border-strong)",
+};
+
+const mistoTot: CSSProperties = { display: "flex", flexDirection: "column", alignItems: "flex-end", flexShrink: 0, minWidth: 64 };
+
+const mistoTotNum: CSSProperties = {
+  fontFamily: "var(--font-mono)",
+  fontSize: 28,
+  fontWeight: 700,
+  color: "var(--warning-text)",
+  lineHeight: 1.1,
 };

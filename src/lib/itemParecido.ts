@@ -2,8 +2,31 @@ import type { OrderItem } from "../services/orders";
 
 /** Tamanhos conhecidos pra extrair do nome quando o item vem sem `tamanho`. */
 const KNOWN_SIZES = new Set([
-  "PP", "P", "M", "G", "GG", "XG", "XXG", "G1", "G2", "G3", "XGG",
+  "PP", "P", "M", "G", "GG", "XG", "XXG", "G1", "G2", "G3", "XGG", "U",
 ]);
+
+/**
+ * Apelidos de tamanho — a MESMA régua do nexus (`canonicalizeTamanho` /
+ * `SIZE_ALIASES` da ingestão Tiny): `EG`≡`XG`, `EGG`≡`XGG`, `UN`/`UNI`/
+ * `UNICO`≡`U`. O servidor compara pelo canônico; sem isto um "EG" aqui era
+ * "de outro tamanho" numa fila XG e o Filtro Mistos escondia o que o nexus
+ * reservou (revisão 04/11).
+ */
+const SIZE_ALIASES: Readonly<Record<string, string>> = {
+  EG: "XG",
+  EGG: "XGG",
+  UN: "U",
+  UNI: "U",
+  UNICO: "U",
+  "ÚNICO": "U",
+};
+
+/** Tamanho canônico de um token (trim, caixa alta, sem espaço interno, apelidos). */
+export function canonicalizeTamanho(value: string | null | undefined): string | null {
+  const n = value?.trim().toUpperCase().replace(/\s+/g, "");
+  if (!n) return null;
+  return SIZE_ALIASES[n] ?? n;
+}
 
 /**
  * Tamanho efetivo do item: o campo `tamanho` (normalizado), ou extraído do nome
@@ -13,10 +36,10 @@ const KNOWN_SIZES = new Set([
  * exceção coberta).
  */
 export function itemSize(it: OrderItem): string | null {
-  const direct = it.tamanho?.trim().toUpperCase();
+  const direct = canonicalizeTamanho(it.tamanho);
   if (direct) return direct;
   if (!it.nome) return null;
-  const tokens = it.nome.split(/\s+[-–]\s+/).map((t) => t.trim().toUpperCase());
+  const tokens = it.nome.split(/\s+[-–]\s+/).map((t) => canonicalizeTamanho(t) ?? "");
   for (let i = tokens.length - 1; i >= 0; i--) {
     if (KNOWN_SIZES.has(tokens[i])) return tokens[i];
   }

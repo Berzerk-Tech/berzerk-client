@@ -10,7 +10,7 @@
 import { getIdToken } from "./cognito";
 
 /** Eventos que o servidor empurra. Discriminados por `type`. */
-export type EventoRealtime = "queue.changed" | "print-jobs.changed";
+export type EventoRealtime = "queue.changed" | "print-jobs.changed" | "exclusoes-globais.changed";
 
 const WS_URL = (import.meta.env.VITE_SEPARACAO_WS_URL ?? "").replace(/\/$/, "");
 
@@ -30,6 +30,21 @@ export function subscribeEvento(
   onChange: () => void,
   onStatus?: (status: "connecting" | "connected" | "disconnected") => void,
 ): () => void {
+  return subscribeEventos([evento], () => onChange(), onStatus);
+}
+
+/**
+ * Assina VÁRIOS eventos numa conexão só — cada `subscribeEvento` abre um
+ * WebSocket próprio, e a Separação precisava de dois (fila + exclusão do
+ * galpão). `onEvento("open")` dispara ao (re)conectar, como o `onChange` do
+ * assinante único; depois vem o `type` de cada mensagem assinada.
+ */
+export function subscribeEventos(
+  eventos: readonly EventoRealtime[],
+  onEvento: (tipo: EventoRealtime | "open") => void,
+  onStatus?: (status: "connecting" | "connected" | "disconnected") => void,
+): () => void {
+  const assinados = new Set<string>(eventos);
   if (!WS_URL) {
     // Sem WS configurado a tela não fica mentindo que está em tempo real.
     onStatus?.("disconnected");
@@ -72,14 +87,14 @@ export function subscribeEvento(
     ws.onopen = () => {
       retryMs = INITIAL_RETRY_MS;
       onStatus?.("connected");
-      onChange();
+      onEvento("open");
     };
     ws.onmessage = (ev) => {
       try {
         const data = JSON.parse(ev.data as string) as { type?: string };
         // Uma conexão só recebe TODOS os eventos (o broadcast do nexus não tem
         // rooms) — cada assinante filtra pelo `type` que lhe interessa.
-        if (data.type === evento) onChange();
+        if (data.type && assinados.has(data.type)) onEvento(data.type as EventoRealtime);
       } catch {
         /* mensagem não-JSON: ignora, o fallback lento cobre */
       }
@@ -112,3 +127,4 @@ export function subscribePrintJobsChanged(
 ): () => void {
   return subscribeEvento("print-jobs.changed", onChange, onStatus);
 }
+

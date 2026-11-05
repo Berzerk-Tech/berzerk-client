@@ -42,9 +42,19 @@ vi.mock("../src/contexts/RfidContext", () => ({
 
 vi.mock("../src/lib/realtime", () => ({
   subscribeQueueChanged: () => () => {},
+  subscribeExclusoesGlobaisChanged: () => () => {},
+  subscribeEventos: () => () => {},
   subscribeEvento: () => () => {},
   subscribePrintJobsChanged: () => () => {},
 }));
+
+const getExclusoesGlobais = vi.fn(async (): Promise<unknown> => null);
+vi.mock("../src/services/exclusoesGlobais", async () => {
+  const real = await vi.importActual<typeof import("../src/services/exclusoesGlobais")>(
+    "../src/services/exclusoesGlobais",
+  );
+  return { ...real, getExclusoesGlobais: () => getExclusoesGlobais() };
+});
 
 vi.mock("../src/lib/beep", () => ({ beepOk: () => {}, beepError: () => {} }));
 
@@ -215,5 +225,182 @@ describe("SeparacaoRunner — entrar na fila", () => {
     );
     const commits = await montarEContarCommits();
     expect(commits).toBeLessThan(40);
+  });
+});
+
+describe("SeparacaoRunner — Filtro Mistos", () => {
+  beforeEach(() => {
+    localStorage.clear();
+    getMe.mockReset().mockResolvedValue({
+      actorId: "op-1",
+      email: "operadora@berzerk.com.br",
+      permissions: ["separacao:operate"],
+      liberacaoSupervisorAtiva: true,
+    });
+  });
+  afterEach(() => cleanup());
+
+  it("filtro salvo: o misto que não fecha fica oculto, o indicador liga e a peça de outro tamanho é destacada", async () => {
+    const misto = (n: number, fora: string) => {
+      const o = pedido(n);
+      o.separationMode = "total";
+      o.items = [
+        { ...o.items[0], nome: "Oversized - Leg Day - M", produto: "Oversized - Leg Day", tamanho: "M" },
+        { ...o.items[1], nome: `Oversized - ${fora} - G`, produto: `Oversized - ${fora}`, tamanho: "G" },
+      ];
+      return o;
+    };
+    claimLote.mockReset().mockResolvedValue({
+      orders: [misto(1, "Surpresa"), misto(2, "Punk Pink")],
+      fila: { restantes: 0 },
+    });
+    localStorage.setItem(
+      "berzerk_picking_filters_v2",
+      JSON.stringify({ "total:M": { mistosProdutos: ["Oversized - Surpresa"] } }),
+    );
+    render(
+      <SeparacaoRunner
+        title="Separação"
+        kicker="Fila M — Mistos"
+        emptyHint="Fila vazia"
+        queue={{ mode: "total", size: "M", sizes: ["M"] }}
+        onBack={() => {}}
+      />,
+    );
+    for (let i = 0; i < 12; i++) await act(async () => { await Promise.resolve(); });
+    await act(async () => { await new Promise((r) => setTimeout(r, 60)); });
+
+    expect(screen.getByText("1 oculto pelo filtro")).toBeTruthy();
+    expect(screen.getByText("Filtro Mistos ativo")).toBeTruthy();
+    expect(screen.getByText("Filtros (1)")).toBeTruthy();
+    expect(screen.getByText("FILTRO MISTOS")).toBeTruthy();
+    expect(document.body.textContent).toContain("saem do Filtro Mistos");
+  });
+});
+
+async function montarRunner(queue: { mode: "normal" | "total"; size: string; sizes: string[] }) {
+  render(
+    <SeparacaoRunner
+      title="Separação"
+      kicker={`Fila ${queue.size}`}
+      emptyHint="Fila vazia"
+      queue={queue}
+      onBack={() => {}}
+    />,
+  );
+  for (let i = 0; i < 12; i++) await act(async () => { await Promise.resolve(); });
+  await act(async () => { await new Promise((r) => setTimeout(r, 60)); });
+}
+
+describe("SeparacaoRunner — Filtro Mistos: fallback de tamanho e corpo do claim", () => {
+  beforeEach(() => {
+    localStorage.clear();
+    getMe.mockReset().mockResolvedValue({
+      actorId: "op-1",
+      email: "operadora@berzerk.com.br",
+      permissions: ["separacao:operate"],
+      liberacaoSupervisorAtiva: true,
+    });
+    getExclusoesGlobais.mockReset().mockResolvedValue(null);
+  });
+  afterEach(() => cleanup());
+
+  it("pedido sem predominantSize usa o tamanho da fila: Leg Day M + Myth G com filtro [Myth] NÃO fica oculto", async () => {
+    const o = pedido(1);
+    o.separationMode = "total";
+    o.predominantSize = null;
+    o.items = [
+      { ...o.items[0], nome: "Leg Day - M", produto: "Leg Day", tamanho: "M" },
+      { ...o.items[1], nome: "Myth - G", produto: "Myth", tamanho: "G" },
+    ];
+    claimLote.mockReset().mockResolvedValue({ orders: [o], fila: { restantes: 0 } });
+    localStorage.setItem("berzerk_picking_filters_v2", JSON.stringify({ "total:M": { mistosProdutos: ["Myth"] } }));
+    await montarRunner({ mode: "total", size: "M", sizes: ["M"] });
+    expect(screen.queryByText(/oculto pelo filtro/)).toBeNull();
+    expect(screen.getByText("Filtro Mistos ativo")).toBeTruthy();
+  });
+
+  it("filtro mistos salvo vai no body do PRIMEIRO claim (lote ainda vazio não pode gatear o body)", async () => {
+    claimLote.mockReset().mockResolvedValue({ orders: [], fila: { restantes: 0 } });
+    localStorage.setItem("berzerk_picking_filters_v2", JSON.stringify({ "total:M": { mistosProdutos: ["Myth"] } }));
+    await montarRunner({ mode: "total", size: "M", sizes: ["M"] });
+    expect(claimLote).toHaveBeenCalled();
+    expect(claimLote.mock.calls[0][0].filters?.mistosProdutos).toEqual(["Myth"]);
+  });
+
+  it("nexus antigo (itens sem `produto`): filtro mistos salvo NÃO esconde nada nem liga o indicador", async () => {
+    const o = pedido(1);
+    o.separationMode = "total";
+    o.items = [
+      { ...o.items[0], nome: "Leg Day - M", tamanho: "M" },
+      { ...o.items[1], nome: "Zeus - G", tamanho: "G" },
+    ];
+    claimLote.mockReset().mockResolvedValue({ orders: [o], fila: { restantes: 0 } });
+    localStorage.setItem("berzerk_picking_filters_v2", JSON.stringify({ "total:M": { mistosProdutos: ["Myth"] } }));
+    await montarRunner({ mode: "total", size: "M", sizes: ["M"] });
+    expect(screen.queryByText(/oculto pelo filtro/)).toBeNull();
+    expect(screen.queryByText("Filtro Mistos ativo")).toBeNull();
+  });
+
+  it("sem global e sem mistos, o body do claim não leva excludeProducts nem mistosProdutos", async () => {
+    claimLote.mockReset().mockResolvedValue({ orders: LOTE, fila: { restantes: 0 } });
+    await montarRunner(QUEUE);
+    expect(claimLote).toHaveBeenCalled();
+    const filters = claimLote.mock.calls[0][0].filters ?? {};
+    expect(filters.excludeProducts).toBeUndefined();
+    expect(filters.mistosProdutos).toBeUndefined();
+  });
+
+  it("com global [Moletom] carregada, o claim leva só o local em excludeProducts (o nexus une sozinho)", async () => {
+    getExclusoesGlobais.mockResolvedValue({
+      termos: [{ id: "1", termo: "Moletom", criadoPor: null, criadoEm: null }],
+      atualizadoEm: "2026-11-04T12:00:00.000Z",
+    });
+    localStorage.setItem("berzerk_picking_filters_v2", JSON.stringify({ "normal:M": { excludeProducts: ["Calça"] } }));
+    claimLote.mockReset().mockResolvedValue({ orders: LOTE, fila: { restantes: 0 } });
+    await montarRunner(QUEUE);
+    const todas = claimLote.mock.calls.map((c) => c[0].filters?.excludeProducts);
+    expect(todas.length).toBeGreaterThan(0);
+    for (const e of todas) expect(e).toEqual(["Calça"]);
+  });
+});
+
+describe("SeparacaoRunner — exclusão do galpão", () => {
+  beforeEach(() => {
+    localStorage.clear();
+    getMe.mockReset().mockResolvedValue({
+      actorId: "op-1",
+      email: "operadora@berzerk.com.br",
+      permissions: ["separacao:operate"],
+      liberacaoSupervisorAtiva: true,
+    });
+  });
+  afterEach(() => {
+    cleanup();
+    getExclusoesGlobais.mockReset().mockResolvedValue(null);
+  });
+
+  it("termo global esconde o pedido do lote (1 oculto) e conta no chip Filtros", async () => {
+    getExclusoesGlobais.mockResolvedValue({
+      termos: [{ id: "1", termo: "Moletom", criadoPor: "Stefhany", criadoEm: null }],
+      atualizadoEm: "2026-11-04T12:00:00.000Z",
+    });
+    claimLote.mockReset().mockResolvedValue({
+      orders: [pedido(1, { nome: "Moletom Cargo - M" }), pedido(2)],
+      fila: { restantes: 0 },
+    });
+    render(
+      <SeparacaoRunner
+        title="Separação"
+        kicker="Fila M — Puro"
+        emptyHint="Fila vazia"
+        queue={QUEUE}
+        onBack={() => {}}
+      />,
+    );
+    for (let i = 0; i < 12; i++) await act(async () => { await Promise.resolve(); });
+    await act(async () => { await new Promise((r) => setTimeout(r, 60)); });
+    expect(screen.getByText("1 oculto pelo filtro")).toBeTruthy();
+    expect(screen.getByText("Filtros (1)")).toBeTruthy();
   });
 });
