@@ -32,6 +32,7 @@ import {
   pickingMistos,
   rankingMistos,
   tamanhosForaDaFila,
+  textoReservadosPorOutras,
   totalFora,
 } from "../lib/mistos";
 import { gerarMistosPdf } from "../lib/mistosPdf";
@@ -46,6 +47,7 @@ import {
 import { getLabelPrinter } from "../services/printerConfig";
 import {
   getQueueProducts,
+  type ProdutoReservado,
   type CanalSeparacao,
   type Order,
   type QueueFilters,
@@ -163,6 +165,9 @@ export function PickingFiltersModal({ filters, queue, lote, abaInicial = "exclus
   const [manual, setManual] = useState("");
   const [daFila, setDaFila] = useState<QueueProduct[] | null>(null);
   const [prodErro, setProdErro] = useState<string | null>(null);
+  // Filtro Mistos reservado por operadora (Nexus ≥ 05/11; ausente = nexus antigo).
+  const [reservados, setReservados] = useState<ProdutoReservado[] | undefined>(undefined);
+  const [meusReservados, setMeusReservados] = useState<string[] | undefined>(undefined);
   // A aba Filtro Mistos só existe se o nexus entende `produto` (nexus antigo
   // descarta `mistosProdutos` no claim e reservaria pedidos que a tela esconde).
   const temMistos =
@@ -213,7 +218,12 @@ export function PickingFiltersModal({ filters, queue, lote, abaInicial = "exclus
       dateTo: dataSel,
       canal: queue.canal,
     })
-      .then((d) => alive && setDaFila(d.products))
+      .then((d) => {
+        if (!alive) return;
+        setDaFila(d.products);
+        setReservados(d.reservados);
+        setMeusReservados(d.meusReservados);
+      })
       .catch((e) => {
         if (!alive) return;
         setDaFila([]);
@@ -363,6 +373,7 @@ export function PickingFiltersModal({ filters, queue, lote, abaInicial = "exclus
     return mistos.filter((t) => !noRanking.has(chaveMisto(t)));
   }, [ranking, mistos]);
   const emMistos = aba === "mistos" && temMistos;
+  const meusReservadosSet = useMemo(() => new Set((meusReservados ?? []).map(chaveMisto)), [meusReservados]);
 
   const toggleMisto = (produto: string) => {
     const k = chaveMisto(produto);
@@ -576,6 +587,9 @@ export function PickingFiltersModal({ filters, queue, lote, abaInicial = "exclus
                   )}
                   <span style={mistosNomeCol}>
                     <span style={mistosNome}>{x.produto}</span>
+                    {marcado && meusReservadosSet.has(chaveMisto(x.produto)) && (
+                      <small style={mistosSmall}>reservado pra você</small>
+                    )}
                     <small style={mistosSmall}>
                       de outro tamanho em {x.aparece} mistos do {queue?.size}
                     </small>
@@ -680,6 +694,9 @@ export function PickingFiltersModal({ filters, queue, lote, abaInicial = "exclus
 
         {erroSalvar && <div style={avisoBox}>{erroSalvar}</div>}
         {emMistos && statusMistos && <div style={statusMistosBox}>{statusMistos}</div>}
+        {emMistos && textoReservadosPorOutras(reservados) && (
+          <div style={reservadosBox}>{textoReservadosPorOutras(reservados)}</div>
+        )}
 
         <div style={acoesRow}>
           <span style={rodapeInfo}>
@@ -1178,6 +1195,13 @@ const sozinhoNum: CSSProperties = {
 };
 
 const sozinhoNumOn: CSSProperties = { ...sozinhoNum, color: "var(--warning-text)" };
+
+const reservadosBox: CSSProperties = {
+  padding: "6px 12px",
+  color: "var(--text-faint)",
+  fontSize: 12,
+  opacity: 0.8,
+};
 
 const statusMistosBox: CSSProperties = {
   padding: "8px 12px",

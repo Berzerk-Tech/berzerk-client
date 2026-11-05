@@ -309,7 +309,16 @@ export type QueueProduct = {
  */
 export type QueueProductsResumo = { pedidos: number; itens: number; produtos: number };
 
+export type ProdutoReservado = {
+  termo: string;
+  operadora: { sub: string; nome: string | null };
+};
+
 export type QueueProductsResponse = {
+  /** Filtro Mistos: produtos em uso por outra operadora (Nexus ≥ 05/11; opcional). */
+  reservados?: ProdutoReservado[];
+  /** Termos reservados pela própria operadora (opcional). */
+  meusReservados?: string[];
   products: QueueProduct[];
   resumo?: QueueProductsResumo;
 };
@@ -834,8 +843,18 @@ export function alterarPinSupervisor(req: {
   return apiRequest<{ ok: true }>("/separacao/supervisor-pin", { method: "POST", body: req });
 }
 
-export function releaseSeparacao(orderId: string): Promise<Order> {
-  return apiRequest<Order>(`/separacao/${orderId}/release`, { method: "POST", body: {} });
+/** Motivo pra soltar UM pedido de lista impressa sem PIN (nexus 05/11). */
+export type MotivoSoltar = "falta_peca" | "outro";
+export type ReleaseBody = { motivo: MotivoSoltar; observacao?: string };
+/** Resposta do release: os campos novos só vêm de Nexus com suporte. */
+export type ReleaseResponse = Order & {
+  soltoDaLista?: boolean;
+  listaEm?: string | null;
+  restantesNaLista?: number;
+};
+
+export function releaseSeparacao(orderId: string, body?: ReleaseBody): Promise<ReleaseResponse> {
+  return apiRequest<ReleaseResponse>(`/separacao/${orderId}/release`, { method: "POST", body: body ?? {} });
 }
 
 /** GET com query string: acima de ~100 EPCs (25 chars cada) a URL passa dos

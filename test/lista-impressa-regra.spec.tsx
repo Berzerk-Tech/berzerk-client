@@ -160,3 +160,44 @@ describe("lista impressa fica com a operadora até o fim do dia", () => {
     expect(onBack).toHaveBeenCalled();
   });
 });
+
+describe("soltar UM pedido da lista sem PIN (falta peça)", () => {
+  beforeEach(() => {
+    localStorage.clear();
+    releaseSeparacao.mockClear();
+    devolverLote.mockClear();
+    const lote = LOTE.map((o) => ({ ...o, claimedBy: "op-1" }));
+    claimLote.mockReset().mockResolvedValue({ orders: lote, fila: { restantes: 0 } });
+    getMe.mockReset().mockResolvedValue({
+      actorId: "op-1",
+      email: "operadora@berzerk.com.br",
+      permissions: ["separacao:operate"],
+      liberacaoSupervisorAtiva: true,
+    });
+  });
+  afterEach(() => cleanup());
+
+  it("solta o pedido com motivo, sem PIN", async () => {
+    releaseSeparacao.mockResolvedValueOnce({ soltoDaLista: true, restantesNaLista: 2 } as never);
+    await montar();
+    fireEvent.click(screen.getByText("Falta peça — soltar pedido"));
+    await act(async () => { await new Promise((r) => setTimeout(r, 30)); });
+    fireEvent.change(screen.getByPlaceholderText("Observação (opcional)"), { target: { value: "sem a M" } });
+    fireEvent.click(screen.getByText("Soltar pedido"));
+    await act(async () => { await new Promise((r) => setTimeout(r, 60)); });
+    expect(releaseSeparacao).toHaveBeenCalledWith("ord-1", { motivo: "falta_peca", observacao: "sem a M" });
+    expect(screen.queryByText(/Devolver a lista impressa/)).toBeNull();
+  });
+
+  it("409 lista_impressa (Nexus sem suporte) cai no modal de PIN", async () => {
+    const { ApiError } = await import("../src/lib/api");
+    releaseSeparacao.mockRejectedValueOnce(new ApiError(409, "lista_impressa", { error: "lista_impressa" }) as never);
+    await montar();
+    fireEvent.click(screen.getByText("Falta peça — soltar pedido"));
+    await act(async () => { await new Promise((r) => setTimeout(r, 30)); });
+    fireEvent.click(screen.getByText("Soltar pedido"));
+    await act(async () => { await new Promise((r) => setTimeout(r, 60)); });
+    expect(screen.getByText(/Devolver a lista impressa/)).toBeTruthy();
+    expect(screen.getByText(/ainda exige supervisor/)).toBeTruthy();
+  });
+});

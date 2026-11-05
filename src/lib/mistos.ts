@@ -315,3 +315,12 @@ export function totalFora(pedidos: PedidoMisto[]): number {
 export function totalDele(pedidos: PedidoMisto[]): number {
   return pedidos.reduce((a, p) => a + p.dele.reduce((b, i) => b + i.quantidade, 0), 0);
 }
+
+/** Rodapé da aba Mistos: produtos em uso por outra operadora (campo opcional do Nexus). */
+export function textoReservadosPorOutras(
+  reservados: Array<{ termo: string; operadora: { nome: string | null } }> | undefined,
+): string | null {
+  if (!reservados || reservados.length === 0) return null;
+  const itens = reservados.map((r) => (r.operadora.nome ? `${r.termo} (${r.operadora.nome})` : r.termo));
+  return `Em uso por outra operadora: ${itens.join(", ")}`;
+}

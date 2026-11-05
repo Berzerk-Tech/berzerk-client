@@ -4,6 +4,13 @@ import { AmbientBackground } from "./AmbientBackground";
 import { OperatorChip } from "./OperatorChip";
 import { SeparacaoRunner } from "./SeparacaoRunner";
 import { SupervisorModal } from "./SupervisorModal";
+import { SoltarPedidoDialog } from "./SoltarPedidoDialog";
+import {
+  MSG_SERVIDOR_EXIGE_SUPERVISOR,
+  ehListaImpressaSemSuporte,
+  podeSoltarSemPin,
+  textoPedidoSolto,
+} from "../lib/soltar-pedido";
 import { useRfid } from "../contexts/RfidContext";
 import { ApiError } from "../lib/api";
 import { getSessaoSync } from "../lib/cognito";
@@ -17,6 +24,8 @@ import {
   getMeusPedidos,
   getQueueCounts,
   pedidoIndisponivel,
+  releaseSeparacao,
+  type ReleaseBody,
   type CanalSeparacao,
   type EntregaEmMaosPedido,
   type EntregaEmMaosResponse,
@@ -77,6 +86,8 @@ export function Separacao({ onBack }: Props) {
   const [avisoLista, setAvisoLista] = useState<string | null>(null);
   /** Modal do PIN pra devolver lista impressa (declarado aqui: há return condicional abaixo). */
   const [devolverListaOpen, setDevolverListaOpen] = useState(false);
+  // Pedido da lista que a operadora está soltando (falta peça), sem PIN.
+  const [soltando, setSoltando] = useState<Order | null>(null);
   /**
    * Aba "Entrega em mãos" (15/10): pedidos de influencer que a Luana entrega
    * pessoalmente. `null` = nexus sem a rota (404) ou ainda carregando — a
@@ -369,6 +380,31 @@ export function Separacao({ onBack }: Props) {
     }
   };
 
+  // Soltar UM pedido da lista (falta peça) sem PIN, fora do pedido atual da mesa.
+  const soltarConfirm = async (body: ReleaseBody) => {
+    const alvo = soltando;
+    if (!alvo) return;
+    try {
+      const r = await releaseSeparacao(alvo.id, body);
+      const ficam = emAberto.filter((o) => o.id !== alvo.id);
+      setEmAberto(ficam);
+      setAvisoLista(
+        textoPedidoSolto(alvo.numero, {
+          restantesNaLista: r.restantesNaLista ?? ficam.filter((o) => !!o.listaEm).length,
+        }),
+      );
+      setSoltando(null);
+    } catch (e) {
+      if (ehListaImpressaSemSuporte(e)) {
+        setSoltando(null);
+        setAvisoLista(MSG_SERVIDOR_EXIGE_SUPERVISOR);
+        setDevolverListaOpen(true);
+        return;
+      }
+      throw e;
+    }
+  };
+
   const devolverEmAberto = async () => {
     if (comLista.length > 0) {
       setDevolverListaOpen(true);
@@ -476,9 +512,26 @@ export function Separacao({ onBack }: Props) {
             {devolvendo ? "devolvendo…" : "devolver pra fila"}
           </button>
           {avisoLista && <div style={{ marginTop: 8, fontSize: 13 }}>{avisoLista}</div>}
+          {comLista.some((o) => podeSoltarSemPin(o, getSessaoSync()?.sub)) && (
+            <ul style={soltarLista}>
+              {comLista.map((o) =>
+                podeSoltarSemPin(o, getSessaoSync()?.sub) ? (
+                  <li key={o.id} style={soltarItem}>
+                    <span>{o.numero ? `#${o.numero}` : o.id.slice(0, 8)}</span>
+                    <button style={devolverBtn} onClick={() => setSoltando(o)}>
+                      Soltar (falta peça)
+                    </button>
+                  </li>
+                ) : null,
+              )}
+            </ul>
+          )}
         </div>
       )}
 
+      {soltando && (
+        <SoltarPedidoDialog numero={soltando.numero} onConfirm={soltarConfirm} onCancel={() => setSoltando(null)} />
+      )}
       {devolverListaOpen && (
         <SupervisorModal
           faltantes={[]}
@@ -815,6 +868,18 @@ const retomarBtn: CSSProperties = {
   fontWeight: 800,
   cursor: "pointer",
 };
+
+const soltarLista: CSSProperties = {
+  listStyle: "none",
+  margin: "10px 0 0",
+  padding: 0,
+  maxHeight: 160,
+  overflowY: "auto",
+  display: "flex",
+  flexDirection: "column",
+  gap: 6,
+};
+const soltarItem: CSSProperties = { display: "flex", alignItems: "center", gap: 10, fontSize: 13 };
 
 const devolverBtn: CSSProperties = {
   background: "transparent",
