@@ -77,3 +77,13 @@ describe("itemSize", () => {
     expect(itemSize(item({ id: "1", nome: "Camiseta Basic Preta" }))).toBeNull();
   });
 });
+
+describe("itemSize — apelidos de tamanho (mesma régua do nexus)", () => {
+  const it0 = { id: "x", ean: null, sku: null, quantidade: 1, imagemUrl: null };
+  it("EG vira XG, EGG vira XGG, UN/UNI/UNICO viram U — no campo e no nome", () => {
+    expect(itemSize({ ...it0, nome: "Oversized - Baki", tamanho: "EG" })).toBe("XG");
+    expect(itemSize({ ...it0, nome: "Oversized - Baki - EG", tamanho: null })).toBe("XG");
+    expect(itemSize({ ...it0, nome: "Oversized - Baki", tamanho: " egg " })).toBe("XGG");
+    expect(itemSize({ ...it0, nome: "Boné - UNICO", tamanho: null })).toBe("U");
+  });
+});

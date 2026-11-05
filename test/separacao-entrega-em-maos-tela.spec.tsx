@@ -33,7 +33,7 @@ vi.mock("../src/components/OperatorChip", () => ({ OperatorChip: () => null }));
 vi.mock("../src/contexts/RfidContext", () => ({
   useRfid: () => ({ connected: true, host: "http://localhost:9093", reconnect: async () => {} }),
 }));
-vi.mock("../src/lib/realtime", () => ({ subscribeQueueChanged: () => () => {} }));
+vi.mock("../src/lib/realtime", () => ({ subscribeQueueChanged: () => () => {}, subscribeExclusoesGlobaisChanged: () => () => {}, subscribeEventos: () => () => {} }));
 vi.mock("../src/lib/cognito", () => ({
   getSessaoSync: () => ({ sub: "op-1", email: "operadora@berzerk.com.br" }),
 }));

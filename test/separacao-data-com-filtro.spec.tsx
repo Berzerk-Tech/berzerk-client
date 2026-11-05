@@ -48,6 +48,8 @@ vi.mock("../src/contexts/RfidContext", () => ({
 
 vi.mock("../src/lib/realtime", () => ({
   subscribeQueueChanged: () => () => {},
+  subscribeExclusoesGlobaisChanged: () => () => {},
+  subscribeEventos: () => () => {},
   subscribeEvento: () => () => {},
   subscribePrintJobsChanged: () => () => {},
 }));

@@ -23,7 +23,8 @@ import { useRfid, type ReadingSession } from "../contexts/RfidContext";
 import { beepError, beepOk } from "../lib/beep";
 import { fmtDataHora } from "../lib/datas";
 import { LARGURA_CARD, imagemRedimensionada, miniatura } from "../lib/imagens";
-import { subscribeQueueChanged } from "../lib/realtime";
+import { subscribeEventos } from "../lib/realtime";
+import { getExclusoesGlobais, termosGlobais, type ExclusoesGlobais } from "../services/exclusoesGlobais";
 import { itemParecidoDoPedido, itemSize } from "../lib/itemParecido";
 import { onBeforeForcedLogout } from "../lib/idleSession";
 import { onAntesDeBloquear } from "../lib/updateGate";
@@ -35,7 +36,8 @@ import { nomeDaOperadora } from "./OperatorChip";
 import { getSessaoSync } from "../lib/cognito";
 import { SeparacaoHistoryModal } from "./SeparacaoHistoryModal";
 import { ListasImpressasModal } from "./ListasImpressasModal";
-import { PickingFiltersModal, emptyFilters, loadFilters, saveFilters } from "./PickingFiltersModal";
+import { PickingFiltersModal, emptyFilters, loadFilters, saveFilters, type Aba } from "./PickingFiltersModal";
+import { chaveMisto, passaNoFiltroMistos, pedidoMistoDoLote } from "../lib/mistos";
 import { ApiError } from "../lib/api";
 import {
   avisoAwbColetado,
@@ -180,14 +182,21 @@ function pedidoTemProduto(o: Order, termos: string[]): boolean {
 }
 
 /** Só o recorte de PRODUTO — usado onde a DATA é o que está sendo enumerado. */
-function passaNosProdutos(o: Order, f: QueueFilters): boolean {
+function passaNosProdutos(o: Order, f: QueueFilters, sizeFila = ""): boolean {
   if (f.includeProducts?.length && !pedidoTemProduto(o, f.includeProducts)) return false;
   if (f.excludeProducts?.length && pedidoTemProduto(o, f.excludeProducts)) return false;
+  // Filtro Mistos: só o misto cujas peças de outro tamanho são todas dos
+  // produtos marcados. Pedido sem `predominantSize` usa o tamanho da FILA —
+  // com "" toda peça virava "de outro tamanho" e o pedido sumia da sidebar
+  // enquanto o servidor o mantinha reservado pra ela (revisão 04/11).
+  if (f.mistosProdutos?.length && o.separationMode === "total") {
+    return passaNoFiltroMistos(o, f.mistosProdutos, o.predominantSize?.trim() || sizeFila);
+  }
   return true;
 }
 
 /** O pedido passa pelos filtros ATIVOS (data de emissão + inclui/exclui produto). */
-function passaNosFiltros(o: Order, f: QueueFilters): boolean {
+function passaNosFiltros(o: Order, f: QueueFilters, sizeFila = ""): boolean {
   if (f.dateFrom || f.dateTo) {
     // Pedido sem data de emissão não passa em filtro de data — é o que o SQL
     // faz (`null::date >= x` é NULL, e NULL não entra no WHERE).
@@ -196,7 +205,7 @@ function passaNosFiltros(o: Order, f: QueueFilters): boolean {
     if (f.dateFrom && dia < f.dateFrom) return false;
     if (f.dateTo && dia > f.dateTo) return false;
   }
-  return passaNosProdutos(o, f);
+  return passaNosProdutos(o, f, sizeFila);
 }
 
 /**
@@ -205,12 +214,12 @@ function passaNosFiltros(o: Order, f: QueueFilters): boolean {
  * fila (servidor) com o lote dela (memória). Só o filtro de PRODUTO entra: a
  * data é o que está sendo enumerado.
  */
-function datasDoLote(lote: Order[], f: QueueFilters): QueueDatesResponse {
+function datasDoLote(lote: Order[], f: QueueFilters, sizeFila = ""): QueueDatesResponse {
   const porDia = new Map<string, number>();
   let total = 0;
   let semData = 0;
   for (const o of lote) {
-    if (!passaNosProdutos(o, f)) continue;
+    if (!passaNosProdutos(o, f, sizeFila)) continue;
     total += 1;
     const dia = diaDeEmissao(o);
     if (!dia) semData += 1;
@@ -302,9 +311,52 @@ function numerarListas(lote: Order[]): Map<string, number> {
   return numero;
 }
 
+/** União case-insensitive de termos (a primeira ocorrência vence). */
+function uniaoTermos(...listas: (string[] | undefined)[]): string[] {
+  const vistos = new Set<string>();
+  const out: string[] = [];
+  for (const l of listas) {
+    for (const t of l ?? []) {
+      const k = t.trim().toLowerCase();
+      if (!k || vistos.has(k)) continue;
+      vistos.add(k);
+      out.push(t);
+    }
+  }
+  return out;
+}
+
+/**
+ * Filtros que recortam EM MEMÓRIA: local ∪ exclusão do galpão. Só pra tela —
+ * pro nexus vai o LOCAL (`semGlobais`): ele une a global sozinho, e o body
+ * aceita no máximo 100 termos (galpão com 70 + estação com 35 → 400 no lote
+ * e a mesa parava; revisão 04/11).
+ */
+function comGlobais(f: QueueFilters, globais: string[]): QueueFilters {
+  if (globais.length === 0) return f;
+  return { ...f, excludeProducts: uniaoTermos(f.excludeProducts, globais) };
+}
+
+/**
+ * Filtro Mistos só vale quando o nexus já manda `produto` nos itens do lote:
+ * nexus antigo descarta `mistosProdutos` (zod strip), reserva 50 mistos
+ * quaisquer e a tela esconderia quase todos — presos nesta estação. Sem
+ * suporte, o campo salvo é ignorado como se não existisse.
+ */
+function nexusSuportaMistos(lote: Order[]): boolean {
+  return lote.some((o) => o.items.some((i) => i.produto != null));
+}
+function comGateMistos(f: QueueFilters, suporta: boolean): QueueFilters {
+  if (suporta || !f.mistosProdutos?.length) return f;
+  return { ...f, mistosProdutos: undefined };
+}
+
+/** Array vazio ESTÁVEL (referência fixa) pros memos que dependem dele. */
+const SEM_PRODUTOS: string[] = [];
+
 /** A lista que a sidebar mostra e que o "próximo" percorre. */
-function loteVisivel(lote: Order[], pulados: Set<string>, filters: QueueFilters): Order[] {
-  return ordenarLote(lote, pulados).filter((o) => passaNosFiltros(o, filters));
+function loteVisivel(lote: Order[], pulados: Set<string>, filters: QueueFilters, sizeFila = ""): Order[] {
+  return ordenarLote(lote, pulados).filter((o) => passaNosFiltros(o, filters, sizeFila));
 }
 
 /** 422 `{ error: "liberacao_necessaria", faltantes }` do complete → lista de
@@ -483,6 +535,33 @@ export function SeparacaoRunner({
   );
   const filtersRef = useRef(filters);
   filtersRef.current = filters;
+  // Exclusão GLOBAL ("falta no galpão"): mora no nexus, vale pra todas as
+  // estações. `null` = nexus antigo (sem a rota) → tela igual à de antes.
+  // `filters` (e o que vai pro localStorage) continua sendo só o LOCAL;
+  // `filtrosEfetivos` = local ∪ global é o que recorta e consulta.
+  const [exclusoesGlobais, setExclusoesGlobais] = useState<ExclusoesGlobais | null>(null);
+  const termosDoGalpao = useMemo(() => termosGlobais(exclusoesGlobais), [exclusoesGlobais]);
+  const suportaMistos = useMemo(() => nexusSuportaMistos(lote), [lote]);
+  const suportaMistosRef = useRef(suportaMistos);
+  suportaMistosRef.current = suportaMistos;
+  /**
+   * O que vai pro nexus e pros modais: o LOCAL, inteiro — `mistosProdutos`
+   * sempre vai (nexus antigo descarta sem efeito; nexus novo precisa dele JÁ
+   * no primeiro claim, quando o lote ainda está vazio e o gate abaixo nem
+   * tem como saber se há suporte).
+   */
+  const filtrosLocais = filters;
+  const locaisRef = useRef(filtrosLocais);
+  locaisRef.current = filtrosLocais;
+  /** O que recorta em memória: local (com o Filtro Mistos gateado pelo suporte) ∪ galpão. */
+  const filtrosEfetivos = useMemo(
+    () => comGlobais(comGateMistos(filters, suportaMistos), termosDoGalpao),
+    [filters, suportaMistos, termosDoGalpao],
+  );
+  const efetivosRef = useRef(filtrosEfetivos);
+  efetivosRef.current = filtrosEfetivos;
+  const globaisRef = useRef<ExclusoesGlobais | null>(null);
+  globaisRef.current = exclusoesGlobais;
   /**
    * Pedidos PULADOS: a peça ainda não chegou da dobra, então o pedido vai pro
    * FIM da ordem local e ela segue. Continua reservado pra ela (nenhuma
@@ -566,7 +645,6 @@ export function SeparacaoRunner({
       // eles ficavam fora do snapshot — irrecuperáveis (achado da revisão 04/09).
       if (opts?.preservarAtual && (puxandoRef.current || completingRef.current || imprimindoRef.current)) return;
       const atual = opts?.preservarAtual ? orderRef.current : null;
-      const filtrosDaVez = filtersRef.current;
       if (!atual) {
         setPhase("loading");
         resetLeitura();
@@ -590,7 +668,7 @@ export function SeparacaoRunner({
             : await claimLote({
                 mode: queue.mode,
                 sizes: queue.sizes,
-                filters: filtersRef.current,
+                filters: locaisRef.current,
                 canal: queue.canal,
                 ...(opts?.novaLista ? { novaLista: true } : {}),
               });
@@ -644,14 +722,21 @@ export function SeparacaoRunner({
         }
         // O "próximo" percorre a lista VISÍVEL (ordem local + filtros), nunca a
         // resposta crua: o que está oculto pelo filtro não pode cair na mesa.
-        const visiveisAgora = loteVisivel(orders, puladosRef.current, filtrosDaVez);
+        // O gate do Filtro Mistos se decide pelo lote que ACABOU de chegar (no
+        // primeiro claim o lote anterior era vazio e a ref ainda estava sem ele).
+        const filtrosAgora = comGlobais(
+          comGateMistos(locaisRef.current, nexusSuportaMistos(orders)),
+          termosGlobais(globaisRef.current),
+        );
+        efetivosRef.current = filtrosAgora;
+        const visiveisAgora = loteVisivel(orders, puladosRef.current, filtrosAgora, queue.size);
         // Pedido da mesa que o filtro acabou de esconder só fica se JÁ tem
         // leitura (a régua do "Meu lote honesto", 0.9.12). Sem leitura ele
         // cede a mesa: o servidor continua devolvendo-o (é dela, só está
         // oculto), e preservá-lo aqui o trazia de volta — relato de 02/09,
         // "ao filtrar os pedidos não somem da tela".
         const temLeitura = Array.from(progressRef.current.values()).some((pr) => pr.count > 0);
-        const mantemAtual = aindaMeu && (passaNosFiltros(aindaMeu, filtrosDaVez) || temLeitura);
+        const mantemAtual = aindaMeu && (passaNosFiltros(aindaMeu, filtrosAgora, queue.size) || temLeitura);
         const proximo =
           (inicial ? orders.find((o) => o.id === inicial.id) : undefined) ??
           (mantemAtual ? aindaMeu : undefined) ??
@@ -713,22 +798,59 @@ export function SeparacaoRunner({
     };
   }, []);
 
-  // Reposição por push: `queue.changed` (pedido novo do tiny-sync, pedido
-  // devolvido por outra estação) completa o lote sem a operadora fazer nada —
-  // é o que tira o "Procurar de novo" do caminho quando a fila estava vazia.
-  // Debounce porque o evento vem em rajada num sync; `preservarAtual` garante
-  // que o pedido em conferência não sai da mesa.
+  // UMA conexão WS pra dois eventos (cada `subscribeEvento` abre um socket):
+  // - `queue.changed` (pedido novo do tiny-sync, pedido devolvido por outra
+  //   estação) completa o lote sem a operadora fazer nada — é o que tira o
+  //   "Procurar de novo" do caminho quando a fila estava vazia. Debounce
+  //   porque o evento vem em rajada num sync; `preservarAtual` garante que o
+  //   pedido em conferência não sai da mesa.
+  // - `exclusoes-globais.changed`: outra estação (ou o Nexus web) mudou a
+  //   exclusão do galpão → refaz o GET; se mudou de verdade, avisa e reaplica
+  //   o lote (o servidor já devolveu pra fila o que saiu do recorte).
+  // O GET do mount não avisa; e o "open" do WS só conta depois dele resolver,
+  // senão a tela entrava na fila dizendo "Exclusão do galpão atualizada".
   useEffect(() => {
+    let vivo = true;
+    let carregado = false;
+    let seq = 0;
     let timer: ReturnType<typeof setTimeout> | null = null;
-    const unsubscribe = subscribeQueueChanged(() => {
-      if (timer) clearTimeout(timer);
-      timer = setTimeout(() => void puxarLote({ preservarAtual: true }), 3000);
+    const carregar = (aviso: boolean) => {
+      const minha = ++seq;
+      return getExclusoesGlobais()
+        .then((g) => {
+          // Resposta mais velha chegando depois da mais nova: descarta.
+          if (!vivo || minha !== seq) return;
+          const mudou = carregado && (globaisRef.current?.atualizadoEm ?? null) !== (g?.atualizadoEm ?? null);
+          carregado = true;
+          globaisRef.current = g;
+          setExclusoesGlobais(g);
+          if (aviso && mudou) {
+            showNotice("Exclusão do galpão atualizada.");
+            efetivosRef.current = comGlobais(locaisRef.current, termosGlobais(g));
+            void puxarLote({ preservarAtual: true });
+          }
+        })
+        .catch((e) => {
+          // Falhou no mount (cold start, timeout)? Marca como carregado mesmo
+          // assim — senão o evento WS e o "open" ficavam ignorados a sessão inteira.
+          carregado = true;
+          console.warn("exclusões globais:", e);
+        });
+    };
+    void carregar(false);
+    const unsubscribe = subscribeEventos(["queue.changed", "exclusoes-globais.changed"], (tipo) => {
+      if (tipo === "queue.changed" || tipo === "open") {
+        if (timer) clearTimeout(timer);
+        timer = setTimeout(() => void puxarLote({ preservarAtual: true }), 3000);
+      }
+      if ((tipo === "exclusoes-globais.changed" || tipo === "open") && carregado) void carregar(true);
     });
     return () => {
+      vivo = false;
       if (timer) clearTimeout(timer);
       unsubscribe();
     };
-  }, [puxarLote]);
+  }, [puxarLote, showNotice]);
 
   /**
    * Avisa o servidor que a conferência deste pedido COMEÇOU
@@ -960,7 +1082,7 @@ export function SeparacaoRunner({
     // (ele vai pro fim), nunca devolve — a lista fica até o fim do dia.
     const candidatos = candidatosDepoisDe(ord.id);
     const puladosNovos = new Set(puladosRef.current).add(ord.id);
-    const visiveisAgora = loteVisivel(loteRef.current, puladosNovos, filtersRef.current);
+    const visiveisAgora = loteVisivel(loteRef.current, puladosNovos, efetivosRef.current, queue.size);
     const proximo =
       candidatos.map((id) => visiveisAgora.find((o) => o.id === id)).find(Boolean) ??
       visiveisAgora.find((o) => o.id !== ord.id) ??
@@ -1348,6 +1470,10 @@ export function SeparacaoRunner({
     void vigiarListas();
   }, [lote.length, vigiarListas]);
   const [filtersOpen, setFiltersOpen] = useState(false);
+  /** Aba com que o Filtro Inteligente abre (o indicador da sidebar abre em "mistos"). */
+  const [filtersAba, setFiltersAba] = useState<Aba>("exclusao");
+  /** produto → imagem dos marcados no Filtro Mistos (vem do modal ao aplicar). */
+  const [mistosImagens, setMistosImagens] = useState<Record<string, string | null>>({});
   const [pickingOpen, setPickingOpen] = useState(false);
   /**
    * NOVA LISTA de mistos (Roger, CD, 15/10): a lista 1 está na coleta (~2 h)
@@ -1548,7 +1674,9 @@ export function SeparacaoRunner({
    * esta lista que a sidebar mostra, que o Picking Geral agrega e que o
    * "próximo" percorre — o servidor devolve a posse inteira (ver `loteVisivel`).
    */
-  const visiveis = loteVisivel(lote, pulados, filters);
+  // Memoizado: o runner re-renderiza a cada leitura RFID e o Filtro Mistos
+  // reconstrói peças por pedido — não é pra rodar por leitura.
+  const visiveis = useMemo(() => loteVisivel(lote, pulados, filtrosEfetivos, queue.size), [lote, pulados, filtrosEfetivos, queue.size]);
   const ocultos = lote.length - visiveis.length;
   /**
    * O pedido da MESA quando ele ficou FORA do recorte: com leitura começada,
@@ -1558,7 +1686,7 @@ export function SeparacaoRunner({
    * numa seção própria da folha de picking, nunca misturado com o recorte.
    */
   const emConferenciaForaDoFiltro =
-    order && !passaNosFiltros(order, filters) && lote.some((o) => o.id === order.id)
+    order && !passaNosFiltros(order, filtrosEfetivos, queue.size) && lote.some((o) => o.id === order.id)
       ? order
       : null;
   sequenciaRef.current = visiveis.map((o) => o.id);
@@ -1570,13 +1698,48 @@ export function SeparacaoRunner({
   // produtos. A data tem seletor próprio na barra, sempre à vista — contá-la
   // aqui fazia a mesa procurar um filtro de produto que não existia.
   const filtrosAtivos =
-    (filters.includeProducts?.length ?? 0) + (filters.excludeProducts?.length ?? 0);
+    (filtrosEfetivos.includeProducts?.length ?? 0) +
+    (filtrosEfetivos.excludeProducts?.length ?? 0) +
+    (filtrosEfetivos.mistosProdutos?.length ?? 0);
+  // Filtro Mistos ativo (só filas de mistos, nexus com suporte): liga o indicador da sidebar e o destaque no pedido.
+  const filtroMistos = queue.mode === "total" && (filtrosEfetivos.mistosProdutos?.length ?? 0) > 0;
+  const mistosAtivos = filtroMistos ? (filtrosEfetivos.mistosProdutos ?? SEM_PRODUTOS) : SEM_PRODUTOS;
+  // Miniaturas do indicador: o que o modal mandou ao aplicar; filtro salvo de
+  // ontem cai no lote. Memoizado — varrer o lote por leitura RFID pesava.
+  const imagensMistos = useMemo(() => {
+    const out: Record<string, string | null> = {};
+    if (mistosAtivos.length === 0) return out;
+    const faltam = new Map<string, string>();
+    for (const nome of mistosAtivos) {
+      const img = mistosImagens[nome] ?? null;
+      out[nome] = img;
+      if (!img) faltam.set(chaveMisto(nome), nome);
+    }
+    if (faltam.size > 0) {
+      for (const o of lote) {
+        for (const peca of pedidoMistoDoLote(o, queue.size).fora) {
+          const nome = faltam.get(chaveMisto(peca.produto));
+          if (nome && peca.imagemUrl) {
+            out[nome] = peca.imagemUrl;
+            faltam.delete(chaveMisto(peca.produto));
+          }
+        }
+        if (faltam.size === 0) break;
+      }
+    }
+    return out;
+  }, [mistosAtivos, mistosImagens, lote, queue.size]);
   // Já o estado vazio precisa explicar QUALQUER recorte, data inclusive.
   const temRecorte = filtrosAtivos > 0 || Boolean(filters.dateFrom || filters.dateTo);
 
   const aplicarFiltros = (f: QueueFilters) => {
     setFilters(f);
     filtersRef.current = f;
+    // As refs só sincronizam no próximo render; o `puxarLote` abaixo lê AGORA
+    // (`locaisRef` vai no body do claim, `efetivosRef` recorta em memória).
+    locaisRef.current = f;
+    const fe = comGlobais(comGateMistos(f, suportaMistosRef.current), termosGlobais(globaisRef.current));
+    efetivosRef.current = fe;
     // Sessão de entrega em mãos não grava: a chave seria a da fila real
     // derivada do pedido, e o recorte apareceria lá depois (filtro fantasma).
     if (!pedidoInicial) saveFilters(queue.mode, queue.size, f, queue.canal);
@@ -1585,9 +1748,9 @@ export function SeparacaoRunner({
     // leitura, o pedido FICA — jogar fora a conferência dela seria pior — e o
     // aviso explica por que ele não está mais na lista.
     const atual = orderRef.current;
-    if (atual && !passaNosFiltros(atual, f)) {
+    if (atual && !passaNosFiltros(atual, fe, queue.size)) {
       const temLeitura = Array.from(progressRef.current.values()).some((pr) => pr.count > 0);
-      const proximo = loteVisivel(loteRef.current, puladosRef.current, f)[0];
+      const proximo = loteVisivel(loteRef.current, puladosRef.current, fe, queue.size)[0];
       if (!temLeitura && proximo) {
         resetLeitura();
         setOrder(proximo);
@@ -1622,7 +1785,7 @@ export function SeparacaoRunner({
    * O lote dela é a outra metade do que ela pode recortar, e já está em
    * memória — o seletor passa a somar as duas origens.
    */
-  const datasDoLoteDela = useMemo(() => datasDoLote(lote, filters), [lote, filters]);
+  const datasDoLoteDela = useMemo(() => datasDoLote(lote, filtrosEfetivos, queue.size), [lote, filtrosEfetivos, queue.size]);
   const escolherData = (r: RecorteData) =>
     aplicarFiltros({ ...filters, dateFrom: r?.de, dateTo: r?.ate });
 
@@ -1675,7 +1838,13 @@ export function SeparacaoRunner({
             {tirandoLista ? "Puxando…" : "➕ Tirar nova lista"}
           </button>
         )}
-        <button style={topBarBtn} onClick={() => setFiltersOpen(true)}>
+        <button
+          style={topBarBtn}
+          onClick={() => {
+            setFiltersAba("exclusao");
+            setFiltersOpen(true);
+          }}
+        >
           Filtros{filtrosAtivos > 0 ? ` (${filtrosAtivos})` : ""}
         </button>
         <button style={topBarBtn} onClick={() => setHistoryOpen(true)}>
@@ -1770,13 +1939,19 @@ export function SeparacaoRunner({
           ocultos={ocultos}
           restantes={restantes}
           atualId={order?.id ?? null}
-          filters={filters}
+          filters={filtrosLocais}
           data={dataSel}
           datasDoLote={datasDoLoteDela}
           emConferencia={emConferenciaForaDoFiltro}
           onSelecionar={selecionarPedido}
           onEscolherData={escolherData}
           onPickingGeral={() => setPickingOpen(true)}
+          mistosProdutos={mistosAtivos}
+          mistosImagens={imagensMistos}
+          onAbrirFiltroMistos={() => {
+            setFiltersAba("mistos");
+            setFiltersOpen(true);
+          }}
         />
         <main style={main}>
           {phase === "loading" && <Centered>Puxando próximo pedido…</Centered>}
@@ -1802,7 +1977,13 @@ export function SeparacaoRunner({
                 <p style={emptyText}>
                   Filtro ativo (data e/ou produto) — ele recorta o que entra no lote e o que
                   aparece aqui.{" "}
-                  <button style={inlineReconnect} onClick={() => setFiltersOpen(true)}>
+                  <button
+                    style={inlineReconnect}
+                    onClick={() => {
+                      setFiltersAba("exclusao");
+                      setFiltersOpen(true);
+                    }}
+                  >
                     revisar filtros
                   </button>
                 </p>
@@ -1819,6 +2000,7 @@ export function SeparacaoRunner({
               extras={extras}
               completing={completing}
               exigirSupervisor={exigirSupervisor}
+              filtroMistos={filtroMistos}
               podePular={visiveis.length > 1}
               onComplete={() => void finish()}
               onRestart={restartLeitura}
@@ -1895,7 +2077,7 @@ export function SeparacaoRunner({
       {pickingOpen && (
         <PickingGeralModal
           queue={queue}
-          filters={filters}
+          filters={filtrosLocais}
           // Nova lista: só a lista em montagem (sem o recorte de exibição —
           // o servidor já aplicou os filtros no claim). Senão, o lote visível.
           // Entrega em mãos fica fora da folha (ela separa pessoalmente) e,
@@ -1935,7 +2117,16 @@ export function SeparacaoRunner({
           filters={filters}
           queue={queue}
           lote={lote}
-          onApply={(f) => {
+          abaInicial={filtersAba}
+          onApply={(f, extra) => {
+            if (extra) {
+              setMistosImagens(extra.imagens);
+              if (extra.exclusoesGlobais) {
+                // Já vale pro `puxarLote` do aplicarFiltros logo abaixo.
+                globaisRef.current = extra.exclusoesGlobais;
+                setExclusoesGlobais(extra.exclusoesGlobais);
+              }
+            }
             aplicarFiltros(f);
             setFiltersOpen(false);
           }}
@@ -2130,6 +2321,9 @@ function LoteSidebar({
   onSelecionar,
   onEscolherData,
   onPickingGeral,
+  mistosProdutos,
+  mistosImagens,
+  onAbrirFiltroMistos,
 }: {
   queue: { mode: SeparationMode; size: string; sizes: string[]; canal?: CanalSeparacao };
   /** JÁ na ordem local e JÁ filtrado — a sidebar não recorta nada por conta. */
@@ -2151,6 +2345,10 @@ function LoteSidebar({
   onSelecionar: (o: Order) => void;
   onEscolherData: (r: RecorteData) => void;
   onPickingGeral: () => void;
+  /** Produtos do Filtro Mistos ativo (vazio = indicador escondido). */
+  mistosProdutos: string[];
+  mistosImagens: Record<string, string | null>;
+  onAbrirFiltroMistos: () => void;
 }) {
   const [busca, setBusca] = useState("");
   const termo = busca.trim().toLowerCase();
@@ -2199,6 +2397,42 @@ function LoteSidebar({
             onEscolher={onEscolherData}
           />
         </div>
+        {mistosProdutos.length > 0 && (
+          <div style={mistosWrap}>
+            <button
+              style={mistosLig}
+              onClick={onAbrirFiltroMistos}
+              title="Abrir o Filtro Mistos"
+            >
+              <span style={mistosSw} aria-hidden="true">
+                <span style={mistosSwKnob} />
+              </span>
+              Filtro Mistos ativo
+            </button>
+            <div style={mistosProdsRow}>
+              {mistosProdutos.map((nome) =>
+                mistosImagens[nome] ? (
+                  <img
+                    key={nome}
+                    src={miniatura(mistosImagens[nome]) ?? undefined}
+                    alt=""
+                    title={nome}
+                    style={mistosMini}
+                    loading="lazy"
+                    decoding="async"
+                  />
+                ) : (
+                  <span key={nome} title={nome} style={{ ...mistosMini, display: "grid", placeItems: "center", fontSize: 12, fontWeight: 700, color: "#6b6b73" }}>
+                    ?
+                  </span>
+                ),
+              )}
+              <small style={mistosMiniTxt}>
+                {mistosProdutos.length} {mistosProdutos.length === 1 ? "produto" : "produtos"}
+              </small>
+            </div>
+          </div>
+        )}
       </div>
       <input
         style={sidebarSearch}
@@ -2685,6 +2919,7 @@ function OrderView({
   extras,
   completing,
   exigirSupervisor,
+  filtroMistos,
   podePular,
   onComplete,
   onRestart,
@@ -2699,6 +2934,8 @@ function OrderView({
   completing: boolean;
   /** Trava do nexus: `false` deixa concluir com faltantes sem PIN. */
   exigirSupervisor: boolean;
+  /** Filtro Mistos ativo: as peças de outro tamanho "saem do Filtro Mistos" (destaque âmbar). */
+  filtroMistos: boolean;
   /** Há outro pedido visível pra onde pular. */
   podePular: boolean;
   onComplete: () => void;
@@ -2787,12 +3024,12 @@ function OrderView({
 
         {offSizeItems.length > 0 && (
           <>
-            <div style={sizeBanner}>
+            <div style={filtroMistos ? sizeBannerMistos : sizeBanner}>
               ⚠{" "}
               {offSizeItems.length === 1
                 ? "1 item de tamanho diferente neste pedido"
                 : `${offSizeItems.length} itens de tamanho diferente neste pedido`}{" "}
-              — confira antes de concluir
+              — {filtroMistos ? "saem do Filtro Mistos" : "confira antes de concluir"}
             </div>
             <div style={grid}>
               {offSizeItems.map((it) => (
@@ -2803,6 +3040,7 @@ function OrderView({
                   cardW={cardW}
                   excedido={excedidos.has(it.id)}
                   offSize
+                  destaque={filtroMistos}
                 />
               ))}
             </div>
@@ -2875,10 +3113,13 @@ function ItemCard({
   offSize,
   cardW,
   excedido,
+  destaque,
 }: {
   item: OrderItem;
   count: number;
   offSize?: boolean;
+  /** Peça do Filtro Mistos: borda âmbar + faixa "FILTRO MISTOS" no pé da imagem. */
+  destaque?: boolean;
   /** Largura calculada pelo fit — abaixo de 200px o corpo compacta. */
   cardW: number;
   /** Unidade sobressalente lida deste produto — card fica vermelho. */
@@ -2892,6 +3133,7 @@ function ItemCard({
       style={{
         ...card,
         ...(offSize ? cardOffSize : null),
+        ...(destaque ? cardMistos : null),
         ...(ok ? cardDone : null),
         ...(excedido ? cardExcedido : null),
       }}
@@ -2910,6 +3152,7 @@ function ItemCard({
         )}
         <span style={item.quantidade > 1 ? qtyBadgeMulti : qtyBadge}>x{item.quantidade}</span>
         <span style={checkRing(ok)}>{ok ? "✓" : excedido ? "!" : ""}</span>
+        {destaque && <span style={faixaMistos}>FILTRO MISTOS</span>}
       </div>
       <div style={dense ? cardBodyDense : cardBody}>
         <span style={dense ? cardNameDense : cardName}>
@@ -2922,7 +3165,7 @@ function ItemCard({
               {excedido ? `${count}/${item.quantidade}!` : `${Math.min(count, item.quantidade)}/${item.quantidade}`}
             </span>
             {size && (
-              <span style={offSize ? sizeChipOff : sizeChip}>
+              <span style={destaque ? sizeChipMistos : offSize ? sizeChipOff : sizeChip}>
                 {offSize ? `↔ ${size}` : size}
               </span>
             )}
@@ -3721,6 +3964,85 @@ const cardOffSize: CSSProperties = {
   border: "1px solid var(--info-border)",
 };
 
+/** Peça de outro tamanho que o Filtro Mistos traz: âmbar no lugar do azul. */
+const cardMistos: CSSProperties = {
+  border: "1px solid var(--warning-dot)",
+  boxShadow: "0 0 0 1px var(--warning-dot)",
+};
+
+const faixaMistos: CSSProperties = {
+  position: "absolute",
+  left: 0,
+  right: 0,
+  bottom: 0,
+  padding: "3px 0",
+  background: "var(--warning-dot)",
+  color: "#1a1405",
+  fontSize: 11,
+  fontWeight: 800,
+  letterSpacing: "0.12em",
+  textAlign: "center",
+};
+
+/** Indicador "Filtro Mistos ativo" da sidebar (switch ligado + miniaturas). */
+const mistosWrap: CSSProperties = { display: "flex", flexDirection: "column", gap: 6, marginTop: 8 };
+
+const mistosLig: CSSProperties = {
+  width: "100%",
+  height: 44,
+  display: "flex",
+  alignItems: "center",
+  gap: 10,
+  padding: "0 12px",
+  boxSizing: "border-box",
+  background: "var(--warning-bg)",
+  border: "1px solid var(--warning-border)",
+  borderRadius: 10,
+  color: "var(--warning-text)",
+  fontSize: 13,
+  fontWeight: 800,
+  cursor: "pointer",
+  textAlign: "left",
+};
+
+const mistosSw: CSSProperties = {
+  position: "relative",
+  width: 34,
+  height: 20,
+  borderRadius: 999,
+  background: "var(--warning-dot)",
+  flexShrink: 0,
+};
+
+const mistosSwKnob: CSSProperties = {
+  position: "absolute",
+  top: 2,
+  right: 2,
+  width: 16,
+  height: 16,
+  borderRadius: "50%",
+  background: "#1a1405",
+};
+
+const mistosProdsRow: CSSProperties = { display: "flex", alignItems: "center", flexWrap: "wrap", gap: 5 };
+
+const mistosMini: CSSProperties = {
+  width: 30,
+  height: 30,
+  borderRadius: 5,
+  objectFit: "cover",
+  background: "#fff",
+  outline: "2px solid var(--warning-dot)",
+  outlineOffset: -1,
+};
+
+const mistosMiniTxt: CSSProperties = {
+  fontFamily: "var(--font-mono)",
+  fontSize: 11,
+  color: "var(--warning-text)",
+  marginLeft: 4,
+};
+
 const cardImageWrap: CSSProperties = {
   position: "relative",
   aspectRatio: "1",
@@ -3860,6 +4182,20 @@ const sizeBanner: CSSProperties = {
   fontSize: 14,
   fontWeight: 700,
   textAlign: "center",
+};
+
+const sizeChipMistos: CSSProperties = {
+  ...sizeChip,
+  background: "var(--warning-bg)",
+  color: "var(--warning-text)",
+  border: "1px solid var(--warning-border)",
+};
+
+const sizeBannerMistos: CSSProperties = {
+  ...sizeBanner,
+  background: "var(--warning-bg)",
+  border: "1px solid var(--warning-border)",
+  color: "var(--warning-text)",
 };
 
 const actionsRow: CSSProperties = {
