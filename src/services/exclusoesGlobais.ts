@@ -14,6 +14,7 @@ import { ApiError, apiRequest } from "../lib/api";
 export type ExclusaoGlobal = {
   id: string;
   termo: string;
+  /** Nome de quem adicionou (`criadoPorNome` do nexus); cai no `sub` se o cadastro não tem nome. */
   criadoPor: string | null;
   criadoEm: string | null;
 };
@@ -32,7 +33,12 @@ function normalizar(raw: unknown): ExclusoesGlobais {
       .map<ExclusaoGlobal>((t) => ({
         id: String(t.id ?? t.termo),
         termo: String(t.termo).trim(),
-        criadoPor: typeof t.criadoPor === "string" ? t.criadoPor : null,
+        criadoPor:
+          typeof t.criadoPorNome === "string" && t.criadoPorNome.trim()
+            ? t.criadoPorNome.trim()
+            : typeof t.criadoPor === "string"
+              ? t.criadoPor
+              : null,
         criadoEm: typeof t.criadoEm === "string" ? t.criadoEm : null,
       }))
       .filter((t) => t.termo.length > 0),
