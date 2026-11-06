@@ -541,6 +541,11 @@ export type UnicosResponse = {
   filaUnicosAtiva?: boolean;
   /** Ausente/null = API sem order bump (esconde o botão). */
   orderBump?: OrderBumpConfig | null;
+  /**
+   * Dias (YYYY-MM-DD, America/Sao_Paulo) com pedido na fila, ASC, SEMPRE sem
+   * o filtro de `dia` — monta o select (06/11, Victor). Ausente = nexus antigo.
+   */
+  dias?: { dia: string; pedidos: number }[];
 };
 
 export type UnicoPedido = {
@@ -590,8 +595,10 @@ export const UNICOS_ERR = {
   SO_ORDER_BUMP_LIDO: "so_order_bump_lido",
 } as const;
 
-export function getUnicos(): Promise<UnicosResponse> {
+export function getUnicos(dia?: string | null): Promise<UnicosResponse> {
   if (isExpedicaoSimulacao()) return Promise.resolve(mockUnicos());
+  // `dia` só vai quando definido (NEXUS_UNICOS_DIA.md); nexus antigo ignora.
+  if (dia) return apiRequest<UnicosResponse>("/expedicao/unicos", { query: { dia } });
   return apiRequest<UnicosResponse>("/expedicao/unicos");
 }
 
@@ -613,11 +620,11 @@ export async function buscarProdutosOrderBump(busca: string, limite = 20): Promi
   return r.produtos ?? [];
 }
 
-export async function getUnicosPedidos(estampa: string, tamanho: string, cor?: string | null): Promise<UnicoPedido[]> {
+export async function getUnicosPedidos(estampa: string, tamanho: string, cor?: string | null, dia?: string | null): Promise<UnicoPedido[]> {
   if (isExpedicaoSimulacao()) return mockUnicosPedidos(estampa, tamanho, cor);
   const r = await apiRequest<{ pedidos?: UnicoPedido[] }>("/expedicao/unicos/pedidos", {
     // undefined = API velha (omite → todas as cores); null = grupo sem cor (`cor=` vazio → só os sem cor).
-    query: { estampa, tamanho, ...(cor === undefined ? {} : { cor: cor ?? "" }) },
+    query: { estampa, tamanho, ...(cor === undefined ? {} : { cor: cor ?? "" }), ...(dia ? { dia } : {}) },
   });
   return r.pedidos ?? [];
 }

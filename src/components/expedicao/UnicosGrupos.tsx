@@ -8,6 +8,7 @@ import { miniaturaLeve } from "../../lib/imagens";
 import {
   agruparPorEstampa,
   filtrarGrupos,
+  rotuloDia,
   rotuloOrderBump,
   rotuloTipos,
   unicosRotaAusente,
@@ -24,12 +25,17 @@ export function UnicosGrupos({
   onEscolher,
   onIndisponivel,
   estampaInicial = null,
+  dia = null,
+  onDia,
 }: {
   onEscolher: (g: GrupoEscolhido) => void;
   /** API ainda sem a fila (404): a tela desabilita o modo. */
   onIndisponivel: () => void;
   /** Chave (`chaveEstampa`: estampa + cor) cujo painel de tamanhos abre direto (a fila do tamanho acabou). */
   estampaInicial?: string | null;
+  /** Dia (YYYY-MM-DD) filtrado, controlado pelo pai pra sobreviver a grade ↔ lateral. */
+  dia?: string | null;
+  onDia?: (dia: string | null) => void;
 }) {
   const [dados, setDados] = useState<UnicosResponse | null>(null);
   const [erro, setErro] = useState<string | null>(null);
@@ -55,7 +61,7 @@ export function UnicosGrupos({
   const carregar = useCallback(async () => {
     setCarregando(true);
     try {
-      const r = await getUnicos();
+      const r = await getUnicos(dia);
       setDados(r);
       setErro(null);
     } catch (e) {
@@ -64,7 +70,7 @@ export function UnicosGrupos({
     } finally {
       setCarregando(false);
     }
-  }, [onIndisponivel]);
+  }, [onIndisponivel, dia]);
 
   useEffect(() => {
     void carregar();
@@ -97,6 +103,9 @@ export function UnicosGrupos({
           style={buscaInput}
           aria-label="Buscar fila de únicos"
         />
+        {onDia && (
+          <SeletorDia dias={dados?.dias} dia={dia} onDia={onDia} />
+        )}
         <span style={total}>{dados ? `${dados.totalPedidos ?? 0} pedidos` : ""}</span>
         {dados?.orderBump && podeConfigurarBump && (
           <button type="button" style={bumpBtn} onClick={() => setBumpAberto(true)} title="Configurar order bump">
@@ -135,6 +144,28 @@ export function UnicosGrupos({
         </div>
       )}
     </div>
+  );
+}
+
+/**
+ * Filtro por dia de emissão (Victor, 06/11/2026). Nexus novo manda `dias`
+ * (com contagem): select. Nexus antigo não manda: `input date` simples e a
+ * lateral filtra localmente.
+ */
+function SeletorDia({ dias, dia, onDia }: { dias?: { dia: string; pedidos: number }[]; dia: string | null; onDia: (d: string | null) => void }) {
+  if (!dias) {
+    return <input type="date" value={dia ?? ""} onChange={(e) => onDia(e.target.value || null)} style={diaInput} aria-label="Filtrar por dia de emissão" title="Filtrar por dia de emissão" />;
+  }
+  const lista = dia && !dias.some((d) => d.dia === dia) ? [...dias, { dia, pedidos: 0 }] : dias;
+  return (
+    <select value={dia ?? ""} onChange={(e) => onDia(e.target.value || null)} style={diaInput} aria-label="Filtrar por dia de emissão" title="Filtrar por dia de emissão">
+      <option value="">Todos os dias</option>
+      {lista.map((d) => (
+        <option key={d.dia} value={d.dia}>
+          {rotuloDia(d.dia)} · {d.pedidos}
+        </option>
+      ))}
+    </select>
   );
 }
 
@@ -264,6 +295,7 @@ function EscolherTamanho({
 const wrap: CSSProperties = { flex: 1, minHeight: 0, display: "flex", flexDirection: "column", gap: 12, padding: "4px 0" };
 const topo: CSSProperties = { display: "flex", alignItems: "center", gap: 12 };
 const buscaInput: CSSProperties = { flex: 1, padding: "10px 14px", background: "var(--bg-input)", border: "1px solid var(--border)", borderRadius: 10, color: "var(--text)", fontSize: 15 };
+const diaInput: CSSProperties = { padding: "9px 10px", background: "var(--bg-input)", border: "1px solid var(--border)", borderRadius: 10, color: "var(--text)", fontSize: 14, fontWeight: 700 };
 const total: CSSProperties = { color: "var(--text-secondary)", fontSize: 13, fontWeight: 700 };
 const atualizarBtn: CSSProperties = { padding: "9px 14px", background: "var(--bg-card)", border: "1px solid var(--border)", borderRadius: 10, color: "var(--text)", fontWeight: 700, cursor: "pointer" };
 const bumpBtn: CSSProperties = { padding: "9px 14px", background: "var(--bg-card)", border: "1px solid var(--border)", borderRadius: 10, color: "var(--text)", fontWeight: 700, cursor: "pointer", maxWidth: 280, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" };

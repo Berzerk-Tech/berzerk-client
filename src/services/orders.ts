@@ -458,6 +458,13 @@ export function claimLote(params: {
    * aberto. Nexus antigo ignora o campo: volta sem `novos` e sem pedido novo.
    */
   novaLista?: boolean;
+  /**
+   * Teto de pedidos do lote (06/11, Nicole via Roger: 200 era grande demais),
+   * só nos mistos. O nexus usa `min(quantidade, config)` — a configuração dele
+   * continua sendo o máximo. Sem o campo, vale a configuração. Nexus antigo
+   * ignora.
+   */
+  quantidade?: number;
   /** Canal da fila (só enviado quando `mercado_livre`). */
   canal?: CanalSeparacao;
 }): Promise<LoteResponse> {
@@ -465,9 +472,11 @@ export function claimLote(params: {
     apiRequest<LoteResponse>("/separacao/lote", {
       method: "POST",
       body: {
-        // Sem `quantidade`: o alvo é a configuração do nexus, por modo.
+        // Sem `quantidade`: o alvo é a configuração do nexus, por modo. Com
+        // ela (só mistos) vai como TETO opcional.
         mode,
         sizes: params.sizes,
+        ...(params.quantidade !== undefined ? { quantidade: params.quantidade } : {}),
         ...filtersBody(params.filters),
         ...(params.novaLista ? { novaLista: true } : {}),
         ...canalBody(params.canal),

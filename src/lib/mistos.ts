@@ -268,6 +268,30 @@ export type PickingMisto = {
 };
 
 /** Tamanhos da grade do picking: P–XG sem o da fila. */
+/**
+ * Ordem por produto com o Filtro Mistos ativo (Nicole via Roger, 06/11/2026):
+ * a lista alternava produtos (Chinigami, Punk Pink, Chinigami…) e ela quer
+ * "matar" um produto de cada vez — todos os pedidos cujo picking é Chinigami
+ * em sequência, depois todos de Punk Pink.
+ *
+ * Chave de cada pedido = produto da PRIMEIRA peça "fora" (`chaveMisto`).
+ * Grupos na ordem de primeira aparição na entrada; pedido sem peça fora
+ * (chave "") vai pro FIM. Estável (mantém a ordem relativa dentro do grupo) e
+ * não muta a entrada.
+ */
+export function ordenarPorProdutoFora(pedidos: Order[], sizeFila: string): Order[] {
+  const grupos = new Map<string, Order[]>();
+  for (const o of pedidos) {
+    const chave = chaveMisto(pedidoMistoDoLote(o, sizeFila).fora[0]?.produto ?? "");
+    const g = grupos.get(chave);
+    if (g) g.push(o);
+    else grupos.set(chave, [o]);
+  }
+  const sem = grupos.get("") ?? [];
+  grupos.delete("");
+  return [...[...grupos.values()].flat(), ...sem];
+}
+
 export function tamanhosForaDaFila(sizeFila: string): string[] {
   const s = sizeFila.trim().toUpperCase();
   return TAMANHOS_MISTOS.filter((t) => t !== s);

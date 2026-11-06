@@ -7,6 +7,7 @@ import { describe, expect, it } from "vitest";
 import type { Order, QueueProduct } from "../src/services/orders";
 import {
   fechamCom,
+  ordenarPorProdutoFora,
   passaNoFiltroMistos,
   pedidosMistos,
   pedidosMistosDaFila,
@@ -186,5 +187,24 @@ describe("pickingMistos", () => {
     expect(pick[0].pedidos).toBe(3);
     expect(totalFora(peds)).toBe(4);
     expect(totalDele(peds)).toBe(3);
+  });
+});
+
+describe("ordenarPorProdutoFora (Nicole via Roger, 06/11/2026)", () => {
+  // Pedido do M com uma peça "fora" (G) do produto dado; sem produto = só peça do M.
+  const com = (id: string, fora?: string, extra: Partial<Order> = {}): Order => ({
+    ...pedido(id, "M", [{ nome: "Base - M", tamanho: "M" }, ...(fora ? [{ nome: `${fora} - G`, tamanho: "G" }] : [])]),
+    ...extra,
+  });
+  const ids = (os: Order[]) => os.map((o) => o.id);
+
+  it("agrupa por produto fora, na ordem de primeira aparição, e manda sem-fora pro fim", () => {
+    const entrada = [com("A", "X"), com("B", "Y"), com("C", "X"), com("D")];
+    expect(ids(ordenarPorProdutoFora(entrada, "M"))).toEqual(["A", "C", "B", "D"]);
+    expect(ids(entrada)).toEqual(["A", "B", "C", "D"]); // não muta
+  });
+  it("é estável dentro do grupo e ignora caixa na chave", () => {
+    const entrada = [com("1", "Zeus"), com("2", "Leg"), com("3", "zeus"), com("4", "Zeus")];
+    expect(ids(ordenarPorProdutoFora(entrada, "M"))).toEqual(["1", "3", "4", "2"]);
   });
 });

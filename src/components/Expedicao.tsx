@@ -291,6 +291,8 @@ export function Expedicao({ onBack }: Props) {
   grupoRef.current = grupoUnicos;
   // Estampa a reabrir no painel de tamanhos quando a fila do tamanho acaba.
   const [estampaInicialUnicos, setEstampaInicialUnicos] = useState<string | null>(null);
+  // Filtro por dia de emissão (Victor, 06/11/2026): vive aqui pra sobreviver a grade ↔ lateral.
+  const [diaUnicos, setDiaUnicos] = useState<string | null>(null);
   const [unicosIndisponivel, setUnicosIndisponivel] = useState(false);
   // Order bump (Únicos): o pedido tinha item de bump lido junto com a peça principal.
   // O limite de EPCs (UNICOS_MAX_TAGS) já comporta principal + bump; o servidor decide
@@ -1659,6 +1661,7 @@ export function Expedicao({ onBack }: Props) {
               versao={versaoUnicos}
               selecionadoId={pedidoSelecionadoUnicos}
               ocultarIds={session.map((s) => s.order.id)}
+              dia={diaUnicos}
               onSelecionar={(id) => {
                 pedidoSelecionadoRef.current = id;
                 setPedidoSelecionadoUnicos(id);
@@ -1680,7 +1683,7 @@ export function Expedicao({ onBack }: Props) {
 
         <main style={stage}>
           {unicosAtivo && !grupoUnicos ? (
-            <UnicosGrupos onEscolher={escolherGrupo} onIndisponivel={unicosSemApi} estampaInicial={estampaInicialUnicos} />
+            <UnicosGrupos onEscolher={escolherGrupo} onIndisponivel={unicosSemApi} estampaInicial={estampaInicialUnicos} dia={diaUnicos} onDia={setDiaUnicos} />
           ) : (
           <StageCenter
             flow={flow}
