@@ -4,7 +4,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import { miniaturaLeve } from "../../lib/imagens";
-import { rotuloGrupo, rotuloTipo, selecaoAposRecarga, tipoBaseDoProduto, type GrupoEscolhido } from "../../lib/unicosExpedicao";
+import { filtrarPorDia, rotuloDia, rotuloGrupo, rotuloTipo, selecaoAposRecarga, tipoBaseDoProduto, type GrupoEscolhido } from "../../lib/unicosExpedicao";
 import { getUnicosPedidos, type UnicoPedido } from "../../services/expedicao";
 
 const POLL_MS = 30000;
@@ -20,6 +20,7 @@ export function UnicosFila({
   selecionadoId,
   onSelecionar,
   ocultarIds,
+  dia = null,
 }: {
   grupo: GrupoEscolhido;
   versao: number;
@@ -36,6 +37,8 @@ export function UnicosFila({
   onSelecionar?: (id: string | null) => void;
   /** Pedidos já expedidos nesta sessão: saem da lista na hora, sem esperar o GET. */
   ocultarIds?: string[];
+  /** Dia (YYYY-MM-DD) filtrado na grade (Victor, 06/11/2026); null = todos. */
+  dia?: string | null;
 }) {
   const [pedidosBrutos, setPedidos] = useState<UnicoPedido[] | null>(null);
   const ocultos = ocultarIds && ocultarIds.length > 0 ? new Set(ocultarIds) : null;
@@ -76,7 +79,8 @@ export function UnicosFila({
 
   const carregar = useCallback(async () => {
     try {
-      const lista = await getUnicosPedidos(grupo.estampa, grupo.tamanho, grupo.cor);
+      // Filtra também aqui: nexus antigo ignora `dia`; com o novo é idempotente.
+      const lista = filtrarPorDia(dia ? await getUnicosPedidos(grupo.estampa, grupo.tamanho, grupo.cor, dia) : await getUnicosPedidos(grupo.estampa, grupo.tamanho, grupo.cor), dia);
       setPedidos(lista);
       const visiveis = lista.filter((p) => !ocultosRef.current.has(p.id));
       const nova = selecaoAposRecarga(selRef.current, visiveis);
@@ -88,7 +92,7 @@ export function UnicosFila({
     } catch {
       setErro(true);
     }
-  }, [grupo.estampa, grupo.tamanho, grupo.cor]);
+  }, [grupo.estampa, grupo.tamanho, grupo.cor, dia]);
 
   useEffect(() => {
     void carregar();
@@ -110,6 +114,7 @@ export function UnicosFila({
     <div style={wrap}>
       <div style={cabecalho}>
         <div style={titulo}>{tituloGrupo}</div>
+        {dia && <div style={sub}>📅 {rotuloDia(dia)}</div>}
         <div style={sub}>
           {pedidos ? `${pedidos.length} pedido${pedidos.length === 1 ? "" : "s"} na fila${comBump > 0 ? ` · ${comBump} com bump` : ""}` : "Carregando…"}
           {erro && " · não consegui atualizar"}

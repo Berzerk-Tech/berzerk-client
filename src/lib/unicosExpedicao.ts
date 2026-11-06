@@ -392,3 +392,32 @@ export function agruparPorEstampa(grupos: UnicoGrupo[]): EstampaAgrupada[] {
   }
   return lista;
 }
+
+const FMT_DIA = new Intl.DateTimeFormat("en-CA", { timeZone: "America/Sao_Paulo", year: "numeric", month: "2-digit", day: "2-digit" });
+
+/**
+ * Dia (YYYY-MM-DD) de um instante ISO no fuso America/Sao_Paulo — a MESMA
+ * regra do nexus no filtro `dia` (NEXUS_UNICOS_DIA.md). Null se vazio/inválido.
+ */
+export function diaDe(iso: string | null | undefined): string | null {
+  if (!iso) return null;
+  const t = Date.parse(iso);
+  if (!Number.isFinite(t)) return null;
+  return FMT_DIA.format(new Date(t));
+}
+
+/**
+ * Filtro por dia de emissão (Victor, 06/11/2026). `dia` vazio devolve tudo.
+ * Cobre o nexus antigo, que ignora o parâmetro; com o novo é idempotente.
+ * Pedido sem `emitidoEm` não dá pra provar que é do dia: fica de fora.
+ */
+export function filtrarPorDia<T extends { emitidoEm?: string | null }>(pedidos: T[], dia: string | null | undefined): T[] {
+  if (!dia) return pedidos;
+  return pedidos.filter((p) => diaDe(p.emitidoEm) === dia);
+}
+
+/** "2026-11-04" → "04/11" (só formatação, sem fuso). */
+export function rotuloDia(dia: string): string {
+  const [, m, d] = dia.split("-");
+  return m && d ? `${d}/${m}` : dia;
+}

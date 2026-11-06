@@ -44,7 +44,7 @@ import { getSessaoSync } from "../lib/cognito";
 import { SeparacaoHistoryModal } from "./SeparacaoHistoryModal";
 import { ListasImpressasModal } from "./ListasImpressasModal";
 import { PickingFiltersModal, emptyFilters, loadFilters, saveFilters, type Aba } from "./PickingFiltersModal";
-import { chaveMisto, passaNoFiltroMistos, pedidoMistoDoLote } from "../lib/mistos";
+import { chaveMisto, ordenarPorProdutoFora, passaNoFiltroMistos, pedidoMistoDoLote } from "../lib/mistos";
 import { ApiError } from "../lib/api";
 import {
   avisoAwbColetado,
@@ -269,9 +269,11 @@ function ordenarDatas(porDia: Map<string, number>): { date: string; count: numbe
 /** Marcador interno: `claimLote` com `novaLista` voltou sem `novos` (nexus sem a feature). */
 const NEXUS_SEM_NOVA_LISTA = "nexus_sem_nova_lista";
 
-function ordenarLote(lote: Order[], pulados: Set<string>): Order[] {
+function ordenarLote(lote: Order[], pulados: Set<string>, porProduto?: string): Order[] {
   // Entrega em mãos vem primeiro: ela veio separar ESSE pedido, antes da lista.
-  const base = ordenarPorLista(lote);
+  // Com Filtro Mistos (`porProduto` = tamanho da fila), agrupa por produto
+  // dentro de cada lista (06/11, Nicole via Roger: "matar" um produto por vez).
+  const base = porProduto ? ordenarPorProdutoNaLista(ordenarPorLista(lote), porProduto) : ordenarPorLista(lote);
   const porLista = base.some((o) => o.entregaEmMaos)
     ? [...base.filter((o) => o.entregaEmMaos), ...base.filter((o) => !o.entregaEmMaos)]
     : base;
@@ -293,6 +295,25 @@ function ordenarPorLista(lote: Order[]): Order[] {
     .map((o, i) => ({ o, i, k: chave(o) }))
     .sort((a, b) => a.k - b.k || a.i - b.i)
     .map((x) => x.o);
+}
+
+/**
+ * Filtro Mistos ativo: dentro de CADA lista (partição `listaId ?? listaEm`,
+ * sem lista = última partição) agrupa os pedidos pelo produto da peça "fora".
+ * Não cruza listas: a ordem entre partições é a de `ordenarPorLista`.
+ */
+function ordenarPorProdutoNaLista(lote: Order[], sizeFila: string): Order[] {
+  const particoes = new Map<string, Order[]>();
+  for (const o of lote) {
+    const k = o.listaEm ? (o.listaId ?? o.listaEm) : "";
+    const arr = particoes.get(k);
+    if (arr) arr.push(o);
+    else particoes.set(k, [o]);
+  }
+  if (particoes.size === 1) return ordenarPorProdutoFora(lote, sizeFila);
+  // `lote` já vem por lista (antiga primeiro, sem lista no fim): a ordem de
+  // primeira aparição das partições preserva isso.
+  return [...particoes.values()].flatMap((g) => ordenarPorProdutoFora(g, sizeFila));
 }
 
 /**
@@ -365,7 +386,10 @@ const SEM_PRODUTOS: string[] = [];
 
 /** A lista que a sidebar mostra e que o "próximo" percorre. */
 function loteVisivel(lote: Order[], pulados: Set<string>, filters: QueueFilters, sizeFila = ""): Order[] {
-  return ordenarLote(lote, pulados).filter((o) => passaNosFiltros(o, filters, sizeFila));
+  // `filters` já passou por `comGateMistos` em todos os chamadores; o próprio
+  // `passaNosFiltros` só aplica `mistosProdutos` em pedido de modo "total".
+  const porProduto = filters.mistosProdutos?.length && lote.some((o) => o.separationMode === "total") ? sizeFila : undefined;
+  return ordenarLote(lote, pulados, porProduto).filter((o) => passaNosFiltros(o, filters, sizeFila));
 }
 
 /** 422 `{ error: "liberacao_necessaria", faltantes }` do complete → lista de
@@ -544,6 +568,17 @@ export function SeparacaoRunner({
   );
   const filtersRef = useRef(filters);
   filtersRef.current = filters;
+  // Quantidade do lote de mistos (06/11, Nicole via Roger): teto por estação;
+  // null = a configuração do nexus manda. Ref pro `puxarLote` não mudar de
+  // identidade (o efeito de entrada na fila re-puxaria o lote).
+  const [quantidadeMistos, setQuantidadeMistosState] = useState<number | null>(() => carregarQuantidadeMistos());
+  const quantidadeMistosRef = useRef(quantidadeMistos);
+  quantidadeMistosRef.current = quantidadeMistos;
+  const setQuantidadeMistos = useCallback((n: number | null) => {
+    quantidadeMistosRef.current = n;
+    setQuantidadeMistosState(n);
+    salvarQuantidadeMistos(n);
+  }, []);
   // Exclusão GLOBAL ("falta no galpão"): mora no nexus, vale pra todas as
   // estações. `null` = nexus antigo (sem a rota) → tela igual à de antes.
   // `filters` (e o que vai pro localStorage) continua sendo só o LOCAL;
@@ -680,6 +715,10 @@ export function SeparacaoRunner({
                 filters: locaisRef.current,
                 canal: queue.canal,
                 ...(opts?.novaLista ? { novaLista: true } : {}),
+                // Teto do lote só nos mistos; nos puros nunca vai.
+                ...(queue.mode === "total" && quantidadeMistosRef.current !== null
+                  ? { quantidade: quantidadeMistosRef.current }
+                  : {}),
               });
         const { fila, novos } = resposta;
         let orders = resposta.orders;
@@ -1872,6 +1911,9 @@ export function SeparacaoRunner({
         <button style={topBarBtn} onClick={() => setPickingOpen(true)}>
           🖨 Picking Geral
         </button>
+        {queue.mode === "total" && !pedidoInicial && (
+          <SeletorQuantidadeMistos valor={quantidadeMistos} onChange={setQuantidadeMistos} />
+        )}
         {queue.mode === "total" && comLista.length > 0 && !pedidoInicial && (
           <button
             style={topBarBtn}
@@ -2002,6 +2044,7 @@ export function SeparacaoRunner({
           {phase === "error" && (
             <Centered>
               <div style={errorBox}>{error}</div>
+              {queue.mode === "total" && <SeletorQuantidadeMistos valor={quantidadeMistos} onChange={setQuantidadeMistos} />}
               <button style={primaryBtn} onClick={() => void puxarLote()}>
                 Tentar de novo
               </button>
@@ -2032,6 +2075,7 @@ export function SeparacaoRunner({
                   </button>
                 </p>
               )}
+              {queue.mode === "total" && <SeletorQuantidadeMistos valor={quantidadeMistos} onChange={setQuantidadeMistos} />}
               <button style={primaryBtn} onClick={() => void puxarLote()}>
                 Procurar de novo
               </button>
@@ -4335,6 +4379,52 @@ const mesaDot: CSSProperties = { width: 8, height: 8, borderRadius: "50%" };
 const mesaText: CSSProperties = { fontSize: 12, fontWeight: 600 };
 
 // --- Novidades v0.5: sobressalentes, console de leitura, filtros, histórico ---
+
+const QUANTIDADES_MISTOS = [25, 50, 100, 150, 200];
+const QUANTIDADE_MISTOS_KEY = "separacao.quantidadeMistos";
+
+function carregarQuantidadeMistos(): number | null {
+  try {
+    const n = Number(localStorage.getItem(QUANTIDADE_MISTOS_KEY));
+    return QUANTIDADES_MISTOS.includes(n) ? n : null;
+  } catch {
+    return null;
+  }
+}
+
+function salvarQuantidadeMistos(n: number | null): void {
+  try {
+    if (n === null) localStorage.removeItem(QUANTIDADE_MISTOS_KEY);
+    else localStorage.setItem(QUANTIDADE_MISTOS_KEY, String(n));
+  } catch {
+    /* sem storage: vale só nesta sessão */
+  }
+}
+
+/** Trocar não puxa nada: só vale no próximo puxar / "Tirar nova lista". */
+function SeletorQuantidadeMistos({ valor, onChange }: { valor: number | null; onChange: (n: number | null) => void }) {
+  return (
+    <label
+      style={{ ...topBarBtn, display: "inline-flex", alignItems: "center", gap: 6, cursor: "default" }}
+      title="Quantos pedidos cada lista de mistos puxa (o máximo é a configuração do Nexus)"
+    >
+      Lote:
+      <select
+        aria-label="Quantidade de pedidos do lote de mistos"
+        value={valor === null ? "" : String(valor)}
+        onChange={(e) => onChange(e.target.value === "" ? null : Number(e.target.value))}
+        style={{ background: "transparent", color: "inherit", border: "none", font: "inherit", cursor: "pointer" }}
+      >
+        <option value="">Padrão</option>
+        {QUANTIDADES_MISTOS.map((n) => (
+          <option key={n} value={n}>
+            {n}
+          </option>
+        ))}
+      </select>
+    </label>
+  );
+}
 
 const topBarBtn: CSSProperties = {
   padding: "8px 14px",
