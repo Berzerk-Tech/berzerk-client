@@ -171,6 +171,13 @@ const RESOLVE_DEBOUNCE_MS = 250;
 // Peças na mesa sem pedido resolvido (separação atrasada, rede, etc.): tenta de
 // novo sozinho — o operador não tem mouse/teclado, "Nova leitura" é exceção.
 const RESOLVE_RETRY_MS = 4000;
+// As 2 primeiras tentativas depois de um match vazio são rápidas: na mesa o
+// epc-match responde em 20–230 ms, então a demora que a operadora sentia (06/11)
+// era esperar 4 s pra re-perguntar enquanto o leitor ainda juntava as tags do
+// pacote. Só do 3º retry em diante volta pro ritmo normal (pedido que ainda não
+// chegou ao nexus não precisa de martelo).
+const RESOLVE_RETRY_CURTO_MS = 1200;
+const RESOLVE_RETRIES_CURTOS = 2;
 // Sem rastreio da J&T: tenta a cada RESOLVE_RETRY_MS até este teto (~1 min) e
 // então avisa que o pedido está SEM etiqueta no sistema — antes girava pra
 // sempre em silêncio (23/09: 57 pedidos do lote de 16/09 sem etiqueta do n8n,
@@ -396,6 +403,14 @@ export function Expedicao({ onBack }: Props) {
   // Assinatura do último conjunto que FALHOU no match — os retries desse mesmo
   // conjunto são silenciosos (sem beep/aviso repetido).
   const lastFailSigRef = useRef<string>("");
+  // Quantas vezes o MESMO conjunto já falhou em seguida (decide o ritmo do retry).
+  const failTentativasRef = useRef(0);
+  // EPCs que geraram a tela "já foi expedido → Reimprimir". Enquanto só eles
+  // estiverem na mesa (ou a mesa esvaziar), a tela FICA — antes ela sumia em
+  // até 4 s, no retry ou quando o pacote saía do campo do leitor, e a
+  // operadora não alcançava o botão (06/11). Sai com Reimprimir, "Nova
+  // leitura" ou uma tag diferente na mesa.
+  const jaExpedidoEpcsRef = useRef<Set<string>>(new Set());
   // A última falha do Únicos foi definitiva (não adianta repetir o POST pro mesmo conjunto da mesa).
   const unicoFalhaDefinitivaRef = useRef(false);
   const resolveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -451,6 +466,8 @@ export function Expedicao({ onBack }: Props) {
     lastPresentSigRef.current = "";
     lastSigRef.current = "";
     lastFailSigRef.current = "";
+    failTentativasRef.current = 0;
+    jaExpedidoEpcsRef.current = new Set();
     setConf(null);
     setReadLog([]);
     setBufferSize(0);
@@ -566,14 +583,21 @@ export function Expedicao({ onBack }: Props) {
     // vai pra impressão, que já ignora o leitor).
     if (overrideOpenRef.current) return;
     const epcs = Array.from(mesaRef.current).filter((e) => !processedRef.current.has(e));
-    const k = flowRef.current.kind;
+    const f0 = flowRef.current;
+    const k = f0.kind;
+    const segurandoJaExpedido = f0.kind === "error" && f0.code === "ja_expedido";
     // Conjunto vazio: se estava mostrando pedido/escolha/erro, volta pra PRONTO.
+    // Exceção: "já foi expedido" fica na tela até a operadora reimprimir/fechar.
     if (epcs.length === 0) {
-      if (k === "reading" || k === "choose" || k === "identified" || k === "error") setFlow({ kind: "idle" });
+      if (!segurandoJaExpedido && (k === "reading" || k === "choose" || k === "identified" || k === "error")) setFlow({ kind: "idle" });
       lastSigRef.current = "";
       lastFailSigRef.current = "";
+      failTentativasRef.current = 0;
       return;
     }
+    // Só o pacote já expedido na mesa (oscilando no leitor): não re-pergunta,
+    // não pisca. Tag nova na mesa segue o fluxo normal e substitui a tela.
+    if (segurandoJaExpedido && epcs.every((e) => jaExpedidoEpcsRef.current.has(e))) return;
     // Não interrompe impressão/embalagem/conclusão.
     if (k === "printing" || k === "packing" || k === "done") return;
 
@@ -582,6 +606,7 @@ export function Expedicao({ onBack }: Props) {
     // nexus (ou a rede voltar), identifica sozinho — sem "Nova leitura".
     const sigNow = epcs.slice().sort().join(",");
     const retrying = sigNow === lastFailSigRef.current;
+    if (!retrying) failTentativasRef.current = 0;
     const gen = ++resolveGenRef.current;
     // Pedido já identificado na tela: re-resolve POR BAIXO, sem voltar pra
     // "LENDO". Antes, cada tag que oscilava no leitor derrubava a grade das
@@ -591,8 +616,12 @@ export function Expedicao({ onBack }: Props) {
     if (!retrying && k !== "identified") setFlow({ kind: "reading" });
     const scheduleRetry = () => {
       lastFailSigRef.current = sigNow;
+      const n = ++failTentativasRef.current;
+      // Únicos (order bump esperando a 2ª peça) mantém o ritmo de sempre: o
+      // retry curto apressaria o beep de "falta a outra tag".
+      const curto = n <= RESOLVE_RETRIES_CURTOS && modoFilaRef.current !== "unicos";
       if (resolveTimer.current) clearTimeout(resolveTimer.current);
-      resolveTimer.current = setTimeout(() => void doResolve(), RESOLVE_RETRY_MS);
+      resolveTimer.current = setTimeout(() => void doResolve(), curto ? RESOLVE_RETRY_CURTO_MS : RESOLVE_RETRY_MS);
     };
     try {
       // Modo Únicos: o servidor escolhe o pedido pela peça bipada (não há epc-match).
@@ -606,13 +635,16 @@ export function Expedicao({ onBack }: Props) {
       if (matches.length === 0) {
         if (!retrying) beepError();
         if (jaExpedidos.length > 0) {
+          // Estado definitivo no servidor: sem retry. A tela segura (ver
+          // `jaExpedidoEpcsRef`) até Reimprimir / Nova leitura / tag diferente.
+          jaExpedidoEpcsRef.current = new Set(epcs);
+          lastFailSigRef.current = sigNow;
           setFlow({
             kind: "error",
             code: "ja_expedido",
             message: jaExpedidoMsg(jaExpedidos),
             jaExpedido: jaExpedidos[0],
           });
-          scheduleRetry();
           return;
         }
         if (!retrying)
@@ -786,6 +818,7 @@ export function Expedicao({ onBack }: Props) {
       if (replayJaExpedido(r)) {
         // Já saiu: não reimprime. Tira a peça do radar pra não repetir o aviso.
         for (const e of epcs) processedRef.current.add(e.toUpperCase());
+        jaExpedidoEpcsRef.current = new Set(epcs.map((e) => e.toUpperCase()));
         beepError();
         setFlow({ kind: "error", code: "ja_expedido", message: `Pedido #${r.order.numero ?? ""} já foi expedido.` });
         return;
@@ -967,6 +1000,15 @@ export function Expedicao({ onBack }: Props) {
       const r = await imprimirDocumentoDoPedido(order, origem);
       setReprintingId(null);
       showNotice(r.mensagem);
+      if (origem === "ja_expedido") {
+        // A operadora agiu: o pacote já expedido sai de cena (não re-identifica
+        // enquanto estiver na mesa) e a mesa volta pra PRONTO.
+        for (const e of jaExpedidoEpcsRef.current) processedRef.current.add(e);
+        jaExpedidoEpcsRef.current = new Set();
+        lastSigRef.current = "";
+        lastFailSigRef.current = "";
+        setFlow((cur) => (cur.kind === "error" && cur.code === "ja_expedido" ? { kind: "idle" } : cur));
+      }
     },
     [showNotice],
   );
