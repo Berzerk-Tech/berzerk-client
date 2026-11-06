@@ -317,6 +317,8 @@ export function Expedicao({ onBack }: Props) {
   const [estampaInicialUnicos, setEstampaInicialUnicos] = useState<string | null>(null);
   // Filtro por dia de emissão (Victor, 06/11/2026): vive aqui pra sobreviver a grade ↔ lateral.
   const [diaUnicos, setDiaUnicos] = useState<string | null>(null);
+  const diaUnicosRef = useRef<string | null>(diaUnicos);
+  diaUnicosRef.current = diaUnicos;
   const [unicosIndisponivel, setUnicosIndisponivel] = useState(false);
   // Order bump (Únicos): o pedido tinha item de bump lido junto com a peça principal.
   // O limite de EPCs (UNICOS_MAX_TAGS) já comporta principal + bump; o servidor decide
@@ -793,7 +795,8 @@ export function Expedicao({ onBack }: Props) {
       if (gen !== resolveGenRef.current || mesaOcupada()) return;
       let r;
       try {
-        r = await separarUnico({ rfidTags: epcs, estampa: g.estampa, tamanho: g.tamanho, cor: g.cor, leituras, orderId: pedidoSelecionadoRef.current ?? undefined });
+        // `dia`: a fila que a operadora VÊ é a do dia filtrado; o servidor tem que puxar dali.
+        r = await separarUnico({ rfidTags: epcs, estampa: g.estampa, tamanho: g.tamanho, cor: g.cor, leituras, orderId: pedidoSelecionadoRef.current ?? undefined, dia: diaUnicosRef.current });
       } catch (e) {
         if (gen !== resolveGenRef.current || mesaOcupada()) return;
         const er = erroSepararUnico(e, g);

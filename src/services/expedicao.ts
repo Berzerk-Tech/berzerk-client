@@ -643,6 +643,10 @@ export function separarUnico(args: {
   leituras?: LeituraResolvida[];
   /** Pedido escolhido na fila: o servidor separa ESSE pedido (se a peça casar). */
   orderId?: string;
+  /** Dia filtrado na lateral (YYYY-MM-DD, America/Sao_Paulo): sem `orderId`, o servidor pega o
+   *  próximo da variante SÓ desse dia. Sem isso o bip puxava pedido de outro dia que não estava
+   *  na lista (Luis Fernando, 06/11/2026) e a fila da tela nunca zerava. */
+  dia?: string | null;
 }): Promise<UnicoSepararResponse> {
   if (isExpedicaoSimulacao()) {
     const order = mockOrderFor(args.rfidTags);
@@ -658,6 +662,7 @@ export function separarUnico(args: {
       ...(args.tamanho ? { tamanho: args.tamanho } : {}),
       ...(args.cor === undefined ? {} : { cor: args.cor ?? "" }),
       ...(args.orderId ? { orderId: args.orderId } : {}),
+      ...(args.dia ? { dia: args.dia } : {}),
       ...(args.leituras && args.leituras.length > 0 ? { leituras: args.leituras } : {}),
     },
   });
