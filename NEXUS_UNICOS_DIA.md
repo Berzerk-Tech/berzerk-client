@@ -29,7 +29,14 @@ Contexto de negócio (06/11/2026): o Victor quer filtrar a fila de pedidos únic
   - novo `unicosQuerySchema` igual (só `dia`) pro `GET /expedicao/unicos`;
   - `unicosResponseSchema` ganha `dias: z.array(z.object({ dia: z.string(), pedidos: z.number().int() })).optional()`.
 - `GET /expedicao/unicos/pedidos`: aplicar o mesmo filtro de dia na query/lista do grupo.
-- O `separar` (bip) **não** muda: o client manda `orderId` quando a operadora escolhe um pedido; sem escolha, o servidor pega o próximo da variante como hoje (sem filtro de dia).
+- **`POST /expedicao/unicos/separar` ganha `dia` (opcional, mesmo formato).** Correção de 06/11 (tarde, vídeo do
+  Luis Fernando): a lateral mostrava só os pedidos do dia filtrado, mas o bip sem `orderId` puxava o próximo da
+  variante no FIFO INTEIRO — vinha pedido de outro dia que não estava na tela, a fila nunca zerava e o order bump só
+  saía clicando em cima. Com `dia`: sem `orderId`, o próximo da variante **só entre os pedidos emitidos naquele dia**
+  (mesma regra de `GET /unicos/pedidos?dia`); se não houver nenhum, responder o mesmo erro de fila vazia da variante
+  que já existe (o client volta pra escolha de tamanho). Com `orderId`, `dia` é ignorado. `unicosSepararBodySchema`
+  (ou equivalente) ganha `dia: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional()`. O client (0.9.74) já manda
+  `dia` sempre que o filtro está ativo; nexus antigo ignora o campo (comportamento de hoje).
 
 ## Testes
 

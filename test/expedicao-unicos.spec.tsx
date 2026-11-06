@@ -353,3 +353,52 @@ describe("Expedição — modo Únicos", () => {
     expect(localStorage.getItem("berzerk_expedicao_fila_v1")).toBe("pedidos");
   });
 });
+
+// Filtro por dia (06/11, vídeo do Luis Fernando): a lateral mostrava só o dia
+// escolhido, mas o bip puxava o próximo da fila INTEIRA — pedido de outro dia
+// que não estava na tela. O `separar` agora leva o `dia` filtrado.
+describe("Expedição — Únicos com filtro por dia manda `dia` no separar", () => {
+  beforeEach(() => {
+    // Describe próprio: o beforeEach de cima não roda aqui — monta a mesa do zero, SEM grupo salvo (abre na grade).
+    localStorage.clear();
+    localStorage.setItem("berzerk_expedicao_modo_v1", "oficial");
+    localStorage.setItem("berzerk_expedicao_fila_v1", "unicos");
+    localStorage.setItem("berzerk_expedicao_canal_v1", "ecommerce");
+    presence = null;
+    epcMatch.mockReset();
+    separarUnico.mockReset().mockResolvedValue({ order: pedidoUnico(), replay: false, grupo: GRUPO });
+    getDocumentos.mockReset().mockResolvedValue({ danfe: null, etiqueta: { base64: "JVBERi0=", formato: "pdf" }, trackingNumber: "JT123" });
+    markLabelPrinted.mockReset().mockResolvedValue(undefined);
+    shipOrder.mockReset().mockResolvedValue({ gaiola: null });
+    invoke.mockReset().mockImplementation(async (cmd: string) =>
+      cmd === "print_engine_status" ? { ok: true, printer: null, message: null, engine: "sumatra" } : { ok: true },
+    );
+    getUnicos.mockReset().mockResolvedValue({
+      grupos: [{ ...GRUPO, pedidos: 3, prioritarios: 0, imagemUrl: null, tipos: [{ produtoId: "p", produtoNome: "Oversized", cor: null, pedidos: 3 }] }],
+      totalPedidos: 3,
+      filaUnicosAtiva: false,
+      dias: [
+        { dia: "2026-11-01", pedidos: 2 },
+        { dia: "2026-11-05", pedidos: 1 },
+      ],
+    });
+    getUnicosPedidos.mockReset().mockResolvedValue([
+      { id: "ord-un", numero: "900002", cliente: "Cliente Único", produtoNome: "Oversized", prioritario: false, emitidoEm: "2026-11-01T12:00:00.000Z" },
+    ]);
+  });
+
+  it("dia escolhido na grade vai no separar; sem filtro não vai", async () => {
+    await abrirGrupo();
+    const sel = (await screen.findByLabelText("Filtrar por dia de emissão")) as HTMLSelectElement;
+    fireEvent.change(sel, { target: { value: "2026-11-01" } });
+    fireEvent.click(await screen.findByTitle("Escolher a fila Leg Day G"));
+    expect(await screen.findByText("📅 01/11")).toBeTruthy();
+    await act(async () => {
+      presence?.([TAG]);
+    });
+    await waitFor(() => expect(separarUnico).toHaveBeenCalledTimes(1));
+    expect(separarUnico.mock.calls[0][0]).toMatchObject({ estampa: "Leg Day", tamanho: "G", dia: "2026-11-01" });
+    expect(separarUnico.mock.calls[0][0].orderId).toBeUndefined();
+  }, 10000);
+  afterEach(() => cleanup());
+});
