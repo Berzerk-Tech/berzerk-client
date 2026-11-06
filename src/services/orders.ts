@@ -178,6 +178,12 @@ export type Me = {
    * causa da versão do servidor.
    */
   liberacaoSupervisorAtiva?: boolean;
+  /**
+   * Setting global `expedicao_embalagem_segundos` (Nexus → Configurações →
+   * Expedição, inteiro 1–30, padrão 5): duração da barra verde de embalagem da
+   * mesa. Ausente/null (nexus antigo) = 5.
+   */
+  expedicaoEmbalagemSegundos?: number | null;
 };
 
 export type QueueCounts = {

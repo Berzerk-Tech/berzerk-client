@@ -85,6 +85,7 @@ import {
 } from "../services/expedicaoMode";
 import { conferir, type Conferencia } from "../lib/conferenciaExpedicao";
 import { fmtDataHora } from "../lib/datas";
+import { ApiError } from "../lib/api";
 import {
   CODIGOS_DEFINITIVOS,
   classificarCodigoShip,
@@ -97,6 +98,7 @@ import {
   type ShipTentativa,
 } from "../lib/shipRetry";
 import {
+  getMe,
   leituraDe,
   type EpcLookupItem,
   type LeituraResolvida,
@@ -146,7 +148,17 @@ type Flow =
       aguardando?: boolean;
     };
 
-const PACKING_MS = 5000;
+// Tempo da barra de embalagem: setting GLOBAL do Nexus (`/me →
+// expedicaoEmbalagemSegundos`, 06/11/2026 — Leonardo: global, não por estação
+// nem editável pela operadora). Padrão 5 s (nexus antigo / API fora).
+const EMBALAGEM_MS_PADRAO = 5000;
+/** Relê a config de vez em quando — mudança no Nexus vale sem reabrir a mesa. */
+const EMBALAGEM_REFRESH_MS = 5 * 60_000;
+function embalagemMsDoMe(seg: unknown): number {
+  return typeof seg === "number" && Number.isFinite(seg) && seg >= 1 && seg <= 30
+    ? seg * 1000
+    : EMBALAGEM_MS_PADRAO;
+}
 
 /** Rótulo do item do bump no painel OPA: depende do erro (lido × esperado × faltando). */
 function rotuloBumpDoErro(code: string, ob: { produtoNome: string; tamanho?: string | null }): string {
@@ -166,6 +178,11 @@ const RESOLVE_RETRY_MS = 4000;
 // mais espaçado, e imprime sozinho se o AWB aparecer.
 const RASTREIO_TENTATIVAS_ATE_AVISO = 15;
 const RASTREIO_RETRY_BG_MS = 15000;
+// `documentos` com 429 (limiter do Tiny, incidente 06/11/2026: pedidos ML): era
+// erro terminal e a mesa parava. Agora tenta de novo sozinho a cada
+// DOCUMENTOS_RETRY_MS, até DOCUMENTOS_TENTATIVAS_MAX falhas seguidas.
+const DOCUMENTOS_RETRY_MS = 5000;
+const DOCUMENTOS_TENTATIVAS_MAX = 6;
 const BUFFER_WARN = 12;
 
 /**
@@ -332,6 +349,27 @@ export function Expedicao({ onBack }: Props) {
   const rastreioTimer = useRef<number | null>(null);
   /** Tentativas seguidas de imprimir sem rastreio, por pedido (ver RASTREIO_*). */
   const rastreioTentativasRef = useRef<{ orderId: string; n: number } | null>(null);
+  /** Falhas 429 seguidas do `documentos`, por pedido (ver DOCUMENTOS_*). O retry reusa `rastreioTimer`. */
+  /** Duração da barra de embalagem em ms (do /me; lida ao começar cada ciclo). */
+  const embalagemMsRef = useRef(EMBALAGEM_MS_PADRAO);
+  useEffect(() => {
+    let alive = true;
+    const carregar = () =>
+      getMe()
+        .then((me) => {
+          if (alive) embalagemMsRef.current = embalagemMsDoMe(me.expedicaoEmbalagemSegundos);
+        })
+        .catch(() => {
+          /* API indisponível: mantém o último valor conhecido */
+        });
+    void carregar();
+    const t = setInterval(carregar, EMBALAGEM_REFRESH_MS);
+    return () => {
+      alive = false;
+      clearInterval(t);
+    };
+  }, []);
+  const docsTentativasRef = useRef<{ orderId: string; n: number } | null>(null);
   // Guard de reentrada do fechamento do ciclo (timer da embalagem × "Próximo pedido").
   const concluindoRef = useRef(false);
   const [engineWarn, setEngineWarn] = useState<string | null>(null);
@@ -788,9 +826,39 @@ export function Expedicao({ onBack }: Props) {
           setFlow({ kind: "packing", order, lidas, override });
           return;
         }
+        if (e instanceof ApiError && e.status === 429) {
+          const prev = docsTentativasRef.current;
+          const n = prev && prev.orderId === order.id ? prev.n + 1 : 1;
+          docsTentativasRef.current = { orderId: order.id, n };
+          if (n >= DOCUMENTOS_TENTATIVAS_MAX) {
+            setFlow({
+              kind: "error",
+              code: "documentos_falha",
+              message: "O Tiny está limitando as chamadas e os documentos do pedido não vieram. Bipe de novo em instantes ou avise o supervisor.",
+              order,
+            });
+            return;
+          }
+          setFlow({
+            kind: "error",
+            code: "documentos_tiny_limitado",
+            message: "O Tiny está limitando as chamadas — tentando de novo sozinho…",
+            order,
+          });
+          if (rastreioTimer.current) window.clearTimeout(rastreioTimer.current);
+          rastreioTimer.current = window.setTimeout(() => {
+            rastreioTimer.current = null;
+            const f = flowRef.current;
+            if (f.kind === "error" && f.code === "documentos_tiny_limitado" && f.order?.id === order.id) {
+              void iniciarImpressao(order, confRef.current?.contadas ?? lidas, override);
+            }
+          }, DOCUMENTOS_RETRY_MS);
+          return;
+        }
         setFlow({ kind: "error", code: "documentos_falha", message: "Falha ao buscar os documentos do pedido.", order });
         return;
       }
+      docsTentativasRef.current = null;
 
       // UMA página: NUNCA etiqueta E DANFE — a máquina de embalagem solta um
       // saco por etiqueta impressa, então a segunda página vira um saco a mais
@@ -910,8 +978,9 @@ export function Expedicao({ onBack }: Props) {
       return;
     }
     const start = Date.now();
+    const packingMs = embalagemMsRef.current;
     const id = setInterval(() => {
-      const ratio = Math.min(1, (Date.now() - start) / PACKING_MS);
+      const ratio = Math.min(1, (Date.now() - start) / packingMs);
       setPackingProgress(ratio);
       if (ratio >= 1) {
         clearInterval(id);
