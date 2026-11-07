@@ -29,6 +29,7 @@ import {
   chaveMisto,
   fechamCom,
   pedidosMistos,
+  pedidosMistosNosFiltros,
   pickingMistos,
   rankingMistos,
   tamanhosForaDaFila,
@@ -352,13 +353,25 @@ export function PickingFiltersModal({ filters, queue, lote, abaInicial = "exclus
   }, [products, selected, selectedLower]);
 
   // ---- Filtro Mistos ----
-  const pedidosM = useMemo(
+  const pedidosMTodos = useMemo(
     () =>
       temMistos && queue
         ? pedidosMistos({ fila: daFila ?? [], lote: lote ?? [], size: queue.size, sizes: queue.sizes })
         : [],
     [temMistos, queue, daFila, lote],
   );
+  // Exclusão que vai valer no claim: a do galpão (como ficar depois do Aplicar,
+  // ou a atual se o switch "Em todas as estações" está desligado) ∪ a local.
+  // Sem isso o quadro prometia 58 e o servidor entregava 2 (Victor, 07/11).
+  const exclusaoAtiva = useMemo(
+    () => [...(comGlobal ? (modoGlobal ? globalSel : globalBase) : []), ...exclude],
+    [comGlobal, modoGlobal, globalSel, globalBase, exclude],
+  );
+  const pedidosM = useMemo(
+    () => pedidosMistosNosFiltros(pedidosMTodos, exclusaoAtiva, include),
+    [pedidosMTodos, exclusaoAtiva, include],
+  );
+  const mistosForaPorFiltro = pedidosMTodos.length - pedidosM.length;
   const ranking = useMemo(() => rankingMistos(pedidosM), [pedidosM]);
   const fechados = useMemo(() => (mistos.length ? fechamCom(pedidosM, mistos) : []), [pedidosM, mistos]);
   const pick = useMemo(() => (queue ? pickingMistos(fechados, queue.size) : []), [fechados, queue]);
@@ -534,11 +547,23 @@ export function PickingFiltersModal({ filters, queue, lote, abaInicial = "exclus
                 Com {mistos.length === 1 ? "esse produto" : `esses ${mistos.length} produtos`}{" "}
                 <b style={quadroNum}>{fechados.length}</b> mistos do {queue?.size} fecham (de {pedidosM.length}) ·
                 picking de <b style={quadroDestaque}>{totalFora(fechados)} peças</b>
+                {mistosForaPorFiltro > 0 && (
+                  <small style={mistosSmall}>
+                    {" "}
+                    · {mistosForaPorFiltro} misto{mistosForaPorFiltro === 1 ? "" : "s"} já fora pelo filtro de exclusão/adição
+                  </small>
+                )}
               </>
             ) : (
               <>
                 Do que mais fecha mistos do {queue?.size} sozinho pro que menos. Marque pra ver a grade que
                 precisa ser pega.
+                {mistosForaPorFiltro > 0 && (
+                  <small style={mistosSmall}>
+                    {" "}
+                    · {mistosForaPorFiltro} misto{mistosForaPorFiltro === 1 ? "" : "s"} já fora pelo filtro de exclusão/adição
+                  </small>
+                )}
               </>
             )}
           </div>
