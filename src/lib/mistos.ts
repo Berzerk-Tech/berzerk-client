@@ -246,6 +246,33 @@ export function fechaCom(pedido: PedidoMisto, marcados: ReadonlySet<string>): bo
   return pedido.fora.every((i) => marcados.has(chaveMisto(i.produto)) && TAMANHOS_MISTOS.includes(i.tamanho));
 }
 
+/**
+ * Mesma régua do claim no nexus (`ilike %termo%` sobre o NOME de qualquer item,
+ * case-insensitive): tira os mistos que o filtro de EXCLUSÃO (galpão ∪ estação)
+ * barraria e, com filtro de ADIÇÃO, os que não têm nenhum dos termos incluídos.
+ * Sem isso o quadro "N mistos fecham" e o picking contavam pedido que o
+ * servidor nunca ia entregar — as meninas marcavam 10 produtos pra fechar 58
+ * e vinham 2 (Victor, 07/11/2026). Olha `dele` e `fora`: a peça excluída pode
+ * ser do próprio tamanho da fila.
+ */
+export function pedidosMistosNosFiltros(
+  pedidos: PedidoMisto[],
+  excluir: readonly string[] | undefined,
+  incluir?: readonly string[],
+): PedidoMisto[] {
+  const norm = (ts: readonly string[] | undefined) =>
+    (ts ?? []).map((t) => t.trim().toLowerCase()).filter((t) => t.length > 0);
+  const ex = norm(excluir);
+  const inc = norm(incluir);
+  if (ex.length === 0 && inc.length === 0) return pedidos;
+  const temTermo = (p: PedidoMisto, termos: string[]) =>
+    [...p.dele, ...p.fora].some((peca) => {
+      const nome = peca.nome.toLowerCase();
+      return termos.some((t) => nome.includes(t));
+    });
+  return pedidos.filter((p) => !(ex.length > 0 && temTermo(p, ex)) && !(inc.length > 0 && !temTermo(p, inc)));
+}
+
 export function fechamCom(pedidos: PedidoMisto[], produtos: readonly string[]): PedidoMisto[] {
   const marcados = new Set(produtos.map(chaveMisto));
   return pedidos.filter((p) => fechaCom(p, marcados));

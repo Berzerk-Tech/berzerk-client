@@ -24,6 +24,7 @@ import { gerarPickingPdf, type PickingSecao } from "../lib/pickingPdf";
 import {
   TAMANHOS_MISTOS,
   fechamCom,
+  pedidosMistosNosFiltros,
   pedidoMistoDoLote,
   pedidosMistos,
   pickingMistos,
@@ -88,6 +89,8 @@ type Props = {
   emConferencia?: Order | null;
   /** Primeiro nome de quem está operando (título da folha). */
   operadora: string;
+  /** Termos da exclusão global do galpão (o claim une com `filters.excludeProducts`). */
+  exclusoesGlobais?: string[];
   /** Avisa o runner que a lista do lote foi impressa (prende os pedidos).
    *  `listaId` é o id de `separacao_listas` criado (`null` = nexus antigo,
    *  sem o carimbo, ou nenhum pedido válido pra carimbar). */
@@ -112,6 +115,7 @@ export function PickingGeralModal({
   lote,
   emConferencia,
   operadora,
+  exclusoesGlobais,
   onListaImpressa,
   onImprimindo,
   onLimparFiltros,
@@ -274,11 +278,17 @@ export function PickingGeralModal({
       // da folha, e o recorte nunca se mistura com ele.
       return lote.map((o) => pedidoMistoDoLote(o, queue.size));
     }
+    // Fila inteira: tira o que a exclusão (galpão ∪ estação) e a adição barram
+    // no claim — senão a folha lista misto que nunca vem (Victor, 07/11).
     return fechamCom(
-      pedidosMistos({ fila: products ?? [], lote, size: queue.size, sizes: queue.sizes }),
+      pedidosMistosNosFiltros(
+        pedidosMistos({ fila: products ?? [], lote, size: queue.size, sizes: queue.sizes }),
+        [...(exclusoesGlobais ?? []), ...(filters.excludeProducts ?? [])],
+        filters.includeProducts,
+      ),
       filters.mistosProdutos ?? [],
     );
-  }, [mistosAtivos, escopo, lote, products, queue.size, queue.sizes, filters.mistosProdutos]);
+  }, [mistosAtivos, escopo, lote, products, queue.size, queue.sizes, filters.mistosProdutos, filters.excludeProducts, filters.includeProducts, exclusoesGlobais]);
   const linhasMistos = useMemo(() => pickingMistos(pedidosM, queue.size), [pedidosM, queue.size]);
 
   // Totais: os da API quando vierem (fila inteira), senão recalculados aqui.

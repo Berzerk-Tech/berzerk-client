@@ -18,6 +18,7 @@ import {
   tamanhosForaDaFila,
   totalDele,
   totalFora,
+  pedidosMistosNosFiltros,
 } from "../src/lib/mistos";
 
 function linha(nome: string, tamanho: string | null, quantidade: number, orderIds: string[]): QueueProduct {
@@ -206,5 +207,31 @@ describe("ordenarPorProdutoFora (Nicole via Roger, 06/11/2026)", () => {
   it("é estável dentro do grupo e ignora caixa na chave", () => {
     const entrada = [com("1", "Zeus"), com("2", "Leg"), com("3", "zeus"), com("4", "Zeus")];
     expect(ids(ordenarPorProdutoFora(entrada, "M"))).toEqual(["1", "3", "4", "2"]);
+  });
+});
+
+// Victor (07/11/2026): o quadro "N fecham" ignorava o filtro de exclusão — as
+// meninas marcavam 10 produtos pra fechar 58 mistos e o claim entregava 2.
+describe("pedidosMistosNosFiltros (mesma régua ilike %termo% do claim)", () => {
+  const peds = pedidosMistosDaFila(
+    [
+      linha("Leg Day - M", "M", 3, ["a", "b", "c"]),
+      linha("Surpresa - G", "G", 2, ["a", "b"]),
+      linha("Calça RUX - Phantom - G", "G", 1, ["c"]),
+      linha("Short Dry Fit 2 em 1 - M", "M", 1, ["b"]),
+    ],
+    "M",
+  );
+  it("sem termos devolve tudo", () => {
+    expect(pedidosMistosNosFiltros(peds, [], undefined).map((p) => p.id)).toEqual(["a", "b", "c"]);
+  });
+  it("exclusão tira o pedido com QUALQUER peça (dele ou fora) cujo nome contém o termo, case-insensitive", () => {
+    expect(pedidosMistosNosFiltros(peds, ["calça rux"]).map((p) => p.id)).toEqual(["a", "b"]);
+    expect(pedidosMistosNosFiltros(peds, ["SHORT DRY FIT"]).map((p) => p.id)).toEqual(["a", "c"]);
+    expect(pedidosMistosNosFiltros(peds, ["leg day"])).toEqual([]);
+  });
+  it("adição mantém só pedido com algum termo; termo vazio é ignorado", () => {
+    expect(pedidosMistosNosFiltros(peds, [" "], ["phantom"]).map((p) => p.id)).toEqual(["c"]);
+    expect(pedidosMistosNosFiltros(peds, ["surpresa"], ["leg day"]).map((p) => p.id)).toEqual(["c"]);
   });
 });

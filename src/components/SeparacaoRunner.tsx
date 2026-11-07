@@ -2177,6 +2177,7 @@ export function SeparacaoRunner({
           lote={novaLista ?? visiveis.filter((o) => !o.entregaEmMaos)}
           emConferencia={novaLista || emConferenciaForaDoFiltro?.entregaEmMaos ? null : emConferenciaForaDoFiltro}
           operadora={operadora}
+          exclusoesGlobais={termosDoGalpao}
           onListaImpressa={marcarLotePresoLocalmente}
           onImprimindo={(v) => {
             imprimindoRef.current = v;
