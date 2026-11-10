@@ -47,6 +47,10 @@ import { nomeDaOperadora } from "./OperatorChip";
 import { getSessaoSync } from "../lib/cognito";
 import { SeparacaoHistoryModal } from "./SeparacaoHistoryModal";
 import { ListasImpressasModal } from "./ListasImpressasModal";
+import { PedirReposicaoModal } from "./PedirReposicaoModal";
+import { agoraDoServidor, resumoDosMeus, tamanhoInicial } from "../lib/pedirReposicao";
+import { useMeusPedidosReposicao } from "../lib/usePedidosReposicao";
+import { TAMANHOS_REPOSICAO, type TamanhoReposicao } from "../services/reposicaoPedidos";
 import { PickingFiltersModal, emptyFilters, loadFilters, saveFilters, type Aba } from "./PickingFiltersModal";
 import { chaveMisto, ordenarPorProdutoFora, passaNoFiltroMistos, pedidoMistoDoLote } from "../lib/mistos";
 import { motivoDaFalhaDoLote, reservarComRollback, type ReservaMistosResultado } from "../lib/reservaMistos";
@@ -1597,6 +1601,11 @@ export function SeparacaoRunner({
   /** produto → imagem dos marcados no Filtro Mistos (vem do modal ao aplicar). */
   const [mistosImagens, setMistosImagens] = useState<Record<string, string | null>>({});
   const [pickingOpen, setPickingOpen] = useState(false);
+  // Pedir reposição (nexus 10/11): só aparece com suporte detectado (404/403 = some).
+  const [reposicaoOpen, setReposicaoOpen] = useState(false);
+  const reposicao = useMeusPedidosReposicao(reposicaoOpen);
+  const fecharReposicao = useCallback(() => setReposicaoOpen(false), []);
+  const tamanhoReposicao = tamanhoInicial(queue, TAMANHOS_REPOSICAO) as TamanhoReposicao | null;
   /**
    * NOVA LISTA de mistos (Roger, CD, 15/10): a lista 1 está na coleta (~2 h)
    * e a operadora já quer "tirar" a lista 2, pra coleta e conferência
@@ -1656,6 +1665,7 @@ export function SeparacaoRunner({
       historyOpen ||
       listasOpen ||
       pickingOpen ||
+      reposicaoOpen ||
       faltantesOpen ||
       filtersOpen ||
       confirmFaltam !== null;
@@ -1708,6 +1718,7 @@ export function SeparacaoRunner({
     historyOpen,
     listasOpen,
     pickingOpen,
+    reposicaoOpen,
     faltantesOpen,
     filtersOpen,
     confirmFaltam,
@@ -2011,6 +2022,7 @@ export function SeparacaoRunner({
         <button style={topBarBtn} onClick={() => setPickingOpen(true)}>
           🖨 Picking Geral
         </button>
+        {reposicao.suporte && <BotaoPedirReposicao meus={reposicao.meus} onClick={() => setReposicaoOpen(true)} />}
         {queue.mode === "total" && !pedidoInicial && (
           <SeletorQuantidadeMistos valor={quantidadeMistos} onChange={setQuantidadeMistos} />
         )}
@@ -2266,6 +2278,15 @@ export function SeparacaoRunner({
             aplicarFiltros(emptyFilters());
             void puxarLote();
           }}
+        />
+      )}
+      {reposicaoOpen && reposicao.suporte && (
+        <PedirReposicaoModal
+          tamanhoFila={tamanhoReposicao}
+          pedidosMesa={lote}
+          meus={reposicao.meus}
+          onRecarregarMeus={reposicao.recarregar}
+          onClose={fecharReposicao}
         />
       )}
       {pickingOpen && (
@@ -4578,6 +4599,39 @@ function SeletorQuantidadeMistos({ valor, onChange }: { valor: number | null; on
         ))}
       </select>
     </label>
+  );
+}
+
+/** Botão "Pedir reposição": contador dos pendentes, destaque em "não tem"/reposto. */
+function BotaoPedirReposicao({
+  meus,
+  onClick,
+}: {
+  meus: Parameters<typeof resumoDosMeus>[0];
+  onClick: () => void;
+}) {
+  const r = resumoDosMeus(meus, agoraDoServidor(meus, Date.now()));
+  const estilo: CSSProperties =
+    r.destaque === "falta"
+      ? { ...topBarBtn, background: "var(--danger-bg)", color: "var(--danger-text)", border: "1px solid var(--danger-border, var(--border))" }
+      : r.destaque === "reposto"
+        ? { ...topBarBtn, background: "var(--success-bg, var(--bg-card))", color: "var(--success-text, var(--text))" }
+        : topBarBtn;
+  return (
+    <button
+      style={estilo}
+      onClick={onClick}
+      title={
+        r.destaque === "falta"
+          ? "Algum pedido seu está marcado como 'não tem'"
+          : r.destaque === "reposto"
+            ? "Chegou reposição pra você"
+            : "Pedir peças pros repositores"
+      }
+    >
+      📦 Pedir reposição
+      {r.destaque === "falta" ? " · não tem!" : r.destaque === "reposto" ? " · reposto!" : r.pendentes > 0 ? ` · ${r.pendentes}` : ""}
+    </button>
   );
 }
 
