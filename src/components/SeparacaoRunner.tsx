@@ -24,6 +24,8 @@ import {
 import { useRfid, type ReadingSession } from "../contexts/RfidContext";
 import { beepError, beepOk } from "../lib/beep";
 import { fmtDataHora } from "../lib/datas";
+import { ordenarPorTamanho } from "../lib/tamanhos";
+import { AVISO_PEDIDO_SAIU, proximoPedidoAposRefresh } from "../lib/pedidoFixo";
 import { LARGURA_CARD, imagemRedimensionada, miniatura } from "../lib/imagens";
 import { subscribeEventos } from "../lib/realtime";
 import { getExclusoesGlobais, termosGlobais, type ExclusoesGlobais } from "../services/exclusoesGlobais";
@@ -643,6 +645,20 @@ export function SeparacaoRunner({
    */
   const [avisoAwb, setAvisoAwb] = useState<AwbJaColetadoAviso | null>(null);
 
+  /** O pedido da mesa saiu da resposta do servidor (redistribuído/devolvido): aviso fixo até ela escolher outro. */
+  const [pedidoSaiu, setPedidoSaiuState] = useState(false);
+  const pedidoSaiuRef = useRef(false);
+  const setPedidoSaiu = useCallback((v: boolean) => {
+    pedidoSaiuRef.current = v;
+    setPedidoSaiuState(v);
+  }, []);
+  /** Sequência dos `puxarLote`: só a resposta do mais recente é aplicada (evita resposta velha de fundo zerar a mesa). */
+  const seqPuxarRef = useRef(0);
+  // O aviso some assim que há pedido na mesa de novo (clique num card, etc.).
+  useEffect(() => {
+    if (order) setPedidoSaiu(false);
+  }, [order, setPedidoSaiu]);
+
   const resetLeitura = useCallback(() => {
     progressRef.current = new Map();
     extrasRef.current = new Map();
@@ -683,7 +699,7 @@ export function SeparacaoRunner({
    * tinham feito (relato do 1º dia na 0.9.4).
    */
   const puxarLote = useCallback(
-    async (opts?: { preservarAtual?: boolean; depoisDe?: string; novaLista?: boolean; reserva?: boolean }): Promise<Order[] | undefined> => {
+    async (opts?: { preservarAtual?: boolean; depoisDe?: string; novaLista?: boolean; reserva?: boolean; porFiltro?: boolean }): Promise<Order[] | undefined> => {
       // Reposição em background (push do WS, troca de filtro) cede a vez: o
       // caminho do complete já vai repor, e duas chamadas em voo trocariam o
       // pedido da mesa no meio da conferência.
@@ -693,7 +709,12 @@ export function SeparacaoRunner({
       // `reserva`: o "Imprimir e reservar" já segurou `imprimindoRef` de propósito e é ele quem puxa.
       if (opts?.preservarAtual && (puxandoRef.current || completingRef.current || (imprimindoRef.current && !opts.reserva))) return;
       const atual = opts?.preservarAtual ? orderRef.current : null;
-      if (!atual) {
+      const seq = ++seqPuxarRef.current;
+      // Refresh de FUNDO com a mesa vazia porque o pedido saiu: só atualiza o
+      // lote — não passa por "loading" nem escolhe pedido (o aviso fica até ela clicar).
+      const fundo = !!opts?.preservarAtual && !opts.porFiltro && !opts.novaLista && !opts.reserva && !opts.depoisDe;
+      const mesaVaziaPorSaida = fundo && !atual && pedidoSaiuRef.current;
+      if (!atual && !mesaVaziaPorSaida) {
         setPhase("loading");
         resetLeitura();
       }
@@ -724,6 +745,9 @@ export function SeparacaoRunner({
                   ? { quantidade: quantidadeMistosRef.current }
                   : {}),
               });
+        // Resposta velha (outro `puxarLote` começou depois) ou de fundo que
+        // chegou com o complete em andamento: descarta, não mexe na mesa.
+        if (!opts?.novaLista && (seq !== seqPuxarRef.current || (fundo && completingRef.current))) return undefined;
         const { fila, novos } = resposta;
         let orders = resposta.orders;
         // Pedido pego pelo clique (entrega em mãos): garante que está no lote
@@ -763,15 +787,6 @@ export function SeparacaoRunner({
           return restantes.size === atuais.size ? atuais : restantes;
         });
         setRestantes(fila?.restantes ?? null);
-        const aindaMeu = atual ? orders.find((o) => o.id === atual.id) : undefined;
-        // O pedido da mesa SUMIU da resposta: o servidor o redistribuiu pra
-        // outra estação (só acontece com pedido não iniciado — o
-        // `iniciarSeparacao` trava isso — ou se um supervisor destravou).
-        // Nunca deixar ela concluir o que já não é dela: volta pro lote com o
-        // aviso, em vez de mandar um complete que o servidor recusa com 409.
-        if (atual && !aindaMeu) {
-          showNotice("Este pedido foi redistribuído para outra estação. Continue pelo lote.");
-        }
         // O "próximo" percorre a lista VISÍVEL (ordem local + filtros), nunca a
         // resposta crua: o que está oculto pelo filtro não pode cair na mesa.
         // O gate do Filtro Mistos se decide pelo lote que ACABOU de chegar (no
@@ -782,16 +797,36 @@ export function SeparacaoRunner({
         );
         efetivosRef.current = filtrosAgora;
         const visiveisAgora = loteVisivel(orders, puladosRef.current, filtrosAgora, queue.size);
-        // Pedido da mesa que o filtro acabou de esconder só fica se JÁ tem
-        // leitura (a régua do "Meu lote honesto", 0.9.12). Sem leitura ele
-        // cede a mesa: o servidor continua devolvendo-o (é dela, só está
-        // oculto), e preservá-lo aqui o trazia de volta — relato de 02/09,
-        // "ao filtrar os pedidos não somem da tela".
+        // PEDIDO FIXO (10/11): refresh nunca troca o pedido da mesa. Se ele
+        // ainda vem na resposta, fica (filtro e leitura não importam); só a
+        // troca de filtro pela própria operadora (`porFiltro`) cede o pedido
+        // escondido que ainda não tem leitura. Se ele não vem mais
+        // (redistribuído/devolvido/expirado), a mesa fica sem pedido e avisa —
+        // não escolhe outro sozinha.
         const temLeitura = Array.from(progressRef.current.values()).some((pr) => pr.count > 0);
-        const mantemAtual = aindaMeu && (passaNosFiltros(aindaMeu, filtrosAgora, queue.size) || temLeitura);
+        const decisao = proximoPedidoAposRefresh({
+          atual,
+          orders,
+          acaoExplicita: opts?.porFiltro,
+          foraDoFiltroSemLeitura: !!atual && !temLeitura && !passaNosFiltros(atual, filtrosAgora, queue.size),
+        });
+        if (mesaVaziaPorSaida && !inicial) {
+          setPhase(visiveisAgora.length > 0 ? "separating" : "empty");
+          return undefined;
+        }
+        if (decisao.tipo === "saiu") {
+          resetLeitura();
+          orderRef.current = null;
+          setOrder(null);
+          setPedidoSaiu(true);
+          setPhase(visiveisAgora.length > 0 ? "separating" : "empty");
+          return opts?.novaLista
+            ? orders.filter((o) => new Set(novos ?? []).has(o.id) && !o.listaEm && !o.entregaEmMaos)
+            : undefined;
+        }
         const proximo =
           (inicial ? orders.find((o) => o.id === inicial.id) : undefined) ??
-          (mantemAtual ? aindaMeu : undefined) ??
+          (decisao.tipo === "manter" ? decisao.pedido : undefined) ??
           candidatos.map((id) => visiveisAgora.find((o) => o.id === id)).find(Boolean) ??
           visiveisAgora[0] ??
           null;
@@ -822,10 +857,10 @@ export function SeparacaoRunner({
         setPhase("error");
         return undefined;
       } finally {
-        puxandoRef.current = false;
+        if (seq === seqPuxarRef.current) puxandoRef.current = false;
       }
     },
-    [queue.mode, queue.sizes, resetLeitura, showNotice, candidatosDepoisDe],
+    [queue.mode, queue.sizes, resetLeitura, showNotice, candidatosDepoisDe, setPedidoSaiu],
   );
 
 
@@ -1871,7 +1906,7 @@ export function SeparacaoRunner({
     }
     // "Imprimir e reservar" puxa a lista nova logo em seguida (`reservarMistos`):
     // um lote de fundo aqui deixaria `puxandoRef` ocupado e a lista não sairia.
-    if (opts?.puxar !== false) void puxarLote({ preservarAtual: true });
+    if (opts?.puxar !== false) void puxarLote({ preservarAtual: true, porFiltro: true });
   };
 
   /**
@@ -2062,6 +2097,7 @@ export function SeparacaoRunner({
       )}
       {reject && extras.length === 0 && <div style={rejectBanner}>⚠ {reject}</div>}
       {notice && <div style={noticeBanner}>ℹ {notice}</div>}
+      {pedidoSaiu && !order && <div style={rejectBanner}>⚠ {AVISO_PEDIDO_SAIU}</div>}
       {listasEscapadas.length > 0 && (
         <div style={listaBannerAlerta}>
           🚨 <strong>{listasEscapadas.reduce((n, l) => n + escapados(l), 0)}</strong>{" "}
@@ -2146,6 +2182,7 @@ export function SeparacaoRunner({
               </button>
             </Centered>
           )}
+          {phase === "separating" && !order && pedidoSaiu && <Centered>{AVISO_PEDIDO_SAIU}</Centered>}
           {phase === "separating" && order && (
             <OrderView
               order={order}
@@ -3018,11 +3055,16 @@ function QueueCard({
   );
 }
 
+/** Tamanho pra EXIBIR/ordenar no card: aceita o token final sem hífen ("Symbol GG"). */
+const tamanhoDoCard = (it: OrderItem): string | null => itemSize(it, { sufixoSemHifen: true });
+
 /** Corpo do card: paddings + nome + rodapé (compacto quando o card estreita).
     Estimativa CONSERVADORA — subestimar corta fileira no overflow. */
 function cardBodyHeight(cardW: number): number {
-  return cardW < 200 ? 74 : 96;
+  // Faixa de tamanho (topo) + corpo (nome + rodapé). A foto é a parte que encolhe.
+  return cardW < 200 ? 70 + 22 : 96 + 28;
 }
+
 
 /**
  * Tamanho dos cards — regra do Leonardo (21/08/2026, go-live XG):
@@ -3060,8 +3102,8 @@ function useFitCards(nMain: number, nOff: number) {
     // de largura e a imagem cresce junto, sem estourar a altura: os limites de
     // 1366×768 continuam valendo (MINW), e em 1920×1080 o MAXW é o que segura
     // o card num tamanho legível em vez de gigante.
-    const MAXW = 330;
-    const MINW = 140;
+    const MAXW = 260;
+    const MINW = 110;
     const ROWS_SEM_SCROLL = 2;
     // Folga: se a estimativa do corpo errar por poucos px pro lado otimista,
     // o overflow decepa uma fileira (visto em campo no misto de 14 itens).
@@ -3079,7 +3121,9 @@ function useFitCards(nMain: number, nOff: number) {
       const rowsFit = Math.min(rows, ROWS_SEM_SCROLL);
       const wByWidth = Math.min((W - (cols - 1) * GAP) / cols, MAXW);
       const rowH = (H - SLACK - BANNER - (rowsFit - 1) * GAP) / rowsFit;
-      const w = Math.floor(Math.min(wByWidth, rowH - cardBodyHeight(wByWidth)));
+      // Foto QUADRADA (nunca cortar a estampa): altura do card = faixa + corpo + largura.
+      const wByHeight = rowH - cardBodyHeight(wByWidth);
+      const w = Math.floor(Math.min(wByWidth, wByHeight));
       const next = {
         cardW: Math.max(MINW, w),
         cols,
@@ -3150,11 +3194,12 @@ function OrderView({
   const predominant = order.predominantSize?.trim().toUpperCase() ?? null;
   const isMixed = order.separationMode === "total" && !!predominant;
   const differs = (it: OrderItem) => {
-    const s = itemSize(it);
+    const s = tamanhoDoCard(it);
     return s !== null && s !== predominant;
   };
-  const mainItems = isMixed ? order.items.filter((it) => !differs(it)) : order.items;
-  const offSizeItems = isMixed ? order.items.filter(differs) : [];
+  // Em ordem de tamanho (estável): a "linha de baixo" do misto sai P, M, G… e não na ordem do pedido.
+  const mainItems = ordenarPorTamanho(isMixed ? order.items.filter((it) => !differs(it)) : order.items, tamanhoDoCard);
+  const offSizeItems = ordenarPorTamanho(isMixed ? order.items.filter(differs) : [], tamanhoDoCard);
 
   const { ref: fitRef, cardW, cols } = useFitCards(mainItems.length, offSizeItems.length);
   const grid: CSSProperties = {
@@ -3320,7 +3365,7 @@ function ItemCard({
 }) {
   const dense = cardW < 200;
   const ok = count >= item.quantidade && !excedido;
-  const size = itemSize(item);
+  const size = tamanhoDoCard(item);
   return (
     <div
       style={{
@@ -3331,6 +3376,11 @@ function ItemCard({
         ...(excedido ? cardExcedido : null),
       }}
     >
+      {size && (
+        <div style={{ ...(destaque ? sizeHeaderMistos : offSize ? sizeHeaderOff : sizeHeader), ...(dense ? sizeHeaderDense : null) }}>
+          {offSize ? `↔ ${size}` : size}
+        </div>
+      )}
       <div style={cardImageWrap}>
         {item.imagemUrl ? (
           <FotoPeca
@@ -3357,11 +3407,6 @@ function ItemCard({
             <span style={excedido ? cardCountExcedido : cardCount}>
               {excedido ? `${count}/${item.quantidade}!` : `${Math.min(count, item.quantidade)}/${item.quantidade}`}
             </span>
-            {size && (
-              <span style={destaque ? sizeChipMistos : offSize ? sizeChipOff : sizeChip}>
-                {offSize ? `↔ ${size}` : size}
-              </span>
-            )}
           </span>
         </div>
       </div>
@@ -4358,23 +4403,19 @@ const cardCount: CSSProperties = {
   color: "var(--text)",
 };
 
-const sizeChip: CSSProperties = {
+/** Tamanho em destaque no topo do card (0.9.78) — mesmas cores/estados do chip de antes. */
+const sizeHeader: CSSProperties = {
   fontFamily: "var(--font-mono)",
-  fontSize: 12,
   fontWeight: 700,
-  padding: "2px 9px",
-  borderRadius: 999,
   background: "var(--success-bg)",
   color: "var(--success-text)",
-  border: "1px solid var(--success-border)",
+  borderBottom: "1px solid var(--success-border)",
+  padding: "3px 8px",
+  fontSize: 18,
+  lineHeight: "22px",
+  textAlign: "center",
 };
-
-const sizeChipOff: CSSProperties = {
-  ...sizeChip,
-  background: "var(--info-bg)",
-  color: "var(--info-text)",
-  border: "1px solid var(--info-border)",
-};
+const sizeHeaderDense: CSSProperties = { fontSize: 15, lineHeight: "18px", padding: "2px 6px" };
 
 /** Alerta de grade mista: banner de verdade, não texto solto — o operador
     precisa bater o olho e ver que tem tamanho diferente no pedido. */
@@ -4391,11 +4432,18 @@ const sizeBanner: CSSProperties = {
   textAlign: "center",
 };
 
-const sizeChipMistos: CSSProperties = {
-  ...sizeChip,
+const sizeHeaderOff: CSSProperties = {
+  ...sizeHeader,
+  background: "var(--info-bg)",
+  color: "var(--info-text)",
+  borderBottom: "1px solid var(--info-border)",
+};
+
+const sizeHeaderMistos: CSSProperties = {
+  ...sizeHeader,
   background: "var(--warning-bg)",
   color: "var(--warning-text)",
-  border: "1px solid var(--warning-border)",
+  borderBottom: "1px solid var(--warning-border)",
 };
 
 const sizeBannerMistos: CSSProperties = {
@@ -4608,8 +4656,8 @@ const cardExcedido: CSSProperties = {
 const cardBodyDense: CSSProperties = {
   display: "flex",
   flexDirection: "column",
-  gap: 4,
-  padding: "8px 10px 10px",
+  gap: 3,
+  padding: "6px 10px 8px",
 };
 
 const cardNameDense: CSSProperties = {

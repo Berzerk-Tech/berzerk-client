@@ -8,6 +8,11 @@
 
 import { useCallback, useEffect, useState, type CSSProperties } from "react";
 import { ApiError } from "../lib/api";
+import { montarReimpressao } from "../lib/listaReimpressao";
+import { gerarMistosPdf } from "../lib/mistosPdf";
+import { gerarPickingPdf } from "../lib/pickingPdf";
+import { printPdfBase64 } from "../lib/printer";
+import { getLabelPrinter } from "../services/printerConfig";
 import {
   getListaDetalhe,
   getListas,
@@ -132,6 +137,33 @@ export function ListasImpressasModal({
     }
   }, []);
 
+  // Reimprime a folha a partir do SNAPSHOT do servidor (mesmo gerador da
+  // impressão original). NÃO carimba (`marcarListaImpressa`) nem cria lista nova.
+  const [reimprimindo, setReimprimindo] = useState<string | null>(null);
+  const [statusReimpressao, setStatusReimpressao] = useState<Record<string, string>>({});
+  const reimprimir = async (id: string) => {
+    if (reimprimindo) return;
+    setReimprimindo(id);
+    const dizer = (msg: string) => setStatusReimpressao((a) => ({ ...a, [id]: msg }));
+    try {
+      dizer("Buscando a lista…");
+      const data = await getListaDetalhe(id);
+      setDetalhes((atual) => ({ ...atual, [id]: { status: "ok", data } }));
+      const r = montarReimpressao(data, (data.operadorNome ?? "").trim().split(/\s+/)[0] ?? "");
+      const base64 = r.tipo === "mistos" ? gerarMistosPdf(r.doc) : gerarPickingPdf(r.doc);
+      const out = await printPdfBase64(base64, { printer: getLabelPrinter(), jobName: `Reimpressão lista ${fmtDataHora(data.criadoEm)}` });
+      dizer(
+        out.ok
+          ? `Enviado${out.printer ? ` pra ${out.printer}` : " pra impressora padrão"}.`
+          : `Falha ao imprimir: ${out.message ?? "motivo desconhecido"}`,
+      );
+    } catch (e) {
+      dizer(`Falha ao reimprimir: ${e instanceof Error ? e.message : String(e)}`);
+    } finally {
+      setReimprimindo(null);
+    }
+  };
+
   const alternarExpandir = (id: string) => {
     if (expandedId === id) {
       setExpandedId(null);
@@ -218,6 +250,17 @@ export function ListasImpressasModal({
                       </span>
                     </div>
                     <button
+                      style={reimprimindo === null ? recuperarBtn : recuperarBtnOff}
+                      disabled={reimprimindo !== null}
+                      title="Reimprime a lista como foi impressa (não reserva pedidos)"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        void reimprimir(l.id);
+                      }}
+                    >
+                      {reimprimindo === l.id ? "Reimprimindo…" : "Reimprimir"}
+                    </button>
+                    <button
                       style={recuperavel && recuperando === null ? recuperarBtn : recuperarBtnOff}
                       disabled={!recuperavel || recuperando !== null}
                       onClick={(e) => {
@@ -232,6 +275,7 @@ export function ListasImpressasModal({
                   </div>
 
                   {resultado && <div style={resultadoBox}>{resumoTexto(resultado)}</div>}
+                  {statusReimpressao[l.id] && <div style={resultadoBox}>{statusReimpressao[l.id]}</div>}
 
                   {expandido && (
                     <div style={detalheWrap}>

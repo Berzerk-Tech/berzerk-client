@@ -5,6 +5,7 @@
 import { ApiError } from "./api";
 import type { EpcMatch, ExpedicaoOrder, OrderBumpConfig, UnicoGrupo, UnicoSepararResponse, UnicoTipo } from "../services/expedicao";
 import { UNICOS_ERR } from "../services/expedicao";
+import { ORDEM_TAMANHOS, compararTamanhos } from "./tamanhos";
 
 export type ModoFila = "pedidos" | "unicos";
 
@@ -256,20 +257,9 @@ export function replayJaExpedido(r: UnicoSepararResponse): boolean {
   return r.replay === true && r.order.status === "shipped";
 }
 
-/** Ordem de exibição dos tamanhos; o que não está aqui vai pro fim. */
-export const ORDEM_TAMANHOS = ["PP", "P", "M", "G", "GG", "XG", "XGG", "U"];
-
-/** Compara tamanhos pela posição em `ORDEM_TAMANHOS`; desconhecidos no fim, em ordem alfabética. */
-export function ordenarTamanhos(a: string, b: string): number {
-  const na = a.trim().toUpperCase();
-  const nb = b.trim().toUpperCase();
-  const ia = ORDEM_TAMANHOS.indexOf(na);
-  const ib = ORDEM_TAMANHOS.indexOf(nb);
-  if (ia >= 0 && ib >= 0) return ia - ib;
-  if (ia >= 0) return -1;
-  if (ib >= 0) return 1;
-  return na.localeCompare(nb);
-}
+// Régua única em `lib/tamanhos` (re-exportada: outros módulos/testes importam daqui).
+export { ORDEM_TAMANHOS };
+export const ordenarTamanhos = compararTamanhos;
 
 /** Texto do botão Order bump: "Order bump: A, B" ou "desligado". */
 export function rotuloOrderBump(ob: OrderBumpConfig | null | undefined): string {
