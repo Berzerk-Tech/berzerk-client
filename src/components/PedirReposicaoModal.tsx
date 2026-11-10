@@ -71,11 +71,34 @@ export function PedirReposicaoModal({ tamanhoFila, pedidosMesa, meus, onRecarreg
   const vivo = useRef(true);
   // Chave de idempotência do envio: vale pro carrinho (assinatura) em que foi gerada.
   const chaveEnvio = useRef<{ chave: string; assinatura: string } | null>(null);
+  // Envio NÃO confirmado (rede/timeout/5xx): o carrinho fica TRAVADO até "Tentar de
+  // novo" (mesma chave) ou "Descartar". Ref pro `carregar`, state pra renderizar.
+  const [envioPendente, setEnvioPendente] = useState(false);
+  const envioPendenteRef = useRef(false);
+  const [confirmandoFechar, setConfirmandoFechar] = useState(false);
+  // Erro que veio de refresh (some quando um refresh seguinte dá certo).
+  const erroDeRefresh = useRef(false);
+  // Estado lido pelo handler de Esc sem recriar o listener.
+  const fechamento = useRef({ itens: 0, enviando: false });
+
+  const marcarEnvioPendente = (v: boolean) => {
+    envioPendenteRef.current = v;
+    setEnvioPendente(v);
+  };
+
+  const pedirFechar = useCallback(() => {
+    if (fechamento.current.enviando) return;
+    if (fechamento.current.itens > 0) {
+      setConfirmandoFechar(true);
+      return;
+    }
+    onClose();
+  }, [onClose]);
 
   useEffect(() => {
     vivo.current = true;
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") onClose();
+      if (e.key === "Escape") pedirFechar();
     };
     window.addEventListener("keydown", onKey);
     return () => {
@@ -83,7 +106,7 @@ export function PedirReposicaoModal({ tamanhoFila, pedidosMesa, meus, onRecarreg
       window.removeEventListener("keydown", onKey);
       if (desfazerTimer.current) clearTimeout(desfazerTimer.current);
     };
-  }, [onClose]);
+  }, [pedirFechar]);
 
   const carregar = useCallback(async (t: TamanhoReposicao) => {
     try {
@@ -95,18 +118,28 @@ export function PedirReposicaoModal({ tamanhoFila, pedidosMesa, meus, onRecarreg
       }
       if (r.kind === "fora_da_fila") {
         setPermitidos(r.tamanhos);
+        // Com envio não confirmado o carrinho/tamanho não mudam (a chave vale pra ele).
+        if (envioPendenteRef.current) return;
         setCatalogo(null);
         setCarrinho({});
-        // Só troca se o tamanho atual não é permitido (evita laço).
-        setTamanho((atual) => (atual && r.tamanhos.includes(atual) ? atual : (r.tamanhos[0] ?? null)));
+        // Só troca se o tamanho atual não é permitido (evita laço). Sem nenhum
+        // permitido, MANTÉM o atual: o polling segue e a tela destrava sozinha.
+        setTamanho((atual) => (atual && r.tamanhos.includes(atual) ? atual : (r.tamanhos[0] ?? atual)));
         return;
       }
       setIndisponivel(false);
       setCatalogo(r.catalogo);
       if (r.catalogo.minhaFila) setPermitidos(r.catalogo.minhaFila.tamanhos);
-      setCarrinho((c) => ajustarCarrinho(c, r.catalogo));
+      // Carrinho travado por envio não confirmado: ajustar mudaria a assinatura e
+      // geraria chave nova (reenvio duplicaria).
+      if (!envioPendenteRef.current) setCarrinho((c) => ajustarCarrinho(c, r.catalogo));
+      if (erroDeRefresh.current) {
+        erroDeRefresh.current = false;
+        setErro(null);
+      }
     } catch (e) {
       if (!vivo.current) return;
+      erroDeRefresh.current = true;
       setErro(e instanceof Error ? e.message : "Não deu pra carregar os produtos.");
     } finally {
       if (vivo.current) setCarregando(false);
@@ -128,7 +161,7 @@ export function PedirReposicaoModal({ tamanhoFila, pedidosMesa, meus, onRecarreg
   }, [tamanho, carregar]);
 
   const trocarTamanho = (t: TamanhoReposicao) => {
-    if (t === tamanho) return;
+    if (t === tamanho || envioPendente || enviando) return;
     setCarrinho({});
     setCatalogo(null);
     setTamanho(t);
@@ -145,18 +178,22 @@ export function PedirReposicaoModal({ tamanhoFila, pedidosMesa, meus, onRecarreg
   const teto = situacaoDoTeto(catalogo?.limites, totais.itens);
   const semFila = permitidos !== null && permitidos.length === 0;
   const resumoPendentes = meus?.pendentes.length ?? 0;
+  const travado = enviando || envioPendente;
+  fechamento.current = { itens: totais.itens, enviando };
 
   const enviar = async () => {
     if (!tamanho || enviando || totais.itens === 0 || teto.excede) return;
     setEnviando(true);
     setErro(null);
+    erroDeRefresh.current = false;
     try {
-      const assinatura = assinaturaDoCarrinho(tamanho, carrinho);
+      const carrinhoEnviado = { ...carrinho };
+      const assinatura = assinaturaDoCarrinho(tamanho, carrinhoEnviado);
       if (chaveEnvio.current?.assinatura !== assinatura) {
         chaveEnvio.current = { chave: crypto.randomUUID(), assinatura };
       }
       const r = await criarPedidosReposicao(
-        Object.entries(carrinho).map(([produtoId, qtd]) => ({ produtoId, tamanho, qtd })),
+        Object.entries(carrinhoEnviado).map(([produtoId, qtd]) => ({ produtoId, tamanho, qtd })),
         chaveEnvio.current.chave,
       );
       if (!vivo.current) return;
@@ -165,6 +202,9 @@ export function PedirReposicaoModal({ tamanhoFila, pedidosMesa, meus, onRecarreg
         return;
       }
       if (r.kind === "erro") {
+        // Resposta definitiva do servidor: nada foi gravado, a chave não vale mais.
+        chaveEnvio.current = null;
+        marcarEnvioPendente(false);
         setErro(mensagemDoErro(r.erro));
         // `produto_inativo`: tira só aquele produto do carrinho.
         if (r.erro.error === "produto_inativo") {
@@ -174,22 +214,42 @@ export function PedirReposicaoModal({ tamanhoFila, pedidosMesa, meus, onRecarreg
             return resto;
           });
         }
-        // `limite`/`fora_da_fila`: recarrega (o carrinho se ajusta sem perder o resto).
+        // `limite`/`fora_da_fila`/`chave_em_uso`: recarrega (o carrinho se ajusta sem perder o resto).
         await carregar(tamanho);
         void onRecarregarMeus();
         return;
       }
       chaveEnvio.current = null; // envio confirmado: o próximo carrinho ganha chave nova
-      setCarrinho({});
+      marcarEnvioPendente(false);
+      // Limpa só o que foi enviado (o carrinho está travado durante o envio).
+      const enviados = Object.keys(carrinhoEnviado);
+      setCarrinho((c) => {
+        const resto = { ...c };
+        for (const id of enviados) delete resto[id];
+        return resto;
+      });
       setDesfazer({ ids: r.pedidos.map((p) => p.id), pecas: r.pedidos.reduce((a, p) => a + p.qtd, 0) });
       if (desfazerTimer.current) clearTimeout(desfazerTimer.current);
       desfazerTimer.current = setTimeout(() => setDesfazer(null), DESFAZER_MS);
       await Promise.all([carregar(tamanho), onRecarregarMeus()]);
     } catch {
-      if (vivo.current) setErro("Não deu pra confirmar o envio. Pode tentar de novo sem medo de duplicar o pedido.");
+      if (vivo.current) {
+        // Pode ter gravado ou não: trava o carrinho até "Tentar de novo" ou "Descartar".
+        marcarEnvioPendente(true);
+        setErro("Não deu pra confirmar o envio. Pode tentar de novo sem medo de duplicar o pedido.");
+      }
     } finally {
       if (vivo.current) setEnviando(false);
     }
+  };
+
+  const descartarEnvio = async () => {
+    chaveEnvio.current = null;
+    marcarEnvioPendente(false);
+    setCarrinho({});
+    setErro(null);
+    // Meus pedidos e catálogo mostram o que de fato foi gravado.
+    await Promise.all([tamanho ? carregar(tamanho) : Promise.resolve(), onRecarregarMeus()]);
   };
 
   const cancelar = async (ids: string[]) => {
@@ -212,14 +272,14 @@ export function PedirReposicaoModal({ tamanhoFila, pedidosMesa, meus, onRecarreg
   };
 
   return (
-    <div style={overlay} onClick={() => !enviando && onClose()}>
+    <div style={overlay} onClick={pedirFechar}>
       <div style={box} onClick={(e) => e.stopPropagation()} role="dialog" aria-label="Pedir reposição">
         <div style={headerRow}>
           <div style={{ flex: 1, minWidth: 0 }}>
             <h2 style={titulo}>Pedir reposição</h2>
             <span style={sub}>Peças que estão faltando na sua bancada{tamanho ? ` · fila ${tamanho}` : ""}.</span>
           </div>
-          <button style={fecharBtn} onClick={onClose} title="Fechar (Esc)" aria-label="Fechar">
+          <button style={fecharBtn} onClick={pedirFechar} title="Fechar (Esc)" aria-label="Fechar">
             ×
           </button>
         </div>
@@ -234,6 +294,19 @@ export function PedirReposicaoModal({ tamanhoFila, pedidosMesa, meus, onRecarreg
         </div>
 
         {erro && <div style={erroBox}>{erro}</div>}
+        {confirmandoFechar && (
+          <div style={erroBox}>
+            <div style={{ marginBottom: 8 }}>Descartar o pedido que você estava montando?</div>
+            <div style={{ display: "flex", gap: 8 }}>
+              <button style={desfazerBtn} onClick={onClose}>
+                Descartar
+              </button>
+              <button style={desfazerBtn} onClick={() => setConfirmandoFechar(false)}>
+                Continuar editando
+              </button>
+            </div>
+          </div>
+        )}
         {desfazer && (
           <div style={okBox}>
             <span style={{ flex: 1 }}>Pedido enviado pros repositores ({desfazer.pecas} pç).</span>
@@ -256,7 +329,7 @@ export function PedirReposicaoModal({ tamanhoFila, pedidosMesa, meus, onRecarreg
                 {permitidos && permitidos.length > 1 && (
                   <div style={chipsRow}>
                     {permitidos.map((t) => (
-                      <button key={t} style={t === tamanho ? chipOn : chipOff} onClick={() => trocarTamanho(t)}>
+                      <button key={t} style={t === tamanho ? chipOn : chipOff} onClick={() => trocarTamanho(t)} disabled={travado}>
                         {t}
                       </button>
                     ))}
@@ -285,7 +358,7 @@ export function PedirReposicaoModal({ tamanhoFila, pedidosMesa, meus, onRecarreg
                           <button
                             style={cardBtn}
                             onClick={() => setCarrinho((c) => somarPacote(c, i, pickingDisponivel))}
-                            disabled={enviando || max < PACOTE_REPOSICAO}
+                            disabled={travado || max < PACOTE_REPOSICAO}
                             aria-label={`Adicionar ${PACOTE_REPOSICAO} peças de ${i.nomeCurto}`}
                           >
                             {foto ? <img src={foto} alt="" style={thumb} loading="lazy" /> : <div style={{ ...thumb, ...thumbVazia }} />}
@@ -314,20 +387,21 @@ export function PedirReposicaoModal({ tamanhoFila, pedidosMesa, meus, onRecarreg
                           </button>
                           {qtd > 0 && (
                             <div style={qtdWrap}>
-                              <button style={qtdBtn} onClick={() => setCarrinho((c) => tirarPacote(c, i.produtoId))} aria-label="Tirar 10 peças">
+                              <button style={qtdBtn} onClick={() => setCarrinho((c) => tirarPacote(c, i.produtoId))} disabled={travado} aria-label="Tirar 10 peças">
                                 −
                               </button>
                               <span style={qtdValor}>{qtd}</span>
                               <button
                                 style={qtdBtn}
                                 onClick={() => setCarrinho((c) => somarPacote(c, i, pickingDisponivel))}
-                                disabled={noTeto}
+                                disabled={noTeto || travado}
                                 aria-label="Colocar mais 10 peças"
                               >
                                 +
                               </button>
                               <button
                                 style={removerBtn}
+                                disabled={travado}
                                 onClick={() =>
                                   setCarrinho((c) => {
                                     const { [i.produtoId]: _, ...resto } = c;
@@ -343,6 +417,11 @@ export function PedirReposicaoModal({ tamanhoFila, pedidosMesa, meus, onRecarreg
                       );
                     })}
                 </div>
+                {envioPendente && (
+                  <div style={erroBox}>
+                    O pedido está travado até você tentar de novo ou descartar.
+                  </div>
+                )}
                 <div style={rodape}>
                   <div style={rodapeInfo}>
                     <strong>
@@ -350,12 +429,17 @@ export function PedirReposicaoModal({ tamanhoFila, pedidosMesa, meus, onRecarreg
                     </strong>
                     {teto.mostrar && <span style={teto.excede ? tetoExcede : tetoOk}>{teto.texto}</span>}
                   </div>
+                  {envioPendente && (
+                    <button style={desfazerBtn} disabled={enviando} onClick={() => void descartarEnvio()}>
+                      Descartar
+                    </button>
+                  )}
                   <button
                     style={totais.itens > 0 && !teto.excede && !enviando ? enviarBtn : enviarBtnOff}
                     disabled={totais.itens === 0 || teto.excede || enviando}
                     onClick={() => void enviar()}
                   >
-                    {enviando ? "Enviando…" : "Enviar pedido"}
+                    {enviando ? "Enviando…" : envioPendente ? "Tentar de novo" : "Enviar pedido"}
                   </button>
                 </div>
               </>

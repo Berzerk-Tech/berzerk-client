@@ -40,19 +40,30 @@ export function useMeusPedidosReposicao(aberto: boolean): {
 
   useEffect(() => {
     vivoRef.current = true;
+    // Flag LOCAL por execução do efeito: um await antigo (de um `aberto` anterior)
+    // nunca agenda timer órfão, mesmo que o efeito novo já tenha reativado o ref.
+    let cancelado = false;
     let timer: ReturnType<typeof setTimeout> | undefined;
     const ciclo = async () => {
       await recarregar();
-      if (!vivoRef.current) return;
+      if (cancelado) return;
       const ms = suporteRef.current ? (aberto ? INTERVALO_ABERTO_MS : INTERVALO_FECHADO_MS) : INTERVALO_SEM_SUPORTE_MS;
       timer = setTimeout(() => void ciclo(), ms);
     };
     void ciclo();
     return () => {
-      vivoRef.current = false;
+      cancelado = true;
       if (timer) clearTimeout(timer);
     };
   }, [aberto, recarregar]);
+
+  // Desmontagem de verdade (e só ela) derruba o ref usado pelo setState.
+  useEffect(
+    () => () => {
+      vivoRef.current = false;
+    },
+    [],
+  );
 
   return { suporte: estado.suporte, meus: estado.meus, recarregar };
 }

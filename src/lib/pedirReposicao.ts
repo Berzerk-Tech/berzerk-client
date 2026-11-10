@@ -147,6 +147,8 @@ export function mensagemDoErro(e: ErroPedidoReposicao): string {
       return "Este produto não está mais disponível pra pedido.";
     case "fora_da_fila":
       return "Você só pode pedir reposição do tamanho da fila em que está separando.";
+    case "chave_em_uso":
+      return "Não deu pra confirmar este pedido. Confira em Meus pedidos antes de enviar de novo.";
   }
 }
 

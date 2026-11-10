@@ -85,7 +85,8 @@ export type ErroPedidoReposicao =
   | { error: "fora_da_fila"; message?: string; tamanhos: TamanhoReposicao[] }
   | { error: "limite_pessoa"; message?: string; limite: number; pendentes: number }
   | { error: "fila_cheia"; message?: string; limite: number; pendentes: number }
-  | { error: "produto_inativo"; message?: string; produtoId: string };
+  | { error: "produto_inativo"; message?: string; produtoId: string }
+  | { error: "chave_em_uso"; message?: string };
 
 const SEM_SUPORTE = new Set([403, 404]);
 
@@ -160,7 +161,7 @@ export async function criarPedidosReposicao(itens: ItemPedidoReposicao[], idempo
     if (semSuporte(e)) return { kind: "sem_suporte" };
     const b = corpoErro(e);
     const codigo = b?.error;
-    if (b && (codigo === "limite" || codigo === "produto_inativo" || codigo === "fora_da_fila" || codigo === "limite_pessoa" || codigo === "fila_cheia")) {
+    if (b && (codigo === "limite" || codigo === "produto_inativo" || codigo === "fora_da_fila" || codigo === "limite_pessoa" || codigo === "fila_cheia" || codigo === "chave_em_uso")) {
       return { kind: "erro", erro: { ...b, tamanhos: tamanhosDe(b.tamanhos) } as unknown as ErroPedidoReposicao };
     }
     throw e;

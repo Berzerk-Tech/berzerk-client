@@ -103,7 +103,7 @@ describe("PedirReposicaoModal", () => {
     criar.mockRejectedValueOnce(new Error("timeout"));
     fireEvent.click(screen.getByText("Enviar pedido"));
     await screen.findByText(/sem medo de duplicar/);
-    fireEvent.click(screen.getByText("Enviar pedido")); // sucesso
+    fireEvent.click(screen.getByText("Tentar de novo")); // sucesso
     await screen.findByText(/Pedido enviado pros repositores/);
     const k1 = criar.mock.calls[0][1];
     expect(k1).toBeTruthy();
@@ -122,10 +122,110 @@ describe("PedirReposicaoModal", () => {
     criar.mockRejectedValueOnce(new Error("timeout"));
     fireEvent.click(screen.getByText("Enviar pedido"));
     await screen.findByText(/sem medo de duplicar/);
-    fireEvent.click(screen.getByLabelText("Adicionar 10 peças de Myth"));
+    // carrinho travado: não dá pra mudar o conteúdo (a chave vale pra ele)
+    expect((screen.getByLabelText("Adicionar 10 peças de Myth") as HTMLButtonElement).disabled).toBe(true);
+    // descartar: limpa carrinho e chave; carrinho novo ganha chave nova
+    fireEvent.click(screen.getByText("Descartar"));
+    await waitFor(() => expect(screen.getByText("0 peças · 0 produtos")).toBeTruthy());
+    fireEvent.click(screen.getByLabelText("Adicionar 10 peças de Zeus"));
     fireEvent.click(screen.getByText("Enviar pedido"));
     await waitFor(() => expect(criar).toHaveBeenCalledTimes(2));
     expect(criar.mock.calls[1][1]).not.toBe(criar.mock.calls[0][1]);
+  });
+
+  it("envio não confirmado: refresh do catálogo NÃO ajusta o carrinho; tentar de novo reusa chave e conteúdo", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      render(<PedirReposicaoModal {...props} />);
+      await screen.findByText("Zeus");
+      fireEvent.click(screen.getByLabelText("Adicionar 10 peças de Myth"));
+      criar.mockRejectedValueOnce(new Error("timeout"));
+      fireEvent.click(screen.getByText("Enviar pedido"));
+      await screen.findByText(/sem medo de duplicar/);
+      // refresh traz o Myth sem espaço: antes o carrinho era ajustado (assinatura/chave mudavam)
+      getCatalogo.mockResolvedValue(catalogo({ itens: [it_("a", "Zeus"), it_("b", "Myth", { limite: 20, pendenteQtd: 20 })] }));
+      await act(async () => { await vi.advanceTimersByTimeAsync(20_000); });
+      expect(screen.getByText("10 peças · 1 produto")).toBeTruthy();
+      fireEvent.click(screen.getByText("Tentar de novo"));
+      await waitFor(() => expect(criar).toHaveBeenCalledTimes(2));
+      expect(criar.mock.calls[1][1]).toBe(criar.mock.calls[0][1]);
+      expect(criar.mock.calls[1][0]).toEqual(criar.mock.calls[0][0]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("409 chave_em_uso: zera a chave e manda conferir Meus pedidos", async () => {
+    render(<PedirReposicaoModal {...props} />);
+    await screen.findByText("Zeus");
+    fireEvent.click(screen.getByLabelText("Adicionar 10 peças de Zeus"));
+    criar.mockResolvedValueOnce({ kind: "erro", erro: { error: "chave_em_uso" } });
+    fireEvent.click(screen.getByText("Enviar pedido"));
+    await screen.findByText("Não deu pra confirmar este pedido. Confira em Meus pedidos antes de enviar de novo.");
+    fireEvent.click(screen.getByText("Enviar pedido"));
+    await waitFor(() => expect(criar).toHaveBeenCalledTimes(2));
+    expect(criar.mock.calls[1][1]).not.toBe(criar.mock.calls[0][1]);
+  });
+
+  it("sucesso limpa só o que foi enviado e botões ficam travados durante o envio", async () => {
+    render(<PedirReposicaoModal {...props} />);
+    await screen.findByText("Zeus");
+    fireEvent.click(screen.getByLabelText("Adicionar 10 peças de Zeus"));
+    let liberar!: (v: unknown) => void;
+    criar.mockReturnValueOnce(new Promise((r) => { liberar = r; }));
+    fireEvent.click(screen.getByText("Enviar pedido"));
+    await waitFor(() => expect((screen.getByLabelText("Tirar 10 peças") as HTMLButtonElement).disabled).toBe(true));
+    expect((screen.getByLabelText("Colocar mais 10 peças") as HTMLButtonElement).disabled).toBe(true);
+    await act(async () => { liberar({ kind: "ok", pedidos: [{ id: "p1", produtoId: "a", tamanho: "M", qtd: 10 }] }); });
+    await screen.findByText(/Pedido enviado pros repositores/);
+    expect(screen.getByText("0 peças · 0 produtos")).toBeTruthy();
+  });
+
+  it("erro de refresh some quando um refresh seguinte dá certo", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      render(<PedirReposicaoModal {...props} />);
+      await screen.findByText("Zeus");
+      getCatalogo.mockRejectedValueOnce(new Error("rede caiu"));
+      await act(async () => { await vi.advanceTimersByTimeAsync(20_000); });
+      expect(screen.getByText("rede caiu")).toBeTruthy();
+      await act(async () => { await vi.advanceTimersByTimeAsync(20_000); });
+      expect(screen.queryByText("rede caiu")).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("fechar com itens no carrinho pede confirmação; sem itens fecha direto", async () => {
+    const onClose = vi.fn();
+    render(<PedirReposicaoModal {...props} onClose={onClose} />);
+    await screen.findByText("Zeus");
+    fireEvent.click(screen.getByLabelText("Fechar"));
+    expect(onClose).toHaveBeenCalledTimes(1);
+    fireEvent.click(screen.getByLabelText("Adicionar 10 peças de Zeus"));
+    fireEvent.keyDown(window, { key: "Escape" });
+    expect(onClose).toHaveBeenCalledTimes(1);
+    await screen.findByText("Descartar o pedido que você estava montando?");
+    fireEvent.click(screen.getByText("Continuar editando"));
+    expect(screen.queryByText("Descartar o pedido que você estava montando?")).toBeNull();
+    expect(screen.getByText("10 peças · 1 produto")).toBeTruthy();
+    fireEvent.click(screen.getByLabelText("Fechar"));
+    fireEvent.click(screen.getByText("Descartar"));
+    expect(onClose).toHaveBeenCalledTimes(2);
+  });
+
+  it("fora_da_fila sem tamanhos: continua relendo e destrava sozinho", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      getCatalogo.mockResolvedValueOnce({ kind: "fora_da_fila", tamanhos: [] });
+      render(<PedirReposicaoModal {...props} />);
+      await screen.findByText("Você precisa estar com pedidos na mesa pra pedir reposição.");
+      await act(async () => { await vi.advanceTimersByTimeAsync(20_000); });
+      await screen.findByText("Zeus");
+      expect(getCatalogo).toHaveBeenCalledTimes(2);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("409 produto_inativo: tira o produto, mantém o resto, mensagem simples", async () => {
@@ -184,6 +284,11 @@ describe("PedirReposicaoModal", () => {
   });
 });
 
+function SondaAberto({ aberto }: { aberto: boolean }) {
+  useMeusPedidosReposicao(aberto);
+  return null;
+}
+
 describe("useMeusPedidosReposicao", () => {
   function Sonda() {
     const { suporte, meus } = useMeusPedidosReposicao(false);
@@ -197,6 +302,25 @@ describe("useMeusPedidosReposicao", () => {
     for (let i = 0; i < 5; i++) fireEvent.click(screen.getByText("rerender-pai"));
     await act(async () => { await new Promise((r) => setTimeout(r, 30)); });
     expect(getMeus).toHaveBeenCalledTimes(1);
+  });
+
+  it("alternar `aberto` com request pendente deixa UM único ciclo ativo", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      const pendentes: Array<(v: unknown) => void> = [];
+      getMeus.mockImplementation(() => new Promise((r) => { pendentes.push(r); }));
+      const { rerender } = render(<SondaAberto aberto={false} />);
+      for (const a of [true, false, true, false, true]) rerender(<SondaAberto aberto={a} />);
+      // libera TODOS os GETs pendentes (inclusive os dos efeitos já cancelados)
+      getMeus.mockReset().mockResolvedValue(MEUS_VAZIO);
+      await act(async () => { pendentes.splice(0).forEach((r) => r(MEUS_VAZIO)); });
+      const base = getMeus.mock.calls.length;
+      await act(async () => { await vi.advanceTimersByTimeAsync(60_000); });
+      // aberto = true → 20 s: 3 chamadas num ciclo só (com órfãos seriam 3 × N)
+      expect(getMeus.mock.calls.length - base).toBe(3);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("com suporte: busca uma vez e re-render do pai não refaz a chamada", async () => {
