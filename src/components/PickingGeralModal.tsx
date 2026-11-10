@@ -79,7 +79,9 @@ type Props = {
   filters: QueueFilters;
   /** O LOTE da operadora — a folha que ela leva pra prateleira sai DAQUI.
    *  JÁ recortado por produto E por data, igual à sidebar. */
-  lote: Order[];
+  loteBruto: Order[];
+  /** Listas impressas em aberto do lote (só com 2+ aparece o seletor de qual reimprimir). */
+  listas?: { chave: string; numero: number; qtd: number }[];
   /**
    * Pedido que ela está conferindo e que ficou FORA do recorte (tem leitura,
    * então não sai da mesa nem do lote no servidor). Sai numa seção própria da
@@ -112,7 +114,8 @@ type Props = {
 export function PickingGeralModal({
   queue,
   filters,
-  lote,
+  loteBruto,
+  listas = [],
   emConferencia,
   operadora,
   exclusoesGlobais,
@@ -122,7 +125,20 @@ export function PickingGeralModal({
   rotuloLote,
   onClose,
 }: Props) {
-  const nomeDoLote = rotuloLote ?? `Meu lote (${lote.length})`;
+  // null = todas as listas; senão só a escolhida (reimpressão e carimbo).
+  const [listaSel, setListaSel] = useState<string | null>(null);
+  // Seleção EFETIVA: se a lista escolhida sumiu do lote (concluída/devolvida com o
+  // modal aberto, ou a chave trocou de `listaId` pra `listaEm` num recarregamento),
+  // volta pra "todas" — senão a folha e o carimbo saíam com só parte do lote
+  // rotulados como "Meu lote", e o seletor já teria sumido pra desfazer.
+  const sel = listaSel && listas.some((l) => l.chave === listaSel) ? listaSel : null;
+  const lote = useMemo(
+    () => (sel ? loteBruto.filter((o) => (o.listaId ?? o.listaEm) === sel) : loteBruto),
+    [loteBruto, sel],
+  );
+  const listaEscolhida = sel ? listas.find((l) => l.chave === sel) : undefined;
+  const nomeDoLote =
+    rotuloLote ?? (listaEscolhida ? `Lista ${listaEscolhida.numero} (${lote.length})` : `Meu lote (${lote.length})`);
   // O LOTE é o padrão: é a folha que a operadora leva pra prateleira. "Fila
   // inteira" continua a um clique, pra quem quer ver o que ainda vem.
   const [escopo, setEscopo] = useState<Escopo>("lote");
@@ -282,7 +298,8 @@ export function PickingGeralModal({
     // no claim — senão a folha lista misto que nunca vem (Victor, 07/11).
     return fechamCom(
       pedidosMistosNosFiltros(
-        pedidosMistos({ fila: products ?? [], lote, size: queue.size, sizes: queue.sizes }),
+        // `loteBruto`: a consulta da fila inteira não é recortada pela lista escolhida.
+        pedidosMistos({ fila: products ?? [], lote: loteBruto, size: queue.size, sizes: queue.sizes }),
         [...(exclusoesGlobais ?? []), ...(filters.excludeProducts ?? [])],
         filters.includeProducts,
       ),
@@ -448,6 +465,33 @@ export function PickingGeralModal({
               </button>
             ))}
           </div>
+          {listas.length >= 2 && escopo === "lote" && !rotuloLote && (
+            <div style={escopoTabs}>
+              <button
+                type="button"
+                style={sel === null ? escopoTabOn : escopoTab}
+                aria-pressed={sel === null}
+                title="Imprimir o lote inteiro"
+                onClick={() => setListaSel(null)}
+                disabled={imprimindo}
+              >
+                Todas ({loteBruto.length})
+              </button>
+              {listas.map((l) => (
+                <button
+                  key={l.chave}
+                  type="button"
+                  style={sel === l.chave ? escopoTabOn : escopoTab}
+                  aria-pressed={sel === l.chave}
+                  title={`Imprimir só a lista ${l.numero}`}
+                  onClick={() => setListaSel(l.chave)}
+                  disabled={imprimindo}
+                >
+                  Lista {l.numero} ({l.qtd})
+                </button>
+              ))}
+            </div>
+          )}
           <button
             style={imprimindo ? imprimirBtnOff : imprimirBtn}
             onClick={() => void imprimir()}

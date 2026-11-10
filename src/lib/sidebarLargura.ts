@@ -35,3 +35,23 @@ export function gravarLarguraSidebar(px: number): void {
     /* localStorage indisponível: a largura vale só na sessão */
   }
 }
+
+// Painel do Filtro Mistos na sidebar: recolhido por padrão (a grade de
+// miniaturas empurrava a lista de pedidos pra baixo).
+const MISTOS_PAINEL_KEY = "berzerk-mistos-painel-aberto";
+
+export function lerMistosPainelAberto(): boolean {
+  try {
+    return localStorage.getItem(MISTOS_PAINEL_KEY) === "1";
+  } catch {
+    return false;
+  }
+}
+
+export function gravarMistosPainelAberto(aberto: boolean): void {
+  try {
+    localStorage.setItem(MISTOS_PAINEL_KEY, aberto ? "1" : "0");
+  } catch {
+    /* localStorage indisponível: vale só na sessão */
+  }
+}
