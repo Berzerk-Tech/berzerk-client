@@ -16,6 +16,8 @@ import { FotoPeca } from "./FotoPeca";
 import {
   LARGURA_PADRAO,
   gravarLarguraSidebar,
+  gravarMistosPainelAberto,
+  lerMistosPainelAberto,
   lerLarguraSidebar,
   limitarLargura,
 } from "../lib/sidebarLargura";
@@ -1763,6 +1765,25 @@ export function SeparacaoRunner({
   // reconstrói peças por pedido — não é pra rodar por leitura.
   const visiveis = useMemo(() => loteVisivel(lote, pulados, filtrosEfetivos, queue.size), [lote, pulados, filtrosEfetivos, queue.size]);
   const ocultos = lote.length - visiveis.length;
+  // Listas impressas em aberto (Mistos: até 2) pro seletor de reimpressão do
+  // Picking Geral — só pedidos COM lista, na ordem do número ("Lista 1/2").
+  const listasDoPicking = useMemo(() => {
+    const doModal = visiveis.filter((o) => !o.entregaEmMaos);
+    // Numera sobre o lote INTEIRO (como o chip "Lista N" do card): um filtro que
+    // esconde a Lista 1 inteira não pode renumerar a 2 como 1 só no modal.
+    const numeros = numerarListas(lote);
+    const porChave = new Map<string, { chave: string; numero: number; qtd: number }>();
+    for (const o of doModal) {
+      if (!o.listaEm) continue;
+      const numero = numeros.get(o.id);
+      if (!numero) continue;
+      const chave = o.listaId ?? o.listaEm;
+      const atual = porChave.get(chave);
+      if (atual) atual.qtd += 1;
+      else porChave.set(chave, { chave, numero, qtd: 1 });
+    }
+    return [...porChave.values()].sort((a, b) => a.numero - b.numero);
+  }, [lote, visiveis]);
   /**
    * O pedido da MESA quando ele ficou FORA do recorte: com leitura começada,
    * `aplicarFiltros` o mantém na mesa (jogar fora a conferência dela seria
@@ -2218,7 +2239,8 @@ export function SeparacaoRunner({
           // o servidor já aplicou os filtros no claim). Senão, o lote visível.
           // Entrega em mãos fica fora da folha (ela separa pessoalmente) e,
           // por tabela, fora do carimbo `marcarListaImpressa`.
-          lote={novaLista ?? visiveis.filter((o) => !o.entregaEmMaos)}
+          loteBruto={novaLista ?? visiveis.filter((o) => !o.entregaEmMaos)}
+          listas={novaLista ? [] : listasDoPicking}
           emConferencia={novaLista || emConferenciaForaDoFiltro?.entregaEmMaos ? null : emConferenciaForaDoFiltro}
           operadora={operadora}
           exclusoesGlobais={termosDoGalpao}
@@ -2495,6 +2517,13 @@ function LoteSidebar({
   onAbrirFiltroMistos: () => void;
 }) {
   const [busca, setBusca] = useState("");
+  const [mistosAberto, setMistosAberto] = useState<boolean>(lerMistosPainelAberto);
+  const alternarMistos = () => {
+    setMistosAberto((v) => {
+      gravarMistosPainelAberto(!v);
+      return !v;
+    });
+  };
   const termo = busca.trim().toLowerCase();
   // Busca LOCAL: o lote inteiro já está em memória com os itens (até 50 nos
   // mistos) — ir ao servidor pra filtrar essa lista seria latência à toa.
@@ -2553,6 +2582,20 @@ function LoteSidebar({
               </span>
               Filtro Mistos ativo
             </button>
+            <button
+              type="button"
+              style={mistosResumoBtn}
+              onClick={alternarMistos}
+              aria-expanded={mistosAberto}
+              title={mistosAberto ? "Recolher os produtos" : "Mostrar os produtos"}
+            >
+              <span>
+                {mistosProdutos.length} {mistosProdutos.length === 1 ? "produto" : "produtos"}
+                {ocultos > 0 ? ` · ${ocultos} ocultos pelos filtros` : ""}
+              </span>
+              <span aria-hidden="true">{mistosAberto ? "▾" : "▸"}</span>
+            </button>
+            {mistosAberto && (
             <div style={mistosProdsRow}>
               {mistosProdutos.map((nome) =>
                 mistosImagens[nome] ? (
@@ -2571,10 +2614,8 @@ function LoteSidebar({
                   </span>
                 ),
               )}
-              <small style={mistosMiniTxt}>
-                {mistosProdutos.length} {mistosProdutos.length === 1 ? "produto" : "produtos"}
-              </small>
             </div>
+            )}
           </div>
         )}
       </div>
@@ -4176,7 +4217,27 @@ const mistosSwKnob: CSSProperties = {
   background: "#1a1405",
 };
 
-const mistosProdsRow: CSSProperties = { display: "flex", alignItems: "center", flexWrap: "wrap", gap: 5 };
+const mistosProdsRow: CSSProperties = {
+  display: "flex",
+  alignItems: "center",
+  flexWrap: "wrap",
+  gap: 5,
+  maxHeight: 96,
+  overflowY: "auto",
+};
+
+const mistosResumoBtn: CSSProperties = {
+  display: "flex",
+  alignItems: "center",
+  justifyContent: "space-between",
+  gap: 8,
+  padding: 0,
+  background: "none",
+  border: "none",
+  cursor: "pointer",
+  fontSize: 11,
+  color: "var(--text-faint)",
+};
 
 const mistosMini: CSSProperties = {
   width: 30,
@@ -4188,12 +4249,6 @@ const mistosMini: CSSProperties = {
   outlineOffset: -1,
 };
 
-const mistosMiniTxt: CSSProperties = {
-  fontFamily: "var(--font-mono)",
-  fontSize: 11,
-  color: "var(--warning-text)",
-  marginLeft: 4,
-};
 
 const cardImageWrap: CSSProperties = {
   position: "relative",

@@ -119,7 +119,7 @@ describe("PickingFiltersModal — fila ∪ lote", () => {
 });
 
 describe("PickingGeralModal — filtros ativos", () => {
-  const base = { queue: QUEUE, lote: [] as Order[], operadora: "Sabrina", onClose: () => {} };
+  const base = { queue: QUEUE, loteBruto: [] as Order[], operadora: "Sabrina", onClose: () => {} };
 
   it("sem filtro: nenhum banner", () => {
     render(<PickingGeralModal {...base} filters={{}} />);
