@@ -44,3 +44,7 @@ Contexto de negócio (06/11/2026): o Victor quer filtrar a fila de pedidos únic
 - Pedido emitido 23:30 de SP (02:30Z do dia seguinte) cai no dia de SP, não no UTC.
 - Duas chamadas com dias diferentes não compartilham cache.
 - Sem `dia`: resposta igual à anterior (mais `dias`).
+
+## Intervalo de dias (client 0.9.76)
+
+`GET /expedicao/unicos`, `GET /expedicao/unicos/pedidos` (query) e `POST /expedicao/unicos/separar` (body) aceitam `de` e `ate` (`YYYY-MM-DD`, inclusivos, dia de emissão em SP, independentes). `dia` segue aceito (= `de = ate`); o client manda `dia` além de `de`/`ate` quando o recorte é de um dia só. Os dois GET devolvem `periodo: { de, ate }`; a PRESENÇA desse campo é o detector de suporte: sem ele o client trata a API como antiga (só um dia, "Até" desabilitado). `dias[]` segue com todos os dias da fila.

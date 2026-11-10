@@ -506,6 +506,18 @@ export function limiteListasAbertas(e: unknown): { message: string; listasAberta
   };
 }
 
+/** Corpo do 409 `mistos_produto_reservado` do `lote`/`claim-mixed` (produto do Filtro Mistos já é de outra operadora; null se é outro erro). */
+export function mistosProdutoReservado(e: unknown): { termo: string | null; operadora: string | null } | null {
+  if (!(e instanceof ApiError) || !e.body || typeof e.body !== "object") return null;
+  const b = e.body as Record<string, unknown>;
+  if (b.error !== "mistos_produto_reservado") return null;
+  const op = b.operadora && typeof b.operadora === "object" ? (b.operadora as Record<string, unknown>) : null;
+  return {
+    termo: typeof b.termo === "string" ? b.termo : null,
+    operadora: op && typeof op.nome === "string" && op.nome.trim() ? op.nome : null,
+  };
+}
+
 /**
  * Nexus AINDA sem `/separacao/lote` (app atualizou antes da API): cai no claim
  * de um pedido só. A operadora continua separando — lote de um, sem "faltam X"

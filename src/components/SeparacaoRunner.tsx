@@ -45,6 +45,7 @@ import { SeparacaoHistoryModal } from "./SeparacaoHistoryModal";
 import { ListasImpressasModal } from "./ListasImpressasModal";
 import { PickingFiltersModal, emptyFilters, loadFilters, saveFilters, type Aba } from "./PickingFiltersModal";
 import { chaveMisto, ordenarPorProdutoFora, passaNoFiltroMistos, pedidoMistoDoLote } from "../lib/mistos";
+import { motivoDaFalhaDoLote, reservarComRollback, type ReservaMistosResultado } from "../lib/reservaMistos";
 import { ApiError } from "../lib/api";
 import {
   avisoAwbColetado,
@@ -680,14 +681,15 @@ export function SeparacaoRunner({
    * tinham feito (relato do 1º dia na 0.9.4).
    */
   const puxarLote = useCallback(
-    async (opts?: { preservarAtual?: boolean; depoisDe?: string; novaLista?: boolean }): Promise<Order[] | undefined> => {
+    async (opts?: { preservarAtual?: boolean; depoisDe?: string; novaLista?: boolean; reserva?: boolean }): Promise<Order[] | undefined> => {
       // Reposição em background (push do WS, troca de filtro) cede a vez: o
       // caminho do complete já vai repor, e duas chamadas em voo trocariam o
       // pedido da mesa no meio da conferência.
       // Enquanto o Picking Geral carimba+imprime, NENHUM claimLote de fundo:
       // um lote() com recorte no meio soltava pedidos que a folha já tem e
       // eles ficavam fora do snapshot — irrecuperáveis (achado da revisão 04/09).
-      if (opts?.preservarAtual && (puxandoRef.current || completingRef.current || imprimindoRef.current)) return;
+      // `reserva`: o "Imprimir e reservar" já segurou `imprimindoRef` de propósito e é ele quem puxa.
+      if (opts?.preservarAtual && (puxandoRef.current || completingRef.current || (imprimindoRef.current && !opts.reserva))) return;
       const atual = opts?.preservarAtual ? orderRef.current : null;
       if (!atual) {
         setPhase("loading");
@@ -1815,7 +1817,7 @@ export function SeparacaoRunner({
   // Já o estado vazio precisa explicar QUALQUER recorte, data inclusive.
   const temRecorte = filtrosAtivos > 0 || Boolean(filters.dateFrom || filters.dateTo);
 
-  const aplicarFiltros = (f: QueueFilters) => {
+  const aplicarFiltros = (f: QueueFilters, opts?: { puxar?: boolean }) => {
     setFilters(f);
     filtersRef.current = f;
     // As refs só sincronizam no próximo render; o `puxarLote` abaixo lê AGORA
@@ -1846,7 +1848,49 @@ export function SeparacaoRunner({
         showNotice("O pedido da mesa ficou fora do filtro. Conclua ou devolva antes de seguir.");
       }
     }
-    void puxarLote({ preservarAtual: true });
+    // "Imprimir e reservar" puxa a lista nova logo em seguida (`reservarMistos`):
+    // um lote de fundo aqui deixaria `puxandoRef` ocupado e a lista não sairia.
+    if (opts?.puxar !== false) void puxarLote({ preservarAtual: true });
+  };
+
+  /**
+   * "Imprimir e reservar" do Filtro Mistos: aplica o filtro escolhido no modal e
+   * puxa a lista nova no servidor (`lote` com `novaLista`), devolvendo os pedidos
+   * que ficaram REALMENTE com ela. O carimbo e a impressão são do modal. Mesmos
+   * erros do "Tirar nova lista" (limite de listas, produto reservado, fila vazia).
+   */
+  const reservarMistos = async (
+    f: QueueFilters,
+    extra?: { imagens: Record<string, string | null>; exclusoesGlobais?: ExclusoesGlobais },
+  ): Promise<ReservaMistosResultado> => {
+    // `imprimindoRef` já vem ligado pelo modal (segura o `lote()` de fundo durante todo o fluxo).
+    if (puxandoRef.current || completingRef.current) {
+      return { ok: false, motivo: "Aguarde terminar a operação atual (a mesa está sendo atualizada) e tente de novo. Nada foi reservado." };
+    }
+    if (extra) {
+      setMistosImagens(extra.imagens);
+      if (extra.exclusoesGlobais) {
+        globaisRef.current = extra.exclusoesGlobais;
+        setExclusoesGlobais(extra.exclusoesGlobais);
+      }
+    }
+    return reservarComRollback(
+      {
+        filtrosAnteriores: filtersRef.current,
+        aplicarFiltro: (x) => aplicarFiltros(x, { puxar: false }),
+        puxar: () => puxarLote({ preservarAtual: true, novaLista: true, reserva: true }),
+        idsNaMesa: () => [...(orderRef.current ? [orderRef.current.id] : []), ...iniciadosRef.current],
+        traduzirErro: (e) => {
+          const motivo = motivoDaFalhaDoLote(e);
+          if (motivo) return motivo;
+          if (e instanceof Error && e.message === NEXUS_SEM_NOVA_LISTA) {
+            return "O servidor ainda não sabe tirar lista nova. Peça pra atualizar o Nexus. Nada foi reservado.";
+          }
+          return `Não deu pra reservar: ${e instanceof Error ? e.message : String(e)}. Nada foi impresso.`;
+        },
+      },
+      f,
+    );
   };
 
   /** Recorte de data de emissão escolhido no seletor — null = todas. */
@@ -2211,6 +2255,13 @@ export function SeparacaoRunner({
           queue={queue}
           lote={lote}
           abaInicial={filtersAba}
+          onReservarMistos={queue.mode === "total" && !pedidoInicial ? reservarMistos : undefined}
+          onRecarregarPedidos={async () => (await getMeusPedidos()).orders}
+          onAviso={showNotice}
+          onListaImpressa={marcarLotePresoLocalmente}
+          onImprimindo={(v) => {
+            imprimindoRef.current = v;
+          }}
           onApply={(f, extra) => {
             if (extra) {
               setMistosImagens(extra.imagens);

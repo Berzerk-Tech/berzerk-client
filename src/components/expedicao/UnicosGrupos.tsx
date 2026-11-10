@@ -8,11 +8,16 @@ import { miniaturaLeve } from "../../lib/imagens";
 import {
   agruparPorEstampa,
   filtrarGrupos,
+  escolherPeriodo,
+  periodoEfetivo,
+  periodoVazio,
   rotuloDia,
   rotuloOrderBump,
   rotuloTipos,
   unicosRotaAusente,
+  PERIODO_VAZIO,
   type EstampaAgrupada,
+  type PeriodoUnicos,
   type GrupoEscolhido,
 } from "../../lib/unicosExpedicao";
 import { getUnicos, type UnicosResponse } from "../../services/expedicao";
@@ -25,17 +30,22 @@ export function UnicosGrupos({
   onEscolher,
   onIndisponivel,
   estampaInicial = null,
-  dia = null,
-  onDia,
+  periodo = PERIODO_VAZIO,
+  onPeriodo,
+  suportado = null,
+  onSuporte,
 }: {
   onEscolher: (g: GrupoEscolhido) => void;
   /** API ainda sem a fila (404): a tela desabilita o modo. */
   onIndisponivel: () => void;
   /** Chave (`chaveEstampa`: estampa + cor) cujo painel de tamanhos abre direto (a fila do tamanho acabou). */
   estampaInicial?: string | null;
-  /** Dia (YYYY-MM-DD) filtrado, controlado pelo pai pra sobreviver a grade ↔ lateral. */
-  dia?: string | null;
-  onDia?: (dia: string | null) => void;
+  /** Intervalo de dias (YYYY-MM-DD) filtrado, controlado pelo pai pra sobreviver a grade ↔ lateral. */
+  periodo?: PeriodoUnicos;
+  onPeriodo?: (p: PeriodoUnicos) => void;
+  /** Servidor aplica `de`/`ate`? null = ainda sem resposta; false = API antiga (só um dia). */
+  suportado?: boolean | null;
+  onSuporte?: (suportado: boolean) => void;
 }) {
   const [dados, setDados] = useState<UnicosResponse | null>(null);
   const [erro, setErro] = useState<string | null>(null);
@@ -58,10 +68,14 @@ export function UnicosGrupos({
     };
   }, []);
 
+  // Deps primitivas: `periodo` pode chegar como objeto novo a cada render do pai.
+  const periodoDe = periodo.de;
+  const periodoAte = periodo.ate;
   const carregar = useCallback(async () => {
     setCarregando(true);
     try {
-      const r = await getUnicos(dia);
+      const r = await getUnicos(periodoEfetivo({ de: periodoDe, ate: periodoAte }, suportado));
+      onSuporte?.(r.periodo !== undefined);
       setDados(r);
       setErro(null);
     } catch (e) {
@@ -70,7 +84,7 @@ export function UnicosGrupos({
     } finally {
       setCarregando(false);
     }
-  }, [onIndisponivel, dia]);
+  }, [onIndisponivel, periodoDe, periodoAte, suportado, onSuporte]);
 
   useEffect(() => {
     void carregar();
@@ -103,8 +117,8 @@ export function UnicosGrupos({
           style={buscaInput}
           aria-label="Buscar fila de únicos"
         />
-        {onDia && (
-          <SeletorDia dias={dados?.dias} dia={dia} onDia={onDia} />
+        {onPeriodo && (
+          <SeletorPeriodo dias={dados?.dias} periodo={periodoEfetivo(periodo, suportado)} suportado={suportado === true} onPeriodo={onPeriodo} />
         )}
         <span style={total}>{dados ? `${dados.totalPedidos ?? 0} pedidos` : ""}</span>
         {dados?.orderBump && podeConfigurarBump && (
@@ -148,24 +162,59 @@ export function UnicosGrupos({
 }
 
 /**
- * Filtro por dia de emissão (Victor, 06/11/2026). Nexus novo manda `dias`
- * (com contagem): select. Nexus antigo não manda: `input date` simples e a
- * lateral filtra localmente.
+ * Filtro por intervalo de dias de emissão (Victor 06/11/2026; intervalo em 10/11).
+ * Nexus novo manda `dias` (com contagem): selects. Nexus antigo não manda: `input date`
+ * e a lateral filtra localmente. Sem `periodo` na resposta (`suportado` false) o servidor
+ * só entende um dia: "Até" fica desabilitado.
  */
-function SeletorDia({ dias, dia, onDia }: { dias?: { dia: string; pedidos: number }[]; dia: string | null; onDia: (d: string | null) => void }) {
-  if (!dias) {
-    return <input type="date" value={dia ?? ""} onChange={(e) => onDia(e.target.value || null)} style={diaInput} aria-label="Filtrar por dia de emissão" title="Filtrar por dia de emissão" />;
-  }
-  const lista = dia && !dias.some((d) => d.dia === dia) ? [...dias, { dia, pedidos: 0 }] : dias;
+function SeletorPeriodo({
+  dias,
+  periodo,
+  suportado,
+  onPeriodo,
+}: {
+  dias?: { dia: string; pedidos: number }[];
+  periodo: PeriodoUnicos;
+  suportado: boolean;
+  onPeriodo: (p: PeriodoUnicos) => void;
+}) {
+  const campo = (c: "de" | "ate", rotulo: string, vazio: string, desabilitado: boolean) => {
+    const valor = periodo[c];
+    const aria = `Dia de emissão: ${rotulo}`;
+    const muda = (v: string) => onPeriodo(escolherPeriodo(periodo, c, v || null, suportado));
+    if (!dias) {
+      return (
+        <label style={diaRotulo}>
+          {rotulo}
+          <input type="date" value={valor ?? ""} onChange={(e) => muda(e.target.value)} disabled={desabilitado} style={diaInput} aria-label={aria} title={aria} />
+        </label>
+      );
+    }
+    const lista = valor && !dias.some((d) => d.dia === valor) ? [...dias, { dia: valor, pedidos: 0 }] : dias;
+    return (
+      <label style={diaRotulo}>
+        {rotulo}
+        <select value={valor ?? ""} onChange={(e) => muda(e.target.value)} disabled={desabilitado} style={diaInput} aria-label={aria} title={aria}>
+          <option value="">{vazio}</option>
+          {lista.map((d) => (
+            <option key={d.dia} value={d.dia}>
+              {rotuloDia(d.dia)} · {d.pedidos}
+            </option>
+          ))}
+        </select>
+      </label>
+    );
+  };
   return (
-    <select value={dia ?? ""} onChange={(e) => onDia(e.target.value || null)} style={diaInput} aria-label="Filtrar por dia de emissão" title="Filtrar por dia de emissão">
-      <option value="">Todos os dias</option>
-      {lista.map((d) => (
-        <option key={d.dia} value={d.dia}>
-          {rotuloDia(d.dia)} · {d.pedidos}
-        </option>
-      ))}
-    </select>
+    <>
+      {campo("de", "De", "Início", false)}
+      {suportado && campo("ate", "Até", "Fim", false)}
+      {!periodoVazio(periodo) && (
+        <button type="button" style={atualizarBtn} onClick={() => onPeriodo(PERIODO_VAZIO)}>
+          Todos os dias
+        </button>
+      )}
+    </>
   );
 }
 
@@ -296,6 +345,7 @@ const wrap: CSSProperties = { flex: 1, minHeight: 0, display: "flex", flexDirect
 const topo: CSSProperties = { display: "flex", alignItems: "center", gap: 12 };
 const buscaInput: CSSProperties = { flex: 1, padding: "10px 14px", background: "var(--bg-input)", border: "1px solid var(--border)", borderRadius: 10, color: "var(--text)", fontSize: 15 };
 const diaInput: CSSProperties = { padding: "9px 10px", background: "var(--bg-input)", border: "1px solid var(--border)", borderRadius: 10, color: "var(--text)", fontSize: 14, fontWeight: 700 };
+const diaRotulo: CSSProperties = { display: "flex", alignItems: "center", gap: 6, color: "var(--text-secondary)", fontSize: 13, fontWeight: 700 };
 const total: CSSProperties = { color: "var(--text-secondary)", fontSize: 13, fontWeight: 700 };
 const atualizarBtn: CSSProperties = { padding: "9px 14px", background: "var(--bg-card)", border: "1px solid var(--border)", borderRadius: 10, color: "var(--text)", fontWeight: 700, cursor: "pointer" };
 const bumpBtn: CSSProperties = { padding: "9px 14px", background: "var(--bg-card)", border: "1px solid var(--border)", borderRadius: 10, color: "var(--text)", fontWeight: 700, cursor: "pointer", maxWidth: 280, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" };

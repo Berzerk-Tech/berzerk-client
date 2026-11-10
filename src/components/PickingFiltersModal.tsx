@@ -21,7 +21,7 @@
 // tamanhos); ficam na fila só os mistos cujas peças de outro tamanho são
 // todas desses produtos. A regra e os cálculos vivem em `lib/mistos.ts`.
 
-import { useEffect, useMemo, useState, type CSSProperties } from "react";
+import { useCallback, useEffect, useMemo, useState, type CSSProperties } from "react";
 import { ApiError } from "../lib/api";
 import { miniatura } from "../lib/imagens";
 import { agregarLote, mesclarProdutos } from "../lib/agregarLote";
@@ -38,6 +38,7 @@ import {
 } from "../lib/mistos";
 import { gerarMistosPdf } from "../lib/mistosPdf";
 import { printPdfBase64 } from "../lib/printer";
+import { folhaDosReservados, separarFolha, textoCarimbo, textoForaDaFolha, textoReservados, type ReservaMistosResultado } from "../lib/reservaMistos";
 import {
   adicionarExclusaoGlobal,
   getExclusoesGlobais,
@@ -48,6 +49,7 @@ import {
 import { getLabelPrinter } from "../services/printerConfig";
 import {
   getQueueProducts,
+  marcarListaImpressa,
   type ProdutoReservado,
   type CanalSeparacao,
   type Order,
@@ -138,11 +140,24 @@ type Props = {
     f: QueueFilters,
     extra?: { imagens: Record<string, string | null>; exclusoesGlobais?: ExclusoesGlobais },
   ) => void;
+  /** "Imprimir e reservar" (aba Mistos): aplica o filtro e puxa a lista nova no servidor (quem tem a mesa). Ausente = só a folha de consulta. */
+  onReservarMistos?: (
+    f: QueueFilters,
+    extra?: { imagens: Record<string, string | null>; exclusoesGlobais?: ExclusoesGlobais },
+  ) => Promise<ReservaMistosResultado>;
+  /** Pedidos carimbados no servidor (lista impressa) — a tela marca o lote em memória. */
+  onListaImpressa?: (ids: string[], listaId: string | null) => void;
+  /** Carimbo + impressão em andamento: a tela segura o `lote()` de fundo (como no Picking Geral). */
+  onImprimindo?: (imprimindo: boolean) => void;
+  /** Pedidos que ela tem agora no servidor (pra saber quais o carimbo parcial prendeu). */
+  onRecarregarPedidos?: () => Promise<Order[]>;
+  /** Desfecho do "Imprimir e reservar" no canal de aviso da tela (vale mesmo com o modal fechado/desmontado). */
+  onAviso?: (msg: string) => void;
   onClear: () => void;
   onClose: () => void;
 };
 
-export function PickingFiltersModal({ filters, queue, lote, abaInicial = "exclusao", onApply, onClear, onClose }: Props) {
+export function PickingFiltersModal({ filters, queue, lote, abaInicial = "exclusao", onApply, onReservarMistos, onListaImpressa, onImprimindo, onRecarregarPedidos, onAviso, onClear, onClose: onCloseProp }: Props) {
   const [exclude, setExclude] = useState<string[]>(filters.excludeProducts ?? []);
   const [include, setInclude] = useState<string[]>(filters.includeProducts ?? []);
   const [mistos, setMistos] = useState<string[]>(filters.mistosProdutos ?? []);
@@ -175,6 +190,12 @@ export function PickingFiltersModal({ filters, queue, lote, abaInicial = "exclus
     queue?.mode === "total" &&
     (!!daFila?.some((p) => p.produto != null) || !!lote?.some((o) => o.items.some((i) => i.produto != null)));
   const aba: Aba = abaSel === "mistos" && !temMistos ? "exclusao" : abaSel;
+
+  // Reservando/imprimindo o modal não fecha: o desfecho (carimbo, folha) precisa chegar na tela.
+  const onClose = useCallback(() => {
+    if (imprimindoMistos) return;
+    onCloseProp();
+  }, [imprimindoMistos, onCloseProp]);
 
   // ESC fecha (as atendentes esperam isso do posvenda).
   useEffect(() => {
@@ -393,12 +414,12 @@ export function PickingFiltersModal({ filters, queue, lote, abaInicial = "exclus
     setMistos((prev) => (prev.some((t) => chaveMisto(t) === k) ? prev.filter((t) => chaveMisto(t) !== k) : [...prev, produto]));
   };
 
+  /** Folha de CONSULTA: não aplica filtro, não carimba, não reserva (a supervisão olha a demanda). */
   const imprimirMistos = async () => {
     if (!queue || imprimindoMistos || fechados.length === 0) return;
     setImprimindoMistos(true);
     setStatusMistos("Enviando pra impressora…");
     try {
-      // Folha de CONSULTA: sem aplicar o filtro e sem carimbo (não reserva pedidos).
       const base64 = gerarMistosPdf({ fila: queue.size, pedidos: fechados.length, linhas: pick, consulta: true });
       const out = await printPdfBase64(base64, {
         printer: getLabelPrinter(),
@@ -416,6 +437,121 @@ export function PickingFiltersModal({ filters, queue, lote, abaInicial = "exclus
     }
   };
 
+  /**
+   * "Imprimir e reservar": (1) aplica o filtro como o "Aplicar", (2) puxa a lista
+   * nova no servidor, (3) CARIMBA os pedidos que ficaram com ela, (4) só então
+   * imprime a folha dos pedidos reservados. Carimbo primeiro, papel depois (a
+   * mesma ordem do Picking Geral): folha sem carimbo é o "mistos sumiram".
+   */
+  const imprimirEReservar = async () => {
+    if (!queue || !onReservarMistos || imprimindoMistos || mistos.length === 0 || fechados.length === 0) return;
+    const prometidos = fechados.length;
+    setImprimindoMistos(true);
+    setStatusMistos("Aplicando o filtro e reservando os pedidos…");
+    // Segura o `lote()` de fundo do começo ao fim (o runner puxa a lista nova por baixo disto).
+    onImprimindo?.(true);
+    const finalizar = (msg: string) => {
+      setStatusMistos(msg);
+      onAviso?.(msg);
+    };
+    try {
+      const prep = await prepararFiltros();
+      if (!prep) {
+        setStatusMistos("O filtro não foi aplicado. Nada foi reservado nem impresso.");
+        return;
+      }
+      const r = await onReservarMistos(prep.f, prep.extra);
+      if (!r.ok) {
+        finalizar(r.motivo);
+        return;
+      }
+      const novos = r.novos;
+      if (novos.length === 0) {
+        finalizar("Fila sem pedidos novos pra esse filtro. Nada foi reservado nem impresso.");
+        return;
+      }
+      // Quem já estava na mão dela (pedido da mesa, já iniciado) é carimbado como no
+      // "Tirar nova lista", mas não manda buscar a peça de novo na folha.
+      const foraSet = new Set(r.foraDaFolha ?? []);
+      const ids = novos.map((o) => o.id);
+      const folhaPrevia = folhaDosReservados(novos.filter((o) => !foraSet.has(o.id)), queue.size);
+      let listaId: string | null = null;
+      let presos = 0;
+      try {
+        const resultado = await marcarListaImpressa({
+          orderIds: ids,
+          escopo: "lote",
+          filtros: r.filtros,
+          secoes: [{ tamanho: "MISTOS", linhas: folhaPrevia.linhas.map((l) => ({ produto: l.produto, qtd: l.total })) }],
+        });
+        if (resultado.presos <= 0) throw new Error("o servidor não confirmou a lista");
+        listaId = resultado.listaId;
+        presos = resultado.presos;
+      } catch (e) {
+        finalizar(
+          `Os ${novos.length} pedidos saíram da fila e estão na SUA mesa, mas a lista NÃO foi carimbada (${e instanceof Error ? e.message : String(e)}) ` +
+            "e a folha não foi impressa. Sem o carimbo eles podem voltar pra fila se ficarem parados — " +
+            "tire a folha agora pelo Picking Geral (Meu lote).",
+        );
+        return;
+      }
+      // Carimbo parcial: só entram na folha (e no carimbo local) os que ficaram presos de fato.
+      let presosIds = ids;
+      const parcial = textoCarimbo(presos, ids.length);
+      if (parcial) {
+        let meus: Order[] | null = null;
+        try {
+          meus = onRecarregarPedidos ? await onRecarregarPedidos() : null;
+        } catch {
+          meus = null;
+        }
+        if (!meus) {
+          finalizar(
+            `${parcial} Não consegui conferir quais ficaram presos, então a folha NÃO foi impressa. ` +
+              "Tire a folha pelo Picking Geral (Meu lote).",
+          );
+          return;
+        }
+        const presosNoServidor = new Set(meus.filter((o) => !!o.listaEm).map((o) => o.id));
+        presosIds = ids.filter((id) => presosNoServidor.has(id));
+      }
+      if (presosIds.length > 0) onListaImpressa?.(presosIds, listaId);
+      const presosSet = new Set(presosIds);
+      const { paraFolha, fora } = separarFolha(
+        novos.filter((o) => presosSet.has(o.id)),
+        (o) => foraSet.has(o.id),
+      );
+      const avisoFora = textoForaDaFolha(fora.length);
+      const quantos = [textoReservados(novos.length, prometidos), parcial, avisoFora].filter(Boolean).join(" ");
+      if (paraFolha.length === 0) {
+        finalizar(
+          `${quantos} Nenhum pedido sobrou pra folha (as peças deles já estão com você), então nada foi impresso.`,
+        );
+        return;
+      }
+      setStatusMistos("Enviando pra impressora…");
+      const folha = folhaDosReservados(paraFolha, queue.size);
+      try {
+        const base64 = gerarMistosPdf({ fila: queue.size, pedidos: folha.pedidos, linhas: folha.linhas });
+        const out = await printPdfBase64(base64, { printer: getLabelPrinter(), jobName: `Mistos ${queue.size}` });
+        finalizar(
+          out.ok
+            ? `${quantos} Folha enviada${out.printer ? ` pra ${out.printer}` : " pra impressora padrão"}; eles ficam com você até o fim do dia.`
+            : `${quantos} Falha ao imprimir: ${out.message ?? "motivo desconhecido"}. Os pedidos JÁ estão reservados com você — reimprima pelo Picking Geral (Meu lote).`,
+        );
+      } catch (e) {
+        finalizar(
+          `${quantos} Falha ao imprimir: ${e instanceof Error ? e.message : String(e)}. Os pedidos JÁ estão reservados com você — reimprima pelo Picking Geral (Meu lote).`,
+        );
+      }
+    } catch (e) {
+      finalizar(`Não deu pra reservar: ${e instanceof Error ? e.message : String(e)}`);
+    } finally {
+      onImprimindo?.(false);
+      setImprimindoMistos(false);
+    }
+  };
+
   const addManual = () => {
     const t = manual.trim();
     if (t.length < 2) return;
@@ -423,8 +559,15 @@ export function PickingFiltersModal({ filters, queue, lote, abaInicial = "exclus
     setManual("");
   };
 
-  const aplicar = async () => {
-    if (salvando) return;
+  /**
+   * O que o "Aplicar" faz antes de entregar o filtro: grava o diff da exclusão do
+   * galpão (termo a termo) e monta o filtro + extras. `null` = não deu pra salvar
+   * a exclusão (o erro já está em `erroSalvar`).
+   */
+  const prepararFiltros = async (): Promise<{
+    f: QueueFilters;
+    extra: { imagens: Record<string, string | null>; exclusoesGlobais?: ExclusoesGlobais };
+  } | null> => {
     let salvas: ExclusoesGlobais | undefined;
     if (comGlobal && globalMudou) {
       setSalvando(true);
@@ -463,11 +606,17 @@ export function PickingFiltersModal({ filters, queue, lote, abaInicial = "exclus
         }
         setErroSalvar(`Não consegui salvar a exclusão do galpão: ${e instanceof Error ? e.message : String(e)}`);
         setSalvando(false);
-        return;
+        return null;
+      }
+      if (salvas) {
+        // O modal pode seguir aberto (Imprimir e reservar): a base passa a ser o que o servidor tem.
+        setGlobais(salvas);
+        setGlobalBase(termosGlobais(salvas));
+        setGlobalSel(termosGlobais(salvas));
       }
       setSalvando(false);
     }
-    onApply({
+    const f: QueueFilters = {
       // A data é do seletor da sidebar — passa intacta.
       dateFrom: filters.dateFrom,
       dateTo: filters.dateTo,
@@ -476,12 +625,20 @@ export function PickingFiltersModal({ filters, queue, lote, abaInicial = "exclus
       // Sem a aba (fila carregando / nexus antigo) o filtro salvo passa INTACTO —
       // mexer só numa exclusão não pode apagar o Filtro Mistos de ontem.
       mistosProdutos: temMistos ? (mistos.length ? mistos : undefined) : filters.mistosProdutos,
-    }, {
+    };
+    const extra = {
       imagens: Object.fromEntries(
         ranking.filter((x) => mistosSet.has(chaveMisto(x.produto))).map((x) => [x.produto, x.imagemUrl]),
       ),
       ...(salvas ? { exclusoesGlobais: salvas } : null),
-    });
+    };
+    return { f, extra };
+  };
+
+  const aplicar = async () => {
+    if (salvando || imprimindoMistos) return;
+    const prep = await prepararFiltros();
+    if (prep) onApply(prep.f, prep.extra);
   };
 
   return (
@@ -754,7 +911,7 @@ export function PickingFiltersModal({ filters, queue, lote, abaInicial = "exclus
             )}
           </span>
           <div style={{ flex: 1 }} />
-          <button style={limparBtn} onClick={emMistos ? () => setMistos([]) : onClear}>
+          <button style={limparBtn} onClick={emMistos ? () => setMistos([]) : onClear} disabled={imprimindoMistos}>
             {emMistos ? "Limpar" : "Limpar tudo"}
           </button>
           {aba === "exclusao" && comGlobal && (
@@ -767,14 +924,25 @@ export function PickingFiltersModal({ filters, queue, lote, abaInicial = "exclus
           </button>
           {emMistos && mistos.length > 0 && (
             <button
-              style={imprimindoMistos ? imprimirMistosBtnOff : imprimirMistosBtn}
+              style={imprimindoMistos ? consultaBtnOff : consultaBtn}
               onClick={() => void imprimirMistos()}
               disabled={imprimindoMistos || fechados.length === 0}
+              title="Imprime a folha pra olhar a demanda — NÃO reserva os pedidos"
             >
-              🖨 Imprimir mistos
+              Só consultar (não reserva)
             </button>
           )}
-          <button style={salvando ? { ...aplicarBtn, opacity: 0.6, cursor: "wait" } : aplicarBtn} onClick={() => void aplicar()} disabled={salvando}>
+          {emMistos && mistos.length > 0 && onReservarMistos && (
+            <button
+              style={imprimindoMistos ? imprimirMistosBtnOff : imprimirMistosBtn}
+              onClick={() => void imprimirEReservar()}
+              disabled={imprimindoMistos || salvando || fechados.length === 0}
+              title="Tira os pedidos da fila pra todo mundo, deixa só com você e imprime a folha"
+            >
+              🖨 Imprimir e reservar
+            </button>
+          )}
+          <button style={salvando ? { ...aplicarBtn, opacity: 0.6, cursor: "wait" } : aplicarBtn} onClick={() => void aplicar()} disabled={salvando || imprimindoMistos}>
             {salvando ? "Salvando…" : "Aplicar filtros"}
           </button>
         </div>
@@ -1238,6 +1406,7 @@ const statusMistosBox: CSSProperties = {
 };
 
 const imprimirMistosBtn: CSSProperties = {
+  boxShadow: "0 0 0 1px var(--warning-border)",
   padding: "9px 14px",
   background: "transparent",
   border: "1px solid var(--warning-border)",
@@ -1298,3 +1467,6 @@ const localChip: CSSProperties = {
   border: "1px solid var(--border-strong)",
   flexShrink: 0,
 };
+// Ação secundária e discreta: a folha de consulta (não reserva).
+const consultaBtn: CSSProperties = { ...limparBtn, border: "1px solid var(--border-strong)" };
+const consultaBtnOff: CSSProperties = { ...consultaBtn, opacity: 0.6, cursor: "wait" };

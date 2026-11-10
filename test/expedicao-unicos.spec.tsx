@@ -377,6 +377,7 @@ describe("Expedição — Únicos com filtro por dia manda `dia` no separar", ()
       grupos: [{ ...GRUPO, pedidos: 3, prioritarios: 0, imagemUrl: null, tipos: [{ produtoId: "p", produtoNome: "Oversized", cor: null, pedidos: 3 }] }],
       totalPedidos: 3,
       filaUnicosAtiva: false,
+      periodo: { de: null, ate: null },
       dias: [
         { dia: "2026-11-01", pedidos: 2 },
         { dia: "2026-11-05", pedidos: 1 },
@@ -389,16 +390,70 @@ describe("Expedição — Únicos com filtro por dia manda `dia` no separar", ()
 
   it("dia escolhido na grade vai no separar; sem filtro não vai", async () => {
     await abrirGrupo();
-    const sel = (await screen.findByLabelText("Filtrar por dia de emissão")) as HTMLSelectElement;
+    const sel = (await screen.findByLabelText("Dia de emissão: De")) as HTMLSelectElement;
     fireEvent.change(sel, { target: { value: "2026-11-01" } });
+    fireEvent.change(await screen.findByLabelText("Dia de emissão: Até"), { target: { value: "2026-11-01" } });
     fireEvent.click(await screen.findByTitle("Escolher a fila Leg Day G"));
     expect(await screen.findByText("📅 01/11")).toBeTruthy();
     await act(async () => {
       presence?.([TAG]);
     });
     await waitFor(() => expect(separarUnico).toHaveBeenCalledTimes(1));
-    expect(separarUnico.mock.calls[0][0]).toMatchObject({ estampa: "Leg Day", tamanho: "G", dia: "2026-11-01" });
+    expect(separarUnico.mock.calls[0][0]).toMatchObject({ estampa: "Leg Day", tamanho: "G", periodo: { de: "2026-11-01", ate: "2026-11-01" } });
     expect(separarUnico.mock.calls[0][0].orderId).toBeUndefined();
   }, 10000);
   afterEach(() => cleanup());
+});
+
+// Revisão 10/11: sem prova de suporte do servidor (API antiga ou ainda sem resposta)
+// o recorte é de UM dia — o bip nunca sai com intervalo que a API antiga ignoraria.
+describe("Expedição — Únicos com API sem suporte a intervalo", () => {
+  beforeEach(() => {
+    localStorage.clear();
+    localStorage.setItem("berzerk_expedicao_modo_v1", "oficial");
+    localStorage.setItem("berzerk_expedicao_fila_v1", "unicos");
+    localStorage.setItem("berzerk_expedicao_canal_v1", "ecommerce");
+    presence = null;
+    epcMatch.mockReset();
+    separarUnico.mockReset().mockResolvedValue({ order: pedidoUnico(), replay: false, grupo: GRUPO });
+    getDocumentos.mockReset().mockResolvedValue({ danfe: null, etiqueta: { base64: "JVBERi0=", formato: "pdf" }, trackingNumber: "JT123" });
+    markLabelPrinted.mockReset().mockResolvedValue(undefined);
+    shipOrder.mockReset().mockResolvedValue({ gaiola: null });
+    invoke.mockReset().mockImplementation(async (cmd: string) =>
+      cmd === "print_engine_status" ? { ok: true, printer: null, message: null, engine: "sumatra" } : { ok: true },
+    );
+    // Resposta SEM `periodo` (API antiga).
+    getUnicos.mockReset().mockResolvedValue({
+      grupos: [{ ...GRUPO, pedidos: 3, prioritarios: 0, imagemUrl: null, tipos: [{ produtoId: "p", produtoNome: "Oversized", cor: null, pedidos: 3 }] }],
+      totalPedidos: 3,
+      filaUnicosAtiva: false,
+    });
+    getUnicosPedidos.mockReset().mockResolvedValue([
+      { id: "ord-un", numero: "900002", cliente: "Cliente Único", produtoNome: "Oversized", prioritario: false, emitidoEm: "2026-11-01T12:00:00.000Z" },
+    ]);
+  });
+  afterEach(() => cleanup());
+
+  it("API antiga: 'Até' não aparece e escolher 'De' vira dia fechado no bip", async () => {
+    await abrirGrupo();
+    const de = await screen.findByLabelText("Dia de emissão: De");
+    await waitFor(() => expect(getUnicos).toHaveBeenCalled());
+    expect(screen.queryByLabelText("Dia de emissão: Até")).toBeNull();
+    fireEvent.change(de, { target: { value: "2026-11-01" } });
+    expect(screen.queryByLabelText("Dia de emissão: Até")).toBeNull();
+    fireEvent.click(await screen.findByTitle("Escolher a fila Leg Day G"));
+    await act(async () => {
+      presence?.([TAG]);
+    });
+    await waitFor(() => expect(separarUnico).toHaveBeenCalledTimes(1));
+    expect(separarUnico.mock.calls[0][0].periodo).toEqual({ de: "2026-11-01", ate: "2026-11-01" });
+  }, 10000);
+
+  it("suporte desconhecido (1º getUnicos falhou): 'Até' não aparece", async () => {
+    getUnicos.mockReset().mockRejectedValue(new Error("rede"));
+    await abrirGrupo();
+    await screen.findByLabelText("Dia de emissão: De");
+    await waitFor(() => expect(getUnicos).toHaveBeenCalled());
+    expect(screen.queryByLabelText("Dia de emissão: Até")).toBeNull();
+  });
 });

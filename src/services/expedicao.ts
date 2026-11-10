@@ -13,6 +13,7 @@ import type { LeituraResolvida } from "./orders";
 import { apiRequest, ApiError } from "../lib/api";
 import { getStationId } from "../lib/station";
 import { isExpedicaoSimulacao } from "./expedicaoMode";
+import type { PeriodoUnicos } from "../lib/unicosExpedicao";
 import type { Me, OrderChannel, OrderItem, OrderStatus } from "./orders";
 
 /** Máx. de EPCs por chamada do epc-match (o servidor aceita 200; mesclamos no cliente). */
@@ -546,7 +547,22 @@ export type UnicosResponse = {
    * o filtro de `dia` — monta o select (06/11, Victor). Ausente = nexus antigo.
    */
   dias?: { dia: string; pedidos: number }[];
+  /**
+   * Recorte aplicado pelo servidor. Presente = API com suporte a `de`/`ate`;
+   * ausente = API antiga (ignora o intervalo em silêncio): só vale um dia.
+   */
+  periodo?: { de: string | null; ate: string | null };
 };
+
+/** Query do recorte: `de`/`ate` e, com UM dia só, também `dia` (API antiga). */
+function recortePeriodo(p?: PeriodoUnicos | null): { de?: string; ate?: string; dia?: string } {
+  if (!p) return {};
+  return {
+    ...(p.de ? { de: p.de } : {}),
+    ...(p.ate ? { ate: p.ate } : {}),
+    ...(p.de && p.de === p.ate ? { dia: p.de } : {}),
+  };
+}
 
 export type UnicoPedido = {
   id: string;
@@ -595,10 +611,11 @@ export const UNICOS_ERR = {
   SO_ORDER_BUMP_LIDO: "so_order_bump_lido",
 } as const;
 
-export function getUnicos(dia?: string | null): Promise<UnicosResponse> {
+export function getUnicos(periodo?: PeriodoUnicos | null): Promise<UnicosResponse> {
   if (isExpedicaoSimulacao()) return Promise.resolve(mockUnicos());
-  // `dia` só vai quando definido (NEXUS_UNICOS_DIA.md); nexus antigo ignora.
-  if (dia) return apiRequest<UnicosResponse>("/expedicao/unicos", { query: { dia } });
+  // `de`/`ate`/`dia` só vão quando definidos (NEXUS_UNICOS_DIA.md); nexus antigo ignora.
+  const query = recortePeriodo(periodo);
+  if (Object.keys(query).length > 0) return apiRequest<UnicosResponse>("/expedicao/unicos", { query });
   return apiRequest<UnicosResponse>("/expedicao/unicos");
 }
 
@@ -620,11 +637,11 @@ export async function buscarProdutosOrderBump(busca: string, limite = 20): Promi
   return r.produtos ?? [];
 }
 
-export async function getUnicosPedidos(estampa: string, tamanho: string, cor?: string | null, dia?: string | null): Promise<UnicoPedido[]> {
+export async function getUnicosPedidos(estampa: string, tamanho: string, cor?: string | null, periodo?: PeriodoUnicos | null): Promise<UnicoPedido[]> {
   if (isExpedicaoSimulacao()) return mockUnicosPedidos(estampa, tamanho, cor);
   const r = await apiRequest<{ pedidos?: UnicoPedido[] }>("/expedicao/unicos/pedidos", {
     // undefined = API velha (omite → todas as cores); null = grupo sem cor (`cor=` vazio → só os sem cor).
-    query: { estampa, tamanho, ...(cor === undefined ? {} : { cor: cor ?? "" }), ...(dia ? { dia } : {}) },
+    query: { estampa, tamanho, ...(cor === undefined ? {} : { cor: cor ?? "" }), ...recortePeriodo(periodo) },
   });
   return r.pedidos ?? [];
 }
@@ -643,10 +660,10 @@ export function separarUnico(args: {
   leituras?: LeituraResolvida[];
   /** Pedido escolhido na fila: o servidor separa ESSE pedido (se a peça casar). */
   orderId?: string;
-  /** Dia filtrado na lateral (YYYY-MM-DD, America/Sao_Paulo): sem `orderId`, o servidor pega o
-   *  próximo da variante SÓ desse dia. Sem isso o bip puxava pedido de outro dia que não estava
+  /** Recorte filtrado na lateral (dias YYYY-MM-DD, America/Sao_Paulo): sem `orderId`, o servidor pega o
+   *  próximo da variante SÓ desse recorte (`dia` também vai quando for um dia só). Sem isso o bip puxava pedido de outro dia que não estava
    *  na lista (Luis Fernando, 06/11/2026) e a fila da tela nunca zerava. */
-  dia?: string | null;
+  periodo?: PeriodoUnicos | null;
 }): Promise<UnicoSepararResponse> {
   if (isExpedicaoSimulacao()) {
     const order = mockOrderFor(args.rfidTags);
@@ -662,7 +679,7 @@ export function separarUnico(args: {
       ...(args.tamanho ? { tamanho: args.tamanho } : {}),
       ...(args.cor === undefined ? {} : { cor: args.cor ?? "" }),
       ...(args.orderId ? { orderId: args.orderId } : {}),
-      ...(args.dia ? { dia: args.dia } : {}),
+      ...recortePeriodo(args.periodo),
       ...(args.leituras && args.leituras.length > 0 ? { leituras: args.leituras } : {}),
     },
   });
