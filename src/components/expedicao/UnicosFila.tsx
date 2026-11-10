@@ -4,7 +4,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import { miniaturaLeve } from "../../lib/imagens";
-import { filtrarPorDia, rotuloDia, rotuloGrupo, rotuloTipo, selecaoAposRecarga, tipoBaseDoProduto, type GrupoEscolhido } from "../../lib/unicosExpedicao";
+import { filtrarPorPeriodo, PERIODO_VAZIO, periodoVazio, rotuloPeriodo, type PeriodoUnicos, rotuloGrupo, rotuloTipo, selecaoAposRecarga, tipoBaseDoProduto, type GrupoEscolhido } from "../../lib/unicosExpedicao";
 import { getUnicosPedidos, type UnicoPedido } from "../../services/expedicao";
 
 const POLL_MS = 30000;
@@ -20,7 +20,7 @@ export function UnicosFila({
   selecionadoId,
   onSelecionar,
   ocultarIds,
-  dia = null,
+  periodo = PERIODO_VAZIO,
 }: {
   grupo: GrupoEscolhido;
   versao: number;
@@ -37,8 +37,8 @@ export function UnicosFila({
   onSelecionar?: (id: string | null) => void;
   /** Pedidos já expedidos nesta sessão: saem da lista na hora, sem esperar o GET. */
   ocultarIds?: string[];
-  /** Dia (YYYY-MM-DD) filtrado na grade (Victor, 06/11/2026); null = todos. */
-  dia?: string | null;
+  /** Intervalo de dias (YYYY-MM-DD) filtrado na grade (Victor, 06/11/2026); vazio = todos. */
+  periodo?: PeriodoUnicos;
 }) {
   const [pedidosBrutos, setPedidos] = useState<UnicoPedido[] | null>(null);
   const ocultos = ocultarIds && ocultarIds.length > 0 ? new Set(ocultarIds) : null;
@@ -77,10 +77,17 @@ export function UnicosFila({
     }
   }, [pedidos, mesaLivre]);
 
+  // Deps primitivas: o pai pode passar um objeto novo a cada render sem mudar o período.
+  const periodoDe = periodo.de;
+  const periodoAte = periodo.ate;
   const carregar = useCallback(async () => {
+    const per: PeriodoUnicos = { de: periodoDe, ate: periodoAte };
     try {
-      // Filtra também aqui: nexus antigo ignora `dia`; com o novo é idempotente.
-      const lista = filtrarPorDia(dia ? await getUnicosPedidos(grupo.estampa, grupo.tamanho, grupo.cor, dia) : await getUnicosPedidos(grupo.estampa, grupo.tamanho, grupo.cor), dia);
+      // Filtra também aqui: nexus antigo ignora `de`/`ate`/`dia`; com o novo é idempotente.
+      const lista = filtrarPorPeriodo(
+        periodoVazio(per) ? await getUnicosPedidos(grupo.estampa, grupo.tamanho, grupo.cor) : await getUnicosPedidos(grupo.estampa, grupo.tamanho, grupo.cor, per),
+        per,
+      );
       setPedidos(lista);
       const visiveis = lista.filter((p) => !ocultosRef.current.has(p.id));
       const nova = selecaoAposRecarga(selRef.current, visiveis);
@@ -92,7 +99,7 @@ export function UnicosFila({
     } catch {
       setErro(true);
     }
-  }, [grupo.estampa, grupo.tamanho, grupo.cor, dia]);
+  }, [grupo.estampa, grupo.tamanho, grupo.cor, periodoDe, periodoAte]);
 
   useEffect(() => {
     void carregar();
@@ -114,7 +121,7 @@ export function UnicosFila({
     <div style={wrap}>
       <div style={cabecalho}>
         <div style={titulo}>{tituloGrupo}</div>
-        {dia && <div style={sub}>📅 {rotuloDia(dia)}</div>}
+        {!periodoVazio(periodo) && <div style={sub}>📅 {rotuloPeriodo(periodo)}</div>}
         <div style={sub}>
           {pedidos ? `${pedidos.length} pedido${pedidos.length === 1 ? "" : "s"} na fila${comBump > 0 ? ` · ${comBump} com bump` : ""}` : "Carregando…"}
           {erro && " · não consegui atualizar"}

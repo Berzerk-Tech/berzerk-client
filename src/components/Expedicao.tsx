@@ -1,6 +1,7 @@
 import {
   useCallback,
   useEffect,
+  useMemo,
   useRef,
   useState,
   type CSSProperties,
@@ -45,8 +46,11 @@ import {
   chaveEstampa,
   setGrupoEscolhido,
   setModoFila,
+  PERIODO_VAZIO,
+  periodoEfetivo,
   type GrupoEscolhido,
   type ModoFila,
+  type PeriodoUnicos,
 } from "../lib/unicosExpedicao";
 import { SupervisorModal } from "./SupervisorModal";
 import {
@@ -316,9 +320,18 @@ export function Expedicao({ onBack }: Props) {
   // Estampa a reabrir no painel de tamanhos quando a fila do tamanho acaba.
   const [estampaInicialUnicos, setEstampaInicialUnicos] = useState<string | null>(null);
   // Filtro por dia de emissão (Victor, 06/11/2026): vive aqui pra sobreviver a grade ↔ lateral.
-  const [diaUnicos, setDiaUnicos] = useState<string | null>(null);
-  const diaUnicosRef = useRef<string | null>(diaUnicos);
-  diaUnicosRef.current = diaUnicos;
+  const [periodoUnicos, setPeriodoUnicos] = useState<PeriodoUnicos>(PERIODO_VAZIO);
+  // Servidor aplica `de`/`ate`? (resposta de getUnicos com `periodo`). Sem suporte só vale um dia.
+  const [periodoSuportado, setPeriodoSuportado] = useState<boolean | null>(null);
+  // Referência estável: os filhos usam o objeto em deps de efeito (GET + intervalo de 30 s).
+  const periodoDe = periodoUnicos.de;
+  const periodoAte = periodoUnicos.ate;
+  const periodoEfetivoUnicos = useMemo(
+    () => periodoEfetivo({ de: periodoDe, ate: periodoAte }, periodoSuportado),
+    [periodoDe, periodoAte, periodoSuportado],
+  );
+  const periodoUnicosRef = useRef<PeriodoUnicos>(periodoEfetivoUnicos);
+  periodoUnicosRef.current = periodoEfetivoUnicos;
   const [unicosIndisponivel, setUnicosIndisponivel] = useState(false);
   // Order bump (Únicos): o pedido tinha item de bump lido junto com a peça principal.
   // O limite de EPCs (UNICOS_MAX_TAGS) já comporta principal + bump; o servidor decide
@@ -796,7 +809,7 @@ export function Expedicao({ onBack }: Props) {
       let r;
       try {
         // `dia`: a fila que a operadora VÊ é a do dia filtrado; o servidor tem que puxar dali.
-        r = await separarUnico({ rfidTags: epcs, estampa: g.estampa, tamanho: g.tamanho, cor: g.cor, leituras, orderId: pedidoSelecionadoRef.current ?? undefined, dia: diaUnicosRef.current });
+        r = await separarUnico({ rfidTags: epcs, estampa: g.estampa, tamanho: g.tamanho, cor: g.cor, leituras, orderId: pedidoSelecionadoRef.current ?? undefined, periodo: periodoUnicosRef.current });
       } catch (e) {
         if (gen !== resolveGenRef.current || mesaOcupada()) return;
         const er = erroSepararUnico(e, g);
@@ -1775,7 +1788,7 @@ export function Expedicao({ onBack }: Props) {
               versao={versaoUnicos}
               selecionadoId={pedidoSelecionadoUnicos}
               ocultarIds={session.map((s) => s.order.id)}
-              dia={diaUnicos}
+              periodo={periodoEfetivoUnicos}
               onSelecionar={(id) => {
                 pedidoSelecionadoRef.current = id;
                 setPedidoSelecionadoUnicos(id);
@@ -1797,7 +1810,7 @@ export function Expedicao({ onBack }: Props) {
 
         <main style={stage}>
           {unicosAtivo && !grupoUnicos ? (
-            <UnicosGrupos onEscolher={escolherGrupo} onIndisponivel={unicosSemApi} estampaInicial={estampaInicialUnicos} dia={diaUnicos} onDia={setDiaUnicos} />
+            <UnicosGrupos onEscolher={escolherGrupo} onIndisponivel={unicosSemApi} estampaInicial={estampaInicialUnicos} periodo={periodoUnicos} onPeriodo={setPeriodoUnicos} suportado={periodoSuportado} onSuporte={setPeriodoSuportado} />
           ) : (
           <StageCenter
             flow={flow}

@@ -421,3 +421,71 @@ export function rotuloDia(dia: string): string {
   const [, m, d] = dia.split("-");
   return m && d ? `${d}/${m}` : dia;
 }
+
+/** Intervalo de dias de emissão (YYYY-MM-DD, SP, inclusivo). Os dois nulos = todos os dias. */
+export type PeriodoUnicos = { de: string | null; ate: string | null };
+
+export const PERIODO_VAZIO: PeriodoUnicos = { de: null, ate: null };
+
+export function periodoVazio(p: PeriodoUnicos): boolean {
+  return !p.de && !p.ate;
+}
+
+/**
+ * Aplica a escolha de um dos campos sem nunca deixar o intervalo invertido:
+ * `de` maior que `ate` (ou o contrário) arrasta o outro pra ficar igual.
+ */
+export function ajustarPeriodo(p: PeriodoUnicos, campo: "de" | "ate", valor: string | null): PeriodoUnicos {
+  const v = valor || null;
+  const novo: PeriodoUnicos = { ...p, [campo]: v };
+  if (novo.de && novo.ate && novo.de > novo.ate) {
+    return campo === "de" ? { de: novo.de, ate: novo.de } : { de: novo.ate, ate: novo.ate };
+  }
+  return novo;
+}
+
+/**
+ * Recorte que o servidor está de fato aplicando. Só `suportado === true`
+ * (resposta com `periodo`) prova que a API entende `de`/`ate`. Sem prova
+ * (`false` = API antiga, `null` = ainda sem resposta) só vale UM dia: qualquer
+ * intervalo maior colapsa no primeiro dia informado — a API antiga ignora o
+ * recorte e devolveria pedido de qualquer dia.
+ */
+export function periodoEfetivo(p: PeriodoUnicos, suportado: boolean | null): PeriodoUnicos {
+  if (suportado === true) return p;
+  if (p.de && p.ate && p.de === p.ate) return p;
+  const dia = p.de ?? p.ate;
+  return dia ? { de: dia, ate: dia } : PERIODO_VAZIO;
+}
+
+/**
+ * Aplica a escolha de um campo no estado. Sem suporte provado, "De" grava um
+ * dia FECHADO (`{de: X, ate: X}`): se a API nova subir no meio do turno, a
+ * estação segue filtrando aquele dia em vez de virar "a partir de X".
+ */
+export function escolherPeriodo(p: PeriodoUnicos, campo: "de" | "ate", valor: string | null, suportado: boolean | null): PeriodoUnicos {
+  const v = valor || null;
+  if (suportado !== true) {
+    if (campo === "ate") return p;
+    return v ? { de: v, ate: v } : PERIODO_VAZIO;
+  }
+  return ajustarPeriodo(p, campo, v);
+}
+
+/** Filtro local por intervalo (cobre API antiga e é idempotente com a nova). Sem `emitidoEm` fica de fora quando há recorte. */
+export function filtrarPorPeriodo<T extends { emitidoEm?: string | null }>(pedidos: T[], p: PeriodoUnicos): T[] {
+  if (periodoVazio(p)) return pedidos;
+  return pedidos.filter((x) => {
+    const d = diaDe(x.emitidoEm);
+    if (!d) return false;
+    return (!p.de || d >= p.de) && (!p.ate || d <= p.ate);
+  });
+}
+
+/** "31/10 a 05/11", "a partir de 31/10", "até 05/11" ou o dia único; "" sem recorte. */
+export function rotuloPeriodo(p: PeriodoUnicos): string {
+  if (p.de && p.ate) return p.de === p.ate ? rotuloDia(p.de) : `${rotuloDia(p.de)} a ${rotuloDia(p.ate)}`;
+  if (p.de) return `a partir de ${rotuloDia(p.de)}`;
+  if (p.ate) return `até ${rotuloDia(p.ate)}`;
+  return "";
+}
