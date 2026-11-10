@@ -19,6 +19,7 @@
 import { useEffect, useMemo, useState, type CSSProperties } from "react";
 import { ApiError } from "../lib/api";
 import { SEM_TAMANHO, queueFor } from "../lib/filas";
+import { posicaoTamanho } from "../lib/tamanhos";
 import { agregarLote } from "../lib/agregarLote";
 import { gerarPickingPdf, type PickingSecao } from "../lib/pickingPdf";
 import {
@@ -45,13 +46,11 @@ import {
   type SeparationMode,
 } from "../services/orders";
 
-/** Ordem das seções: as filas reais primeiro, o resto em ordem alfabética. */
-const ORDEM_TAMANHOS = ["PP", "P", "M", "G", "GG", "XG", "XXG", "G1", "G2", "G3"];
-
+/** Ordem das seções: as filas reais primeiro (régua única de `lib/tamanhos`), o resto em ordem alfabética. */
 function ordemDe(t: string): number {
-  const i = ORDEM_TAMANHOS.indexOf(t);
-  if (i >= 0) return i;
-  return t === SEM_TAMANHO ? 999 : 500;
+  if (t === SEM_TAMANHO) return 999;
+  const i = posicaoTamanho(t);
+  return Number.isFinite(i) ? i : 500;
 }
 
 type Secao = {

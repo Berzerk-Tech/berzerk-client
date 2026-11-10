@@ -52,6 +52,8 @@ export type ListaItemSnapshot = {
   ean: string | null;
   sku: string | null;
   quantidade: number;
+  /** Foto do item no snapshot (nexus ≥ 10/11; ausente antes). */
+  imagemUrl?: string | null;
 };
 
 /** Pedido no detalhe de `GET /separacao/listas/:id` — snapshot + estado atual. */
@@ -80,6 +82,8 @@ export type ListaDetalheResponse = {
   recuperadaEm: string | null;
   recuperadaPor: string | null;
   pedidos: ListaDetalhePedido[];
+  /** Tipo da folha, quando o servidor informar (opcional; senão o client deduz pelos tamanhos). */
+  modo?: "mistos" | "picking";
 };
 
 export function getListaDetalhe(id: string): Promise<ListaDetalheResponse> {

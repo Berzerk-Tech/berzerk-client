@@ -33,9 +33,10 @@ export function canonicalizeTamanho(value: string | null | undefined): string | 
  * ("Oversized - Leg Day - XG") — pedidos espelhados do legado chegam com
  * `tamanho` null e sem isso o agrupamento do misto quebra. Varre os segmentos
  * de trás pra frente porque o tamanho costuma ser o último ("… - M - Rosa" é a
- * exceção coberta).
+ * exceção coberta). `sufixoSemHifen` aceita também o token final sem hífen
+ * ("Symbol GG") — só pra exibição, nunca pro Filtro Mistos.
  */
-export function itemSize(it: OrderItem): string | null {
+export function itemSize(it: OrderItem, opts?: { sufixoSemHifen?: boolean }): string | null {
   const direct = canonicalizeTamanho(it.tamanho);
   if (direct) return direct;
   if (!it.nome) return null;
@@ -43,6 +44,12 @@ export function itemSize(it: OrderItem): string | null {
   for (let i = tokens.length - 1; i >= 0; i--) {
     if (KNOWN_SIZES.has(tokens[i])) return tokens[i];
   }
+  // Nome sem hífen antes do tamanho ("Symbol GG"): token final do nome. Opt-in:
+  // o Filtro Mistos (`tamanhoDaLinha`) segue a régua do nexus e NÃO conta isto;
+  // só a exibição do card/ordem na mesa usa.
+  if (!opts?.sufixoSemHifen) return null;
+  const ultimo = canonicalizeTamanho(it.nome.trim().split(/\s+/).pop());
+  if (ultimo && KNOWN_SIZES.has(ultimo)) return ultimo;
   return null;
 }
 

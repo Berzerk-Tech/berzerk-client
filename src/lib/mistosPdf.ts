@@ -17,6 +17,8 @@ export type MistosDoc = {
   linhas: PickingMisto[];
   /** Folha de consulta (impressa do Filtro Inteligente, sem reservar pedidos). */
   consulta?: boolean;
+  /** Reimpressão de lista do snapshot do servidor (ex.: "REIMPRESSÃO — lista de 10/11 14:32"). Não reserva nada. */
+  reimpressao?: string | null;
 };
 
 const W = 100;
@@ -42,9 +44,9 @@ const fmt = (n: number) => Number(n || 0).toLocaleString("pt-BR");
 
 type Bloco = { linha: PickingMisto; nome: string[]; altura: number };
 
-function alturaDoCabecalho(consulta: boolean): number {
-  // título (M+6) + linha + resumo (6) + consulta (4)
-  return M + 6 + 3 + 6 + (consulta ? 4 : 0) + 1;
+function alturaDoCabecalho(consulta: boolean, reimpressao = false): number {
+  // título (M+6) + linha + resumo (6) + consulta (4) + reimpressão (4)
+  return M + 6 + 3 + 6 + (consulta ? 4 : 0) + (reimpressao ? 4 : 0) + 1;
 }
 
 function quebrarNome(pdf: jsPDF, nome: string): string[] {
@@ -59,7 +61,7 @@ function quebrarNome(pdf: jsPDF, nome: string): string[] {
 
 /** Quebra os produtos em etiquetas, medindo antes de desenhar. */
 function paginar(pdf: jsPDF, doc: MistosDoc): Bloco[][] {
-  const topo = alturaDoCabecalho(!!doc.consulta);
+  const topo = alturaDoCabecalho(!!doc.consulta, !!doc.reimpressao);
   const limite = H - M;
   const paginas: Bloco[][] = [];
   let atual: Bloco[] = [];
@@ -117,6 +119,10 @@ export function gerarMistosPdf(doc: MistosDoc): string {
     if (doc.consulta) {
       y += 4;
       texto("CONSULTA — não reserva pedidos", M, y, 9);
+    }
+    if (doc.reimpressao) {
+      y += 4;
+      texto(doc.reimpressao, M, y, 8, "bold");
     }
     y += 1;
 
