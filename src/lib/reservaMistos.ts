@@ -9,7 +9,7 @@
 
 import type { Order, QueueFilters } from "../services/orders";
 import { limiteListasAbertas, mistosProdutoReservado } from "../services/orders";
-import { pedidoMistoDoLote, pickingMistos, type PickingMisto } from "./mistos";
+import { pedidoMistoDoLote, pickingMistos, produtosJaTirados, semProdutosJaTirados, type PickingMisto } from "./mistos";
 
 /** Resultado que o runner devolve ao modal depois de aplicar o filtro e puxar a lista nova. */
 export type ReservaMistosResultado =
@@ -22,6 +22,27 @@ export type ReservaMistosResultado =
       filtros: QueueFilters;
     }
   | { ok: false; motivo: string };
+
+export const MOTIVO_SEM_ESTAMPA_NOVA = "Escolha estampas que ainda não estão em nenhuma lista sua.";
+
+/**
+ * Defesa antes de tirar uma NOVA lista: o nexus deixa de fora todo misto com
+ * peça de produto que já está numa lista impressa em aberto, então esses
+ * produtos saem de `mistosProdutos` (o filtro salvo no localStorage pode ainda
+ * tê-los). Sem sobrar estampa, não chama o servidor.
+ */
+export function prepararFiltroDaNovaLista(
+  f: QueueFilters,
+  lote: Order[],
+  sizeFila: string,
+): { ok: true; f: QueueFilters } | { ok: false; motivo: string } {
+  const marcados = f.mistosProdutos ?? [];
+  if (marcados.length === 0) return { ok: true, f };
+  const restantes = semProdutosJaTirados(marcados, produtosJaTirados(lote, sizeFila));
+  if (restantes.length === marcados.length) return { ok: true, f };
+  if (restantes.length === 0) return { ok: false, motivo: MOTIVO_SEM_ESTAMPA_NOVA };
+  return { ok: true, f: { ...f, mistosProdutos: restantes } };
+}
 
 /** Separa o que vai pra folha do que já estava na mesa (peça já buscada ou em conferência). */
 export function separarFolha(novos: Order[], jaNaMesa: (o: Order) => boolean): { paraFolha: Order[]; fora: Order[] } {
@@ -74,7 +95,7 @@ export async function reservarComRollback(deps: ReservaDeps, f: QueueFilters): P
     }
     if (novos.length === 0) {
       restaurar();
-      return { ok: false, motivo: "Fila sem pedidos novos pra esse filtro. Nada foi reservado nem impresso." };
+      return { ok: false, motivo: "Nenhum pedido novo com essas estampas. Nada foi reservado nem impresso." };
     }
     const { fora } = separarFolha(novos, (o) => naMesa.has(o.id) || !!o.iniciadoEm);
     return { ok: true, novos, foraDaFolha: fora.map((o) => o.id), filtros: f };

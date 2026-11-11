@@ -7,8 +7,13 @@ import { describe, expect, it } from "vitest";
 import type { Order, QueueProduct } from "../src/services/orders";
 import {
   fechamCom,
+  ordenarLoteMistos,
+  ordenarPedidosDaLista,
   ordenarPorProdutoFora,
+  produtosJaTirados,
+  semProdutosJaTirados,
   passaNoFiltroMistos,
+  visivelNoFiltroMistos,
   pedidosMistos,
   pedidosMistosDaFila,
   pickingMistos,
@@ -163,6 +168,10 @@ describe("passaNoFiltroMistos (Order do lote)", () => {
     expect(passaNoFiltroMistos(o, ["Myth"], "M")).toBe(true);
     expect(passaNoFiltroMistos(o, ["Zeus"], "M")).toBe(false);
   });
+  it("pedido de lista impressa aparece na mesa mesmo fora do filtro (11/11)", () => {
+    expect(visivelNoFiltroMistos(o, ["Zeus"], "M")).toBe(false);
+    expect(visivelNoFiltroMistos({ ...o, listaEm: "2026-11-11T12:00:00Z" }, ["Zeus"], "M")).toBe(true);
+  });
   it("item sem tamanho no campo usa o tamanho do nome", () => {
     const semCampo = pedido("b", "M", [{ nome: "Leg Day - M", tamanho: "" }, { nome: "Myth - G", tamanho: "" }]);
     expect(passaNoFiltroMistos(semCampo, ["Myth"], "M")).toBe(true);
@@ -233,5 +242,78 @@ describe("pedidosMistosNosFiltros (mesma régua ilike %termo% do claim)", () => 
   it("adição mantém só pedido com algum termo; termo vazio é ignorado", () => {
     expect(pedidosMistosNosFiltros(peds, [" "], ["phantom"]).map((p) => p.id)).toEqual(["c"]);
     expect(pedidosMistosNosFiltros(peds, ["surpresa"], ["leg day"]).map((p) => p.id)).toEqual(["c"]);
+  });
+});
+
+// Mesa: pedidos de UMA lista na ordem do picking impresso (tamanho P→XG, depois
+// a ordem dos produtos na folha) — substitui o agrupamento por produto dentro
+// da lista impressa.
+describe("produtosJaTirados e ordem por tamanho do picking", () => {
+  // Pedido do M com uma peça fora (tamanho dado) do produto dado; `lista` carimba listaEm/listaId.
+  const peca = (id: string, fora: Array<[string, string]>, extra: Partial<Order> = {}): Order => ({
+    ...pedido(id, "M", [{ nome: "Base - M", tamanho: "M" }, ...fora.map(([p, t]) => ({ nome: `${p} - ${t}`, tamanho: t }))]),
+    ...extra,
+  });
+  const ids = (os: Order[]) => os.map((o) => o.id);
+  const L1 = { listaEm: "2026-11-11T10:00:00.000Z", listaId: "L1" };
+  const L2 = { listaEm: "2026-11-11T11:00:00.000Z", listaId: "L2" };
+
+  it("produtosJaTirados: numera pela lista mais antiga, ignora sem lista e pedido puro", () => {
+    const lote = [
+      peca("a", [["Zeus", "G"]], L2),
+      peca("b", [["Leg Day", "GG"]], L1),
+      peca("c", [["Surpresa", "G"]]), // sem lista
+      peca("d", [["Punk", "G"]], { ...L1, separationMode: "normal" as Order["separationMode"] }), // puro
+      peca("e", [["Zeus", "P"], ["Leg Day", "G"]], L2),
+    ];
+    const t = produtosJaTirados(lote, "M");
+    expect(Object.fromEntries(t)).toEqual({ "leg day": 1, zeus: 2 });
+    expect(semProdutosJaTirados(["Zeus", "Surpresa", " LEG DAY "], t)).toEqual(["Surpresa"]);
+    expect(produtosJaTirados([peca("c", [["Surpresa", "G"]])], "M").size).toBe(0);
+  });
+
+  it("ordena por tamanho da peça fora (P, M, G, GG, XG), fora do conjunto e sem fora no fim", () => {
+    const lista = [
+      peca("xg", [["A", "XG"]], L1),
+      peca("g3", [["A", "G3"]], L1),
+      peca("g", [["A", "G"]], L1),
+      peca("sem", [], L1),
+      peca("p", [["A", "P"]], L1),
+      peca("gg", [["A", "GG"]], L1),
+    ];
+    expect(ids(ordenarPedidosDaLista(lista, "M"))).toEqual(["p", "g", "gg", "xg", "g3", "sem"]);
+  });
+
+  it("pedido com peças fora de tamanhos diferentes entra pelo menor", () => {
+    const lista = [peca("x", [["A", "GG"]], L1), peca("misto", [["A", "GG"], ["A", "P"]], L1), peca("g", [["A", "G"]], L1)];
+    expect(ids(ordenarPedidosDaLista(lista, "M"))).toEqual(["misto", "g", "x"]);
+  });
+
+  it("dentro do tamanho segue a ordem do picking (total desc, depois produto) e empata pela ordem do servidor", () => {
+    // Picking: Zeus tem total 3, Leg Day 2, Abc 1 → Zeus, Leg Day, Abc
+    const lista = [
+      peca("1", [["Abc", "G"]], L1),
+      peca("2", [["Leg Day", "G"]], L1),
+      peca("3", [["Zeus", "G"]], L1),
+      peca("4", [["Zeus", "G"]], L1),
+      peca("5", [["Leg Day", "G"]], L1),
+      peca("6", [["Zeus", "G"]], L1),
+    ];
+    expect(ids(ordenarPedidosDaLista(lista, "M"))).toEqual(["3", "4", "6", "2", "5", "1"]);
+    expect(ids(lista)).toEqual(["1", "2", "3", "4", "5", "6"]); // não muta
+  });
+
+  it("ordenarLoteMistos: duas listas não se misturam e sem lista fica no fim, com ou sem filtro", () => {
+    const lote = [
+      peca("a1", [["A", "GG"]], L1),
+      peca("a2", [["A", "P"]], L1),
+      peca("b1", [["A", "XG"]], L2),
+      peca("b2", [["A", "G"]], L2),
+      peca("s1", [["Y", "G"]]),
+      peca("s2", [["X", "G"]]),
+      peca("s3", [["Y", "G"]]),
+    ];
+    expect(ids(ordenarLoteMistos(lote, "M", false))).toEqual(["a2", "a1", "b2", "b1", "s1", "s2", "s3"]);
+    expect(ids(ordenarLoteMistos(lote, "M", true))).toEqual(["a2", "a1", "b2", "b1", "s1", "s3", "s2"]);
   });
 });

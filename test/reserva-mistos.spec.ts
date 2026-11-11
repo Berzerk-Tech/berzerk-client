@@ -109,3 +109,33 @@ describe("reservarComRollback", () => {
     expect(v.chamadas).toEqual([novo, antes]);
   });
 });
+
+describe("prepararFiltroDaNovaLista (estampa já tirada não vai no body da nova lista)", () => {
+  const ped = (id: string, produto: string, lista?: string): Order =>
+    ({
+      id,
+      separationMode: "total",
+      predominantSize: "M",
+      listaEm: lista ? "2026-11-11T10:00:00.000Z" : null,
+      listaId: lista ?? null,
+      items: [
+        { id: `${id}-0`, nome: "Base - M", produto: "Base", tamanho: "M", quantidade: 1, ean: null, imagemUrl: null },
+        { id: `${id}-1`, nome: `${produto} - G`, produto, tamanho: "G", quantidade: 1, ean: null, imagemUrl: null },
+      ],
+    }) as unknown as Order;
+
+  it("tira do mistosProdutos o que já está numa lista em aberto", async () => {
+    const { prepararFiltroDaNovaLista } = await import("../src/lib/reservaMistos");
+    const lote = [ped("a", "Zeus", "L1"), ped("b", "Leg Day")];
+    const r = prepararFiltroDaNovaLista({ mistosProdutos: ["zeus ", "Leg Day"], excludeProducts: ["x"] }, lote, "M");
+    expect(r).toEqual({ ok: true, f: { mistosProdutos: ["Leg Day"], excludeProducts: ["x"] } });
+  });
+
+  it("sem sobrar estampa: não chama o servidor e diz o motivo; sem lista nada muda", async () => {
+    const { prepararFiltroDaNovaLista, MOTIVO_SEM_ESTAMPA_NOVA } = await import("../src/lib/reservaMistos");
+    const lote = [ped("a", "Zeus", "L1")];
+    expect(prepararFiltroDaNovaLista({ mistosProdutos: ["Zeus"] }, lote, "M")).toEqual({ ok: false, motivo: MOTIVO_SEM_ESTAMPA_NOVA });
+    const f = { mistosProdutos: ["Zeus"] };
+    expect(prepararFiltroDaNovaLista(f, [ped("b", "Zeus")], "M")).toEqual({ ok: true, f });
+  });
+});

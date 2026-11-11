@@ -54,8 +54,8 @@ import { agoraDoServidor, resumoDosMeus, tamanhoInicial } from "../lib/pedirRepo
 import { useMeusPedidosReposicao } from "../lib/usePedidosReposicao";
 import { TAMANHOS_REPOSICAO, type TamanhoReposicao } from "../services/reposicaoPedidos";
 import { PickingFiltersModal, emptyFilters, loadFilters, saveFilters, type Aba } from "./PickingFiltersModal";
-import { chaveMisto, ordenarPorProdutoFora, passaNoFiltroMistos, pedidoMistoDoLote } from "../lib/mistos";
-import { motivoDaFalhaDoLote, reservarComRollback, type ReservaMistosResultado } from "../lib/reservaMistos";
+import { chaveMisto, ordenarLoteMistos, visivelNoFiltroMistos, pedidoMistoDoLote, produtosJaTirados } from "../lib/mistos";
+import { motivoDaFalhaDoLote, prepararFiltroDaNovaLista, reservarComRollback, type ReservaMistosResultado } from "../lib/reservaMistos";
 import { ApiError } from "../lib/api";
 import {
   avisoAwbColetado,
@@ -210,7 +210,8 @@ function passaNosProdutos(o: Order, f: QueueFilters, sizeFila = ""): boolean {
   // com "" toda peça virava "de outro tamanho" e o pedido sumia da sidebar
   // enquanto o servidor o mantinha reservado pra ela (revisão 04/11).
   if (f.mistosProdutos?.length && o.separationMode === "total") {
-    return passaNoFiltroMistos(o, f.mistosProdutos, o.predominantSize?.trim() || sizeFila);
+    // Pedido de lista impressa nunca some da mesa (ver `visivelNoFiltroMistos`).
+    return visivelNoFiltroMistos(o, f.mistosProdutos, o.predominantSize?.trim() || sizeFila);
   }
   return true;
 }
@@ -280,11 +281,12 @@ function ordenarDatas(porDia: Map<string, number>): { date: string; count: numbe
 /** Marcador interno: `claimLote` com `novaLista` voltou sem `novos` (nexus sem a feature). */
 const NEXUS_SEM_NOVA_LISTA = "nexus_sem_nova_lista";
 
-function ordenarLote(lote: Order[], pulados: Set<string>, porProduto?: string): Order[] {
+function ordenarLote(lote: Order[], pulados: Set<string>, sizeFila: string, porProduto: boolean): Order[] {
   // Entrega em mãos vem primeiro: ela veio separar ESSE pedido, antes da lista.
-  // Com Filtro Mistos (`porProduto` = tamanho da fila), agrupa por produto
-  // dentro de cada lista (06/11, Nicole via Roger: "matar" um produto por vez).
-  const base = porProduto ? ordenarPorProdutoNaLista(ordenarPorLista(lote), porProduto) : ordenarPorLista(lote);
+  // Dentro de cada lista impressa os pedidos seguem a ordem do picking
+  // (tamanho P→XG, depois a ordem dos produtos na folha); sem lista, com Filtro
+  // Mistos (`porProduto`) agrupa por produto (06/11, Nicole via Roger).
+  const base = sizeFila ? ordenarLoteMistos(ordenarPorLista(lote), sizeFila, porProduto) : ordenarPorLista(lote);
   const porLista = base.some((o) => o.entregaEmMaos)
     ? [...base.filter((o) => o.entregaEmMaos), ...base.filter((o) => !o.entregaEmMaos)]
     : base;
@@ -306,25 +308,6 @@ function ordenarPorLista(lote: Order[]): Order[] {
     .map((o, i) => ({ o, i, k: chave(o) }))
     .sort((a, b) => a.k - b.k || a.i - b.i)
     .map((x) => x.o);
-}
-
-/**
- * Filtro Mistos ativo: dentro de CADA lista (partição `listaId ?? listaEm`,
- * sem lista = última partição) agrupa os pedidos pelo produto da peça "fora".
- * Não cruza listas: a ordem entre partições é a de `ordenarPorLista`.
- */
-function ordenarPorProdutoNaLista(lote: Order[], sizeFila: string): Order[] {
-  const particoes = new Map<string, Order[]>();
-  for (const o of lote) {
-    const k = o.listaEm ? (o.listaId ?? o.listaEm) : "";
-    const arr = particoes.get(k);
-    if (arr) arr.push(o);
-    else particoes.set(k, [o]);
-  }
-  if (particoes.size === 1) return ordenarPorProdutoFora(lote, sizeFila);
-  // `lote` já vem por lista (antiga primeiro, sem lista no fim): a ordem de
-  // primeira aparição das partições preserva isso.
-  return [...particoes.values()].flatMap((g) => ordenarPorProdutoFora(g, sizeFila));
 }
 
 /**
@@ -394,13 +377,14 @@ function comGateMistos(f: QueueFilters, suporta: boolean): QueueFilters {
 
 /** Array vazio ESTÁVEL (referência fixa) pros memos que dependem dele. */
 const SEM_PRODUTOS: string[] = [];
+const SEM_TIRADOS: ReadonlyMap<string, number> = new Map();
 
 /** A lista que a sidebar mostra e que o "próximo" percorre. */
 function loteVisivel(lote: Order[], pulados: Set<string>, filters: QueueFilters, sizeFila = ""): Order[] {
   // `filters` já passou por `comGateMistos` em todos os chamadores; o próprio
   // `passaNosFiltros` só aplica `mistosProdutos` em pedido de modo "total".
-  const porProduto = filters.mistosProdutos?.length && lote.some((o) => o.separationMode === "total") ? sizeFila : undefined;
-  return ordenarLote(lote, pulados, porProduto).filter((o) => passaNosFiltros(o, filters, sizeFila));
+  const porProduto = !!filters.mistosProdutos?.length && lote.some((o) => o.separationMode === "total");
+  return ordenarLote(lote, pulados, sizeFila, porProduto).filter((o) => passaNosFiltros(o, filters, sizeFila));
 }
 
 /** 422 `{ error: "liberacao_necessaria", faltantes }` do complete → lista de
@@ -1920,6 +1904,12 @@ export function SeparacaoRunner({
     }
     return out;
   }, [mistosAtivos, mistosImagens, lote, queue.size]);
+  // Estampas que já estão numa lista impressa em aberto: o modal as desabilita
+  // (o nexus as deixaria de fora de uma lista nova). Vazio = nenhuma lista.
+  const jaTiradosMistos = useMemo(
+    () => (queue.mode === "total" ? produtosJaTirados(lote, queue.size) : SEM_TIRADOS),
+    [lote, queue.mode, queue.size],
+  );
   // Já o estado vazio precisa explicar QUALQUER recorte, data inclusive.
   const temRecorte = filtrosAtivos > 0 || Boolean(filters.dateFrom || filters.dateTo);
 
@@ -1980,6 +1970,9 @@ export function SeparacaoRunner({
         setExclusoesGlobais(extra.exclusoesGlobais);
       }
     }
+    // Estampa que já está numa lista em aberto não entra na lista nova.
+    const prep = prepararFiltroDaNovaLista(f, loteRef.current, queue.size);
+    if (!prep.ok) return { ok: false, motivo: prep.motivo };
     return reservarComRollback(
       {
         filtrosAnteriores: filtersRef.current,
@@ -1995,7 +1988,7 @@ export function SeparacaoRunner({
           return `Não deu pra reservar: ${e instanceof Error ? e.message : String(e)}. Nada foi impresso.`;
         },
       },
-      f,
+      prep.f,
     );
   };
 
@@ -2386,6 +2379,7 @@ export function SeparacaoRunner({
           lote={lote}
           abaInicial={filtersAba}
           onReservarMistos={queue.mode === "total" && !pedidoInicial ? reservarMistos : undefined}
+          jaTirados={jaTiradosMistos}
           onRecarregarPedidos={async () => (await getMeusPedidos()).orders}
           onAviso={showNotice}
           onListaImpressa={marcarLotePresoLocalmente}

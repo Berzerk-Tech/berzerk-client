@@ -145,6 +145,8 @@ type Props = {
     f: QueueFilters,
     extra?: { imagens: Record<string, string | null>; exclusoesGlobais?: ExclusoesGlobais },
   ) => Promise<ReservaMistosResultado>;
+  /** Estampas (chave `chaveMisto`) que já estão numa lista impressa em aberto → nº da lista. Ficam desabilitadas ("na Lista N") e fora da seleção. Ausente/vazio = modal como sempre. */
+  jaTirados?: ReadonlyMap<string, number>;
   /** Pedidos carimbados no servidor (lista impressa) — a tela marca o lote em memória. */
   onListaImpressa?: (ids: string[], listaId: string | null) => void;
   /** Carimbo + impressão em andamento: a tela segura o `lote()` de fundo (como no Picking Geral). */
@@ -157,7 +159,7 @@ type Props = {
   onClose: () => void;
 };
 
-export function PickingFiltersModal({ filters, queue, lote, abaInicial = "exclusao", onApply, onReservarMistos, onListaImpressa, onImprimindo, onRecarregarPedidos, onAviso, onClear, onClose: onCloseProp }: Props) {
+export function PickingFiltersModal({ filters, queue, lote, abaInicial = "exclusao", onApply, onReservarMistos, jaTirados, onListaImpressa, onImprimindo, onRecarregarPedidos, onAviso, onClear, onClose: onCloseProp }: Props) {
   const [exclude, setExclude] = useState<string[]>(filters.excludeProducts ?? []);
   const [include, setInclude] = useState<string[]>(filters.includeProducts ?? []);
   const [mistos, setMistos] = useState<string[]>(filters.mistosProdutos ?? []);
@@ -409,8 +411,15 @@ export function PickingFiltersModal({ filters, queue, lote, abaInicial = "exclus
   const emMistos = aba === "mistos" && temMistos;
   const meusReservadosSet = useMemo(() => new Set((meusReservados ?? []).map(chaveMisto)), [meusReservados]);
 
+  // Estampa já tirada numa lista em aberto sai da seleção (também a que veio do filtro salvo).
+  useEffect(() => {
+    if (!jaTirados || jaTirados.size === 0) return;
+    setMistos((prev) => (prev.some((t) => jaTirados.has(chaveMisto(t))) ? prev.filter((t) => !jaTirados.has(chaveMisto(t))) : prev));
+  }, [jaTirados]);
+
   const toggleMisto = (produto: string) => {
     const k = chaveMisto(produto);
+    if (jaTirados?.has(k)) return;
     setMistos((prev) => (prev.some((t) => chaveMisto(t) === k) ? prev.filter((t) => chaveMisto(t) !== k) : [...prev, produto]));
   };
 
@@ -467,7 +476,7 @@ export function PickingFiltersModal({ filters, queue, lote, abaInicial = "exclus
       }
       const novos = r.novos;
       if (novos.length === 0) {
-        finalizar("Fila sem pedidos novos pra esse filtro. Nada foi reservado nem impresso.");
+        finalizar("Nenhum pedido novo com essas estampas. Nada foi reservado nem impresso.");
         return;
       }
       // Quem já estava na mão dela (pedido da mesa, já iniciado) é carimbado como no
@@ -745,13 +754,16 @@ export function PickingFiltersModal({ filters, queue, lote, abaInicial = "exclus
           )}
           {emMistos &&
             rankingFiltrado.slice(0, 300).map((x) => {
-              const marcado = mistosSet.has(chaveMisto(x.produto));
+              const listaN = jaTirados?.get(chaveMisto(x.produto));
+              const marcado = listaN === undefined && mistosSet.has(chaveMisto(x.produto));
               const g = pickPorProduto.get(chaveMisto(x.produto));
               return (
                 <button
                   key={chaveMisto(x.produto)}
-                  style={marcado ? rowMistosOn : row}
+                  style={listaN !== undefined ? { ...row, opacity: 0.5, cursor: "not-allowed" } : marcado ? rowMistosOn : row}
                   onClick={() => toggleMisto(x.produto)}
+                  disabled={listaN !== undefined}
+                  title={listaN !== undefined ? `Já está na Lista ${listaN}` : undefined}
                 >
                   <span style={marcado ? checkMistosOn : checkOff}>{marcado ? "✓" : ""}</span>
                   {x.imagemUrl ? (
@@ -769,6 +781,7 @@ export function PickingFiltersModal({ filters, queue, lote, abaInicial = "exclus
                   )}
                   <span style={mistosNomeCol}>
                     <span style={mistosNome}>{x.produto}</span>
+                    {listaN !== undefined && <small style={mistosSmall}>na Lista {listaN}</small>}
                     {marcado && meusReservadosSet.has(chaveMisto(x.produto)) && (
                       <small style={mistosSmall}>reservado pra você</small>
                     )}
