@@ -16,6 +16,8 @@
 
 import type { Order, OrderItem, QueueProduct } from "../services/orders";
 import { itemSize } from "./itemParecido";
+import { listasDoLote } from "./listasDoLote";
+import { posicaoTamanho } from "./tamanhos";
 
 /** Tamanhos que entram no Filtro Mistos. Peça em PP/G3/XXG etc. deixa o pedido de fora. */
 export const TAMANHOS_MISTOS: readonly string[] = ["P", "M", "G", "GG", "XG"];
@@ -284,6 +286,17 @@ export function passaNoFiltroMistos(o: Order, produtos: readonly string[] | unde
   return fechaCom(pedidoMistoDoLote(o, sizeFila), new Set(produtos.map(chaveMisto)));
 }
 
+/**
+ * O pedido aparece na mesa com o Filtro Mistos ativo? Pedido de LISTA IMPRESSA
+ * aparece sempre (11/11): a lista é dela até concluir ou devolver, e a lista
+ * seguinte é tirada com OUTRAS estampas — pelo filtro puro a Lista 1 sumiria
+ * da sidebar no instante em que ela tirasse a 2.
+ */
+export function visivelNoFiltroMistos(o: Order, produtos: readonly string[] | undefined, sizeFila: string): boolean {
+  if (o.listaEm) return true;
+  return passaNoFiltroMistos(o, produtos, sizeFila);
+}
+
 /** Linha do picking dos mistos: um produto, a grade dos OUTROS tamanhos e o total. */
 export type PickingMisto = {
   produto: string;
@@ -354,7 +367,12 @@ export function pickingMistos(pedidos: PedidoMisto[], sizeFila: string): Picking
   }
   return [...acc.values()]
     .map(({ ids, ...g }) => ({ ...g, pedidos: ids.size }))
-    .sort((a, b) => b.total - a.total || a.produto.localeCompare(b.produto, "pt-BR"));
+    .sort(compararPicking);
+}
+
+/** Ordem das linhas do picking impresso: total decrescente, depois produto em pt-BR. */
+function compararPicking(a: PickingMisto, b: PickingMisto): number {
+  return b.total - a.total || a.produto.localeCompare(b.produto, "pt-BR");
 }
 
 /** Soma das peças de outro tamanho (o "picking de Z peças"). */
@@ -374,4 +392,86 @@ export function textoReservadosPorOutras(
   if (!reservados || reservados.length === 0) return null;
   const itens = reservados.map((r) => (r.operadora.nome ? `${r.termo} (${r.operadora.nome})` : r.termo));
   return `Em uso por outra operadora: ${itens.join(", ")}`;
+}
+
+/**
+ * Produtos que já estão numa lista impressa em aberto da operadora: os das
+ * peças FORA do predominante dos pedidos `total` do lote que têm `listaEm`.
+ * Chave = `chaveMisto` (lower/trim); valor = número da lista ("Lista N", a
+ * mesma numeração de `listasDoLote`; o produto em duas listas fica com a mais
+ * antiga). O nexus deixa esses produtos de fora de uma lista nova, então o
+ * Filtro Mistos não pode oferecê-los.
+ */
+export function produtosJaTirados(lote: Order[], sizeFila: string): Map<string, number> {
+  const porId = new Map(lote.map((o) => [o.id, o]));
+  const out = new Map<string, number>();
+  for (const lista of listasDoLote(lote)) {
+    for (const id of lista.ids) {
+      const o = porId.get(id);
+      if (!o || o.separationMode !== "total") continue;
+      for (const peca of pedidoMistoDoLote(o, sizeFila).fora) {
+        const k = chaveMisto(peca.produto);
+        if (!out.has(k)) out.set(k, lista.numero);
+      }
+    }
+  }
+  return out;
+}
+
+/** `mistosProdutos` sem os produtos que já estão numa lista em aberto. */
+export function semProdutosJaTirados(produtos: readonly string[], tirados: ReadonlyMap<string, number>): string[] {
+  return produtos.filter((p) => !tirados.has(chaveMisto(p)));
+}
+
+/**
+ * Ordem dos pedidos DENTRO de uma lista impressa (a ordem do picking que ela
+ * leva na mão): 1) tamanho da peça fora, P, M, G, GG, XG — pedido com peças
+ * de tamanhos diferentes entra pelo MENOR; tamanho fora desse conjunto ou
+ * pedido sem peça fora vai pro fim; 2) dentro do tamanho, a ordem em que o
+ * produto da peça sai no picking impresso (`pickingMistos` sobre os pedidos
+ * desta lista); 3) empate = ordem de entrada (estável). Não muta a entrada.
+ */
+export function ordenarPedidosDaLista(pedidos: Order[], sizeFila: string): Order[] {
+  const mistos = pedidos.map((o) => pedidoMistoDoLote(o, sizeFila));
+  const posicaoNoPicking = new Map(
+    pickingMistos(mistos, sizeFila).map((l, i) => [chaveMisto(l.produto), i] as const),
+  );
+  const chaves = pedidos.map((o, i) => {
+    const m = mistos[i];
+    let tam = Number.POSITIVE_INFINITY;
+    let prod = Number.POSITIVE_INFINITY;
+    if (o.separationMode === "total" && m.pred !== "") {
+      for (const peca of m.fora) {
+        if (!TAMANHOS_MISTOS.includes(peca.tamanho)) continue;
+        const t = posicaoTamanho(peca.tamanho);
+        const r = posicaoNoPicking.get(chaveMisto(peca.produto)) ?? Number.POSITIVE_INFINITY;
+        if (t < tam || (t === tam && r < prod)) {
+          tam = t;
+          prod = r;
+        }
+      }
+    }
+    return { o, i, tam, prod };
+  });
+  return chaves.sort((a, b) => a.tam - b.tam || a.prod - b.prod || a.i - b.i).map((x) => x.o);
+}
+
+/**
+ * O lote já ordenado por lista (mais antiga primeiro, sem lista no fim) com a
+ * ordem do picking dentro de cada lista impressa (`ordenarPedidosDaLista`,
+ * COM ou SEM Filtro Mistos). Os sem lista seguem como antes: agrupados por
+ * produto fora com o filtro ativo (`porProduto`), senão a ordem do servidor.
+ * Não cruza listas.
+ */
+export function ordenarLoteMistos(lote: Order[], sizeFila: string, porProduto: boolean): Order[] {
+  const particoes = new Map<string, Order[]>();
+  for (const o of lote) {
+    const k = o.listaEm ? (o.listaId ?? o.listaEm) : "";
+    const arr = particoes.get(k);
+    if (arr) arr.push(o);
+    else particoes.set(k, [o]);
+  }
+  return [...particoes.entries()].flatMap(([k, g]) =>
+    k !== "" ? ordenarPedidosDaLista(g, sizeFila) : porProduto ? ordenarPorProdutoFora(g, sizeFila) : g,
+  );
 }

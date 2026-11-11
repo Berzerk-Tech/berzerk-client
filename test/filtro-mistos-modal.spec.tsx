@@ -300,3 +300,31 @@ describe("PickingFiltersModal — Imprimir e reservar", () => {
     expect((screen.getByRole("button", { name: /Imprimir e reservar/ }) as HTMLButtonElement).disabled).toBe(true);
   });
 });
+
+describe("PickingFiltersModal — estampas já tiradas numa lista em aberto", () => {
+  const TIRADOS = new Map([["oversized - surpresa", 1]]);
+
+  it("aparece desabilitada com 'na Lista N', não marca e não vai no onApply", async () => {
+    render(<PickingFiltersModal {...props} queue={QUEUE} jaTirados={TIRADOS} />);
+    fireEvent.click(await screen.findByRole("button", { name: /Filtro Mistos/ }));
+    await waitFor(() => screen.getByText("Oversized - Surpresa"));
+    expect(screen.getByText("na Lista 1")).toBeTruthy();
+    const botao = screen.getByText("Oversized - Surpresa").closest("button") as HTMLButtonElement;
+    expect(botao.disabled).toBe(true);
+    fireEvent.click(botao);
+    fireEvent.click(screen.getByText("Oversized - Punk Pink"));
+    fireEvent.click(screen.getByRole("button", { name: "Aplicar filtros" }));
+    await waitFor(() => expect(props.onApply).toHaveBeenCalled());
+    expect((props.onApply.mock.calls[0][0] as { mistosProdutos?: string[] }).mistosProdutos).toEqual(["Oversized - Punk Pink"]);
+  });
+
+  it("filtro salvo com a estampa já tirada: sai da seleção", async () => {
+    render(
+      <PickingFiltersModal {...props} queue={QUEUE} jaTirados={TIRADOS} filters={{ mistosProdutos: ["Oversized - Surpresa"] }} abaInicial="mistos" />,
+    );
+    await waitFor(() => screen.getByText("na Lista 1"));
+    fireEvent.click(screen.getByRole("button", { name: "Aplicar filtros" }));
+    await waitFor(() => expect(props.onApply).toHaveBeenCalled());
+    expect((props.onApply.mock.calls[0][0] as { mistosProdutos?: string[] }).mistosProdutos).toBeUndefined();
+  });
+});
