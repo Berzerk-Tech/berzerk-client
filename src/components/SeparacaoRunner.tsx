@@ -33,6 +33,8 @@ import { itemParecidoDoPedido, itemSize } from "../lib/itemParecido";
 import { onBeforeForcedLogout } from "../lib/idleSession";
 import { onAntesDeBloquear } from "../lib/updateGate";
 import { SupervisorModal, type SobressalenteInfo } from "./SupervisorModal";
+import { EscolhaListaDevolucao } from "./EscolhaListaDevolucao";
+import { TODAS_AS_LISTAS, chaveDaLista, idsDaDevolucao, listasDoLote } from "../lib/listasDoLote";
 import { ConfirmDialog } from "./ConfirmDialog";
 import { SoltarPedidoDialog } from "./SoltarPedidoDialog";
 import {
@@ -1134,6 +1136,24 @@ export function SeparacaoRunner({
     [completing, resetLeitura],
   );
 
+  // === Devolver lista impressa com a chave do supervisor ===
+  const [devolverListaOpen, setDevolverListaOpen] = useState(false);
+  /** Qual lista o diálogo devolve: a chave de UMA lista ou `TODAS_AS_LISTAS`. */
+  const [devolverEscolha, setDevolverEscolha] = useState<string>(TODAS_AS_LISTAS);
+  /**
+   * Abre o diálogo já apontando pra lista do pedido que está na mesa quando
+   * há duas em aberto (11/11: acabou a peça da Lista 1, devolver levava a 2
+   * junto). Com uma lista só, é o lote inteiro como sempre.
+   */
+  const abrirDevolverLista = useCallback(() => {
+    const listas = listasDoLote(loteRef.current);
+    const daMesa = chaveDaLista(loteRef.current.find((o) => o.id === orderRef.current?.id) ?? orderRef.current);
+    setDevolverEscolha(
+      listas.length < 2 ? TODAS_AS_LISTAS : (listas.find((l) => l.chave === daMesa)?.chave ?? listas[0].chave),
+    );
+    setDevolverListaOpen(true);
+  }, []);
+
   /** Devolve SÓ o pedido da mesa e repõe o lote (o resto continua dela). */
   const devolverAtual = useCallback(async () => {
     const ord = orderRef.current;
@@ -1143,8 +1163,9 @@ export function SeparacaoRunner({
       // Lista impressa fica com quem imprimiu até o fim do dia; devolver
       // antes é com a chave do supervisor (08/09: lista de mistos de 100
       // impressa sem filtro, 50 feitos, e "Devolver" só mostrava um aviso que
-      // ninguém via). O modal devolve a LISTA INTEIRA que sobrou, não só este.
-      setDevolverListaOpen(true);
+      // ninguém via). O modal devolve a LISTA que sobrou (com duas em aberto,
+      // ela escolhe qual), não só este.
+      abrirDevolverLista();
       return;
     }
     setPhase("loading");
@@ -1158,7 +1179,7 @@ export function SeparacaoRunner({
       if (msg) showNotice(`Não devolvido: ${msg}`);
     });
     await puxarLote({ depoisDe: ord.id });
-  }, [completing, puxarLote, showNotice]);
+  }, [completing, puxarLote, showNotice, abrirDevolverLista]);
 
   // === Soltar UM pedido da lista impressa (falta peça), sem PIN ===
   const [soltarOpen, setSoltarOpen] = useState(false);
@@ -1174,7 +1195,7 @@ export function SeparacaoRunner({
           // Nexus sem suporte: volta ao caminho do supervisor.
           setSoltarOpen(false);
           showNotice(MSG_SERVIDOR_EXIGE_SUPERVISOR);
-          setDevolverListaOpen(true);
+          abrirDevolverLista();
           return;
         }
         throw e;
@@ -1192,7 +1213,7 @@ export function SeparacaoRunner({
       setLote(resto);
       await puxarLote({ depoisDe: ord.id });
     },
-    [puxarLote, showNotice],
+    [puxarLote, showNotice, abrirDevolverLista],
   );
 
   /**
@@ -1254,11 +1275,9 @@ export function SeparacaoRunner({
     });
   }, []);
 
-  // === Devolver lista impressa com a chave do supervisor ===
-  const [devolverListaOpen, setDevolverListaOpen] = useState(false);
   const devolverListaConfirm = useCallback(
     async (liberacao: LiberacaoSupervisor) => {
-      const ids = loteRef.current.map((o) => o.id);
+      const ids = idsDaDevolucao(loteRef.current, devolverEscolha);
       if (ids.length === 0) {
         setDevolverListaOpen(false);
         return;
@@ -1267,13 +1286,33 @@ export function SeparacaoRunner({
       // nexus confirmar — senão a lista continuaria dela e a tela de filas
       // mostraria o banner de retomada na mesma hora.
       await devolverLote(ids, { incluirLista: true, liberacao });
-      saindoRef.current = true;
-      orderRef.current = null;
       setDevolverListaOpen(false);
-      setPhase("loading");
-      onBack();
+      const foram = new Set(ids);
+      const resto = loteRef.current.filter((o) => !foram.has(o.id));
+      if (resto.length === 0) {
+        saindoRef.current = true;
+        orderRef.current = null;
+        setPhase("loading");
+        onBack();
+        return;
+      }
+      // Devolveu UMA lista: a outra continua dela e a mesa segue nela.
+      if (!resto.some((o) => !!o.listaEm)) presaNaListaRef.current = false;
+      showNotice(
+        `${ids.length} ${ids.length === 1 ? "pedido devolvido" : "pedidos devolvidos"} pra fila. ` +
+          `${resto.length === 1 ? "Continua 1 pedido" : `Continuam ${resto.length} pedidos`} com você.`,
+      );
+      const daMesa = orderRef.current;
+      loteRef.current = resto;
+      setLote(resto);
+      if (daMesa && foram.has(daMesa.id)) {
+        setPhase("loading");
+        orderRef.current = null;
+        setOrder(null);
+        await puxarLote({ depoisDe: daMesa.id });
+      }
     },
-    [onBack],
+    [onBack, devolverEscolha, puxarLote, showNotice],
   );
 
   // === Liberação por supervisor (concluir SEM todas as peças no RFID) ===
@@ -2238,9 +2277,20 @@ export function SeparacaoRunner({
           faltantes={[]}
           contexto={{
             titulo: "Devolver a lista impressa",
-            descricao: `A lista fica com quem imprimiu até o fim do dia. Devolver os ${loteRef.current.length} ${loteRef.current.length === 1 ? "pedido que sobrou" : "pedidos que sobraram"} pra fila antes disso precisa da chave do supervisor. A folha impressa perde a validade.`,
+            descricao: (() => {
+              const n = idsDaDevolucao(loteRef.current, devolverEscolha).length;
+              return `A lista fica com quem imprimiu até o fim do dia. Devolver ${n === 1 ? "o pedido que sobrou" : `os ${n} pedidos que sobraram`} pra fila antes disso precisa da chave do supervisor. A folha impressa perde a validade.`;
+            })(),
             motivosRapidos: ["Lista impressa sem o filtro", "Troca de mesa / turno", "Peças não vão chegar hoje"],
-            botao: "Devolver lista",
+            botao: devolverEscolha === TODAS_AS_LISTAS ? "Devolver lista" : "Devolver só esta lista",
+            extra: (
+              <EscolhaListaDevolucao
+                listas={listasDoLote(loteRef.current)}
+                total={loteRef.current.length}
+                valor={devolverEscolha}
+                onChange={setDevolverEscolha}
+              />
+            ),
           }}
           onCancel={() => setDevolverListaOpen(false)}
           onConfirm={devolverListaConfirm}

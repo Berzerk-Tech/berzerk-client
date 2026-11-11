@@ -4,7 +4,7 @@
 // validado server-side, então vale em qualquer estação. Aqui também mora o
 // fluxo de definir/alterar PIN (primeiro uso define direto; depois exige o atual).
 
-import { useEffect, useMemo, useState, type CSSProperties } from "react";
+import { useEffect, useMemo, useState, type CSSProperties, type ReactNode } from "react";
 import { ApiError } from "../lib/api";
 import {
   alterarPinSupervisor,
@@ -30,6 +30,8 @@ export type SupervisorContexto = {
   motivosRapidos: string[];
   /** Rótulo do botão de confirmar (padrão "Liberar pedido"). */
   botao: string;
+  /** Conteúdo extra logo abaixo da explicação (ex.: escolher qual lista). */
+  extra?: ReactNode;
 };
 
 /** Peça a MAIS na mesa (sobressalente) que fica de fora do pedido. */
@@ -188,6 +190,8 @@ export function SupervisorModal({ faltantes, sobressalentes = [], onCancel, onCo
             </>
           )}
         </p>
+
+        {contexto?.extra}
 
         {faltantes.length > 0 && (
           <div style={faltantesBox}>
