@@ -4,6 +4,8 @@ import { AmbientBackground } from "./AmbientBackground";
 import { OperatorChip } from "./OperatorChip";
 import { SeparacaoRunner } from "./SeparacaoRunner";
 import { SupervisorModal } from "./SupervisorModal";
+import { EscolhaListaDevolucao } from "./EscolhaListaDevolucao";
+import { TODAS_AS_LISTAS, idsDaDevolucao, listasDoLote } from "../lib/listasDoLote";
 import { SoltarPedidoDialog } from "./SoltarPedidoDialog";
 import {
   MSG_SERVIDOR_EXIGE_SUPERVISOR,
@@ -79,6 +81,8 @@ export function Separacao({ onBack }: Props) {
   const recarregarRef = useRef<() => void>(() => {});
   /** Pedidos que já são da operadora (lote de outra sessão/estação). */
   const [emAberto, setEmAberto] = useState<Order[]>([]);
+  /** Qual lista o diálogo de devolver leva: a chave de UMA lista ou todas. */
+  const [devolverEscolha, setDevolverEscolha] = useState<string>(TODAS_AS_LISTAS);
   const [devolvendo, setDevolvendo] = useState(false);
   // Aviso do banner "em aberto" (pedido de lista não devolve). Hook AQUI, antes
   // do `if (confirmed) return` — na 0.9.33 ficou depois e quebrou a regra dos
@@ -325,11 +329,20 @@ export function Separacao({ onBack }: Props) {
   // presa com quem imprimiu (04/09: 73 pedidos da Nicole voltaram pra fila por
   // um devolver e outra mesa levou) — pra soltar a lista é de dentro da fila,
   // pelo "Devolver tudo" explícito.
+  const listasEmAberto = listasDoLote(emAberto);
+  /** Com duas listas em aberto o diálogo abre na Lista 1 (11/11: devolver levava as duas). */
+  const abrirDevolverLista = () => {
+    setDevolverEscolha(listasEmAberto.length < 2 ? TODAS_AS_LISTAS : listasEmAberto[0].chave);
+    setDevolverListaOpen(true);
+  };
   const devolverListaConfirm = async (liberacao: LiberacaoSupervisor) => {
-    await devolverLote(emAberto.map((o) => o.id), { incluirLista: true, liberacao });
+    const ids = idsDaDevolucao(emAberto, devolverEscolha);
+    await devolverLote(ids, { incluirLista: true, liberacao });
     setDevolverListaOpen(false);
-    setEmAberto([]);
-    setAvisoLista(null);
+    const foram = new Set(ids);
+    const ficam = emAberto.filter((o) => !foram.has(o.id));
+    setEmAberto(ficam);
+    if (!ficam.some((o) => !!o.listaEm)) setAvisoLista(null);
   };
 
   /**
@@ -398,7 +411,7 @@ export function Separacao({ onBack }: Props) {
       if (ehListaImpressaSemSuporte(e)) {
         setSoltando(null);
         setAvisoLista(MSG_SERVIDOR_EXIGE_SUPERVISOR);
-        setDevolverListaOpen(true);
+        abrirDevolverLista();
         return;
       }
       throw e;
@@ -407,7 +420,7 @@ export function Separacao({ onBack }: Props) {
 
   const devolverEmAberto = async () => {
     if (comLista.length > 0) {
-      setDevolverListaOpen(true);
+      abrirDevolverLista();
       return;
     }
     setDevolvendo(true);
@@ -537,9 +550,20 @@ export function Separacao({ onBack }: Props) {
           faltantes={[]}
           contexto={{
             titulo: "Devolver a lista impressa",
-            descricao: `A lista fica com quem imprimiu até o fim do dia. Devolver ${emAberto.length === 1 ? "o pedido" : `os ${emAberto.length} pedidos`} pra fila antes disso precisa da chave do supervisor. A folha impressa perde a validade.`,
+            descricao: (() => {
+              const n = idsDaDevolucao(emAberto, devolverEscolha).length;
+              return `A lista fica com quem imprimiu até o fim do dia. Devolver ${n === 1 ? "o pedido" : `os ${n} pedidos`} pra fila antes disso precisa da chave do supervisor. A folha impressa perde a validade.`;
+            })(),
             motivosRapidos: ["Lista impressa sem o filtro", "Troca de mesa / turno", "Peças não vão chegar hoje"],
-            botao: "Devolver lista",
+            botao: devolverEscolha === TODAS_AS_LISTAS ? "Devolver lista" : "Devolver só esta lista",
+            extra: (
+              <EscolhaListaDevolucao
+                listas={listasEmAberto}
+                total={emAberto.length}
+                valor={devolverEscolha}
+                onChange={setDevolverEscolha}
+              />
+            ),
           }}
           onCancel={() => setDevolverListaOpen(false)}
           onConfirm={devolverListaConfirm}
