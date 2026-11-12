@@ -41,6 +41,7 @@ import { printPdfBase64 } from "../lib/printer";
 import { folhaDosReservados, separarFolha, textoCarimbo, textoForaDaFolha, textoReservados, type ReservaMistosResultado } from "../lib/reservaMistos";
 import {
   adicionarExclusaoGlobal,
+  MSG_SO_SUPERVISAO_EXCLUSAO,
   getExclusoesGlobais,
   removerExclusaoGlobal,
   termosGlobais,
@@ -278,6 +279,9 @@ export function PickingFiltersModal({ filters, queue, lote, abaInicial = "exclus
   }, [queue, daFila, doLote]);
 
   const comGlobal = globais !== null;
+  // Só a supervisão edita a lista do galpão (`podeEditar === false`): a lista segue visível, sem controles.
+  const globalSoLeitura = globais?.podeEditar === false;
+  const modoGlobalEfetivo = modoGlobal && !globalSoLeitura;
   const globalLower = useMemo(() => new Set(globalSel.map((t) => t.toLowerCase())), [globalSel]);
   const selected = useMemo(
     () =>
@@ -307,10 +311,10 @@ export function PickingFiltersModal({ filters, queue, lote, abaInicial = "exclus
     }
     // Exclusão: desmarcar tira da lista em que o item estiver; marcação nova vai pra do switch.
     if (tem(globalSel) || tem(exclude)) {
-      // Desmarcar tira das duas (o item pode estar na global e na local).
-      setGlobalSel(sem(globalSel));
+      // Desmarcar tira das duas (o item pode estar na global e na local); sem permissão, a global fica.
+      if (!globalSoLeitura) setGlobalSel(sem(globalSel));
       setExclude(sem(exclude));
-    } else if (comGlobal && modoGlobal) setGlobalSel([...globalSel, nome]);
+    } else if (comGlobal && modoGlobalEfetivo) setGlobalSel([...globalSel, nome]);
     else setExclude([...exclude, nome]);
   };
 
@@ -387,8 +391,8 @@ export function PickingFiltersModal({ filters, queue, lote, abaInicial = "exclus
   // ou a atual se o switch "Em todas as estações" está desligado) ∪ a local.
   // Sem isso o quadro prometia 58 e o servidor entregava 2 (Victor, 07/11).
   const exclusaoAtiva = useMemo(
-    () => [...(comGlobal ? (modoGlobal ? globalSel : globalBase) : []), ...exclude],
-    [comGlobal, modoGlobal, globalSel, globalBase, exclude],
+    () => [...(comGlobal ? (modoGlobalEfetivo ? globalSel : globalBase) : []), ...exclude],
+    [comGlobal, modoGlobalEfetivo, globalSel, globalBase, exclude],
   );
   const pedidosM = useMemo(
     () => pedidosMistosNosFiltros(pedidosMTodos, exclusaoAtiva, include),
@@ -613,7 +617,11 @@ export function PickingFiltersModal({ filters, queue, lote, abaInicial = "exclus
         } catch {
           /* mantém o rascunho */
         }
-        setErroSalvar(`Não consegui salvar a exclusão do galpão: ${e instanceof Error ? e.message : String(e)}`);
+        setErroSalvar(
+          e instanceof ApiError && e.status === 403
+            ? MSG_SO_SUPERVISAO_EXCLUSAO
+            : `Não consegui salvar a exclusão do galpão: ${e instanceof Error ? e.message : String(e)}`,
+        );
         setSalvando(false);
         return null;
       }
@@ -694,7 +702,14 @@ export function PickingFiltersModal({ filters, queue, lote, abaInicial = "exclus
           )}
         </p>
 
-        {aba === "exclusao" && comGlobal && (
+        {aba === "exclusao" && comGlobal && globalSoLeitura && (
+          <div style={globalRow}>
+            <small style={mistosSmall} data-testid="global-so-leitura">
+              {MSG_SO_SUPERVISAO_EXCLUSAO}
+            </small>
+          </div>
+        )}
+        {aba === "exclusao" && comGlobal && !globalSoLeitura && (
           <div style={globalRow}>
             <button style={globalSw} onClick={mudarModoGlobal} role="switch" aria-checked={modoGlobal} title="Em todas as estações">
               <span style={modoGlobal ? swTrackOn : swTrackOff} aria-hidden="true">
@@ -927,7 +942,7 @@ export function PickingFiltersModal({ filters, queue, lote, abaInicial = "exclus
           <button style={limparBtn} onClick={emMistos ? () => setMistos([]) : onClear} disabled={imprimindoMistos}>
             {emMistos ? "Limpar" : "Limpar tudo"}
           </button>
-          {aba === "exclusao" && comGlobal && (
+          {aba === "exclusao" && comGlobal && !globalSoLeitura && (
             <button style={limparBtn} onClick={() => setGlobalSel([])} disabled={globalSel.length === 0}>
               Limpar do galpão
             </button>

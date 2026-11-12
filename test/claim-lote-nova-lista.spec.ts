@@ -44,7 +44,7 @@ describe("claimLote novaLista", () => {
     expect(chamadas[0][1]?.body).toMatchObject({ mode: "total", sizes: ["M"], novaLista: true });
   });
 
-  it("409 limite_listas_abertas sobe intacto e tem parse com a mensagem do servidor", async () => {
+  it("409 limite_listas_abertas sobe intacto e tem parse com a mensagem montada no client", async () => {
     const corpo = { error: "limite_listas_abertas", message: "Você já tem 2 listas em aberto.", listasAbertas: 2, limite: 2 };
     resposta = () => Promise.reject(new ApiError(409, corpo.message, corpo));
     let erro: unknown = null;
@@ -55,7 +55,14 @@ describe("claimLote novaLista", () => {
     }
     expect(erro).toBeInstanceOf(ApiError);
     expect(chamadas).toHaveLength(1); // 409 não é recusa de valor: não repete com `mixed`
-    expect(limiteListasAbertas(erro)).toEqual({ message: corpo.message, listasAbertas: 2, limite: 2 });
+    expect(limiteListasAbertas(erro)).toEqual({
+      message:
+        "Você já tem 2 listas em aberto (limite 2). Conclua uma lista ou chame o supervisor para devolver uma antes de tirar outra.",
+      listasAbertas: 2,
+      limite: 2,
+    });
+    // Sem os números no corpo, cai no texto do servidor.
+    expect(limiteListasAbertas(new ApiError(409, "x", { error: "limite_listas_abertas", message: "do servidor" }))?.message).toBe("do servidor");
     expect(limiteListasAbertas(new ApiError(409, "x", { error: "outro" }))).toBeNull();
   });
 });

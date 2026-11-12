@@ -11,6 +11,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from "react";
 import type { Order } from "../services/orders";
 import { miniatura } from "../lib/imagens";
+import { gravarReposicaoHistoricoAberto, lerReposicaoHistoricoAberto } from "../lib/sidebarLargura";
 import {
   agoraDoServidor,
   ajustarCarrinho,
@@ -462,7 +463,15 @@ function ListaMeus({
   agora: number;
   onCancelar: (id: string) => void;
 }) {
-  if (!meus || (meus.pendentes.length === 0 && meus.atendidos24h.length === 0)) {
+  const [historicoAberto, setHistoricoAberto] = useState<boolean>(lerReposicaoHistoricoAberto);
+  const alternarHistorico = () => {
+    setHistoricoAberto((v) => {
+      gravarReposicaoHistoricoAberto(!v);
+      return !v;
+    });
+  };
+  const daFila = meus?.daFila ?? [];
+  if (!meus || (meus.pendentes.length === 0 && meus.atendidos24h.length === 0 && daFila.length === 0)) {
     return <div style={vazio}>Você não tem pedidos de reposição recentes.</div>;
   }
   const faltas = meus.pendentes.filter((p) => p.falta);
@@ -508,15 +517,30 @@ function ListaMeus({
           </div>,
         ),
       )}
-      {meus.atendidos24h.length > 0 && <div style={secaoTitulo}>Repostos nas últimas horas</div>}
-      {meus.atendidos24h.map((p) =>
+      {daFila.length > 0 && <div style={secaoTitulo}>Pedidos de outras bancadas ({daFila.length})</div>}
+      {daFila.map((p) =>
         linha(
           p,
           <span style={cardMeta}>
-            reposto{p.atendidoPorNome ? ` por ${p.atendidoPorNome}` : ""} {rotuloHa(p.atendidoEm, agora)}
+            pedido de {p.pedidoPorNome?.trim() || "outra operadora"} {rotuloHa(p.criadoEm, agora)}
           </span>,
         ),
       )}
+      {meus.atendidos24h.length > 0 && (
+        <button type="button" style={secaoToggle} onClick={alternarHistorico} aria-expanded={historicoAberto}>
+          <span>Repostos nas últimas horas ({meus.atendidos24h.length})</span>
+          <span aria-hidden="true">{historicoAberto ? "▾" : "▸"}</span>
+        </button>
+      )}
+      {historicoAberto &&
+        meus.atendidos24h.map((p) =>
+          linha(
+            p,
+            <span style={cardMeta}>
+              reposto{p.atendidoPorNome ? ` por ${p.atendidoPorNome}` : ""} {rotuloHa(p.atendidoEm, agora)}
+            </span>,
+          ),
+        )}
     </div>
   );
 }
@@ -708,4 +732,16 @@ const enviarBtn: CSSProperties = {
 };
 const enviarBtnOff: CSSProperties = { ...enviarBtn, background: "var(--bg-card)", color: "var(--text-muted)", cursor: "not-allowed" };
 const secaoTitulo: CSSProperties = { fontSize: 12, fontWeight: 800, textTransform: "uppercase", color: "var(--text-secondary)", marginTop: 4 };
+const secaoToggle: CSSProperties = {
+  ...secaoTitulo,
+  display: "flex",
+  alignItems: "center",
+  justifyContent: "space-between",
+  gap: 8,
+  background: "transparent",
+  border: "none",
+  padding: 0,
+  cursor: "pointer",
+  textAlign: "left",
+};
 const linhaAcao: CSSProperties = { display: "flex", alignItems: "center", gap: 8 };

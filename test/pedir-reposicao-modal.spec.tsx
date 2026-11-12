@@ -61,6 +61,57 @@ afterEach(cleanup);
 
 const props = { tamanhoFila: "M" as const, pedidosMesa: [], meus: MEUS_VAZIO, onRecarregarMeus: async () => {}, onClose: () => {} };
 
+const linhaMeus = (o: object) => ({
+  id: "x", produtoId: "a", nome: "Oversized - Zeus", imagemUrl: null, cor: "preta", tamanho: "M", qtd: 10,
+  status: "pendente", criadoEm: "2026-11-10T11:50:00Z", atendidoEm: null, atendidoPorNome: null,
+  falta: false, faltaEm: null, faltaPorNome: null, ...o,
+});
+
+describe("PedirReposicaoModal: Meus pedidos (12/11)", () => {
+  beforeEach(() => localStorage.clear());
+  const meusCom = (extra: object) => ({ ...MEUS_VAZIO, ...extra });
+
+  it("histórico nasce recolhido, com contagem, e abre no clique (lembrando a escolha)", async () => {
+    const meus = meusCom({
+      atendidos24h: [
+        linhaMeus({ id: "h1", nome: "Oversized - Historico1", status: "atendido", atendidoEm: "2026-11-10T11:00:00Z", atendidoPorNome: "Rafa" }),
+        linhaMeus({ id: "h2", nome: "Oversized - Historico2", status: "atendido", atendidoEm: "2026-11-10T11:00:00Z" }),
+      ],
+    });
+    render(<PedirReposicaoModal {...props} meus={meus} />);
+    fireEvent.click(screen.getByText("Meus pedidos"));
+    const toggle = screen.getByRole("button", { name: /Repostos nas últimas horas \(2\)/ });
+    expect(toggle.getAttribute("aria-expanded")).toBe("false");
+    expect(screen.queryByText("Oversized - Historico1")).toBeNull();
+    fireEvent.click(toggle);
+    expect(toggle.getAttribute("aria-expanded")).toBe("true");
+    expect(screen.getByText("Oversized - Historico1")).toBeTruthy();
+    cleanup();
+    render(<PedirReposicaoModal {...props} meus={meus} />);
+    fireEvent.click(screen.getByText("Meus pedidos"));
+    expect(screen.getByText("Oversized - Historico1")).toBeTruthy();
+  });
+
+  it("daFila ausente: sem seção; presente: lista com nome de quem pediu, sem cancelar e sem mexer no contador da aba", async () => {
+    const pendente = linhaMeus({ id: "meu", nome: "Oversized - Meu" });
+    render(<PedirReposicaoModal {...props} meus={meusCom({ pendentes: [pendente] })} />);
+    fireEvent.click(screen.getByText(/Meus pedidos/));
+    expect(screen.queryByText(/Pedidos de outras bancadas/)).toBeNull();
+    cleanup();
+
+    const outro = linhaMeus({ id: "o1", nome: "Oversized - Alheio", pedidoPorNome: "Dani" });
+    const semNome = linhaMeus({ id: "o2", nome: "Oversized - Alheio2" });
+    render(<PedirReposicaoModal {...props} meus={meusCom({ pendentes: [pendente], daFila: [outro, semNome] })} />);
+    expect(screen.getByText("Meus pedidos (1)")).toBeTruthy();
+    fireEvent.click(screen.getByText("Meus pedidos (1)"));
+    expect(screen.getByText("Pedidos de outras bancadas (2)")).toBeTruthy();
+    expect(screen.getByText(/pedido de Dani/)).toBeTruthy();
+    expect(screen.getByText(/pedido de outra operadora/)).toBeTruthy();
+    // só o pendente dela tem "cancelar"
+    expect(screen.getAllByText("cancelar")).toHaveLength(1);
+  });
+});
+
 describe("PedirReposicaoModal", () => {
   it("abrir → +10 → enviar → desfazer", async () => {
     render(<PedirReposicaoModal {...props} />);

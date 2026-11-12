@@ -22,7 +22,12 @@ export type ExclusaoGlobal = {
 export type ExclusoesGlobais = {
   termos: ExclusaoGlobal[];
   atualizadoEm: string | null;
+  /** `false` = só a supervisão edita a lista do galpão. Ausente (nexus antigo) ou `true` = qualquer estação edita. */
+  podeEditar?: boolean;
 };
+
+/** Texto mostrado quando a estação não pode editar a lista do galpão (campo `podeEditar` ou 403 na escrita). */
+export const MSG_SO_SUPERVISAO_EXCLUSAO = "Só a supervisão altera os produtos em falta.";
 
 function normalizar(raw: unknown): ExclusoesGlobais {
   const b = (raw && typeof raw === "object" ? raw : {}) as Record<string, unknown>;
@@ -43,6 +48,7 @@ function normalizar(raw: unknown): ExclusoesGlobais {
       }))
       .filter((t) => t.termo.length > 0),
     atualizadoEm: typeof b.atualizadoEm === "string" ? b.atualizadoEm : null,
+    ...(typeof b.podeEditar === "boolean" ? { podeEditar: b.podeEditar } : null),
   };
 }
 

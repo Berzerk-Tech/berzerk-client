@@ -55,3 +55,22 @@ export function gravarMistosPainelAberto(aberto: boolean): void {
     /* localStorage indisponível: vale só na sessão */
   }
 }
+
+// Histórico ("Repostos nas últimas horas") do Pedir reposição: recolhido por padrão.
+const REPOSICAO_HISTORICO_KEY = "berzerk-reposicao-historico-aberto";
+
+export function lerReposicaoHistoricoAberto(): boolean {
+  try {
+    return localStorage.getItem(REPOSICAO_HISTORICO_KEY) === "1";
+  } catch {
+    return false;
+  }
+}
+
+export function gravarReposicaoHistoricoAberto(aberto: boolean): void {
+  try {
+    localStorage.setItem(REPOSICAO_HISTORICO_KEY, aberto ? "1" : "0");
+  } catch {
+    /* localStorage indisponível: vale só na sessão */
+  }
+}

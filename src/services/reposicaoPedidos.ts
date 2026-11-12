@@ -66,6 +66,8 @@ export type LinhaPedidoReposicao = {
   falta: boolean;
   faltaEm: string | null;
   faltaPorNome: string | null;
+  /** Só nas linhas de `daFila`: quem pediu (outra operadora). */
+  pedidoPorNome?: string | null;
 };
 
 export type MeusPedidosReposicao = {
@@ -75,6 +77,8 @@ export type MeusPedidosReposicao = {
   deslocamentoMs?: number;
   pendentes: LinhaPedidoReposicao[];
   atendidos24h: LinhaPedidoReposicao[];
+  /** Pedidos pendentes de OUTRAS operadoras nos tamanhos que esta tem em mãos (só leitura). Ausente no Nexus antigo = []. */
+  daFila?: LinhaPedidoReposicao[];
 };
 
 export type ItemPedidoReposicao = { produtoId: string; tamanho: TamanhoReposicao; qtd: number };
@@ -127,13 +131,14 @@ export async function getCatalogoReposicao(tamanho: TamanhoReposicao): Promise<R
 /** `null` = sem suporte (404/403). */
 export async function getMeusPedidosReposicao(): Promise<MeusPedidosReposicao | null> {
   try {
-    const m = await apiRequest<MeusPedidosReposicao>("/reposicao/pedidos/meus");
+    const m = await apiRequest<Omit<MeusPedidosReposicao, "daFila"> & { daFila?: LinhaPedidoReposicao[] }>("/reposicao/pedidos/meus");
     const servidor = Date.parse(m.agora);
     return {
       agora: m.agora,
       deslocamentoMs: Number.isNaN(servidor) ? 0 : servidor - Date.now(),
       pendentes: Array.isArray(m.pendentes) ? m.pendentes : [],
       atendidos24h: Array.isArray(m.atendidos24h) ? m.atendidos24h : [],
+      daFila: Array.isArray(m.daFila) ? m.daFila : [],
     };
   } catch (e) {
     if (semSuporte(e)) return null;

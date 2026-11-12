@@ -252,6 +252,23 @@ describe("pickingMistos", () => {
   });
 });
 
+describe("pickingMistos: linhas por menor tamanho fora (12/11/2026)", () => {
+  it("ordena por menor tamanho presente, depois total desc, depois produto; sem tamanho conhecido vai pro fim", () => {
+    const peds = pedidosMistosDaFila(
+      [
+        linha("Zeta - XG", "XG", 9, ["a"]),
+        linha("Alfa - G", "G", 5, ["b"]),
+        linha("Beta - G", "G", 5, ["c"]),
+        linha("Gama - G", "G", 8, ["d"]),
+        linha("Gama - P", "P", 1, ["d"]),
+        linha("Omega - G1", "G1", 20, ["e"]),
+      ],
+      "M",
+    );
+    expect(pickingMistos(peds, "M").map((x) => x.produto)).toEqual(["Gama", "Alfa", "Beta", "Zeta", "Omega"]);
+  });
+});
+
 describe("ordenarPorProdutoFora (Nicole via Roger, 06/11/2026)", () => {
   // Pedido do M com uma peça "fora" (G) do produto dado; sem produto = só peça do M.
   const com = (id: string, fora?: string, extra: Partial<Order> = {}): Order => ({
@@ -353,6 +370,17 @@ describe("produtosJaTirados e ordem por tamanho do picking", () => {
     ];
     expect(ids(ordenarPedidosDaLista(lista, "M"))).toEqual(["3", "4", "6", "2", "5", "1"]);
     expect(ids(lista)).toEqual(["1", "2", "3", "4", "5", "6"]); // não muta
+  });
+
+  it("a ordem dos pedidos da lista segue a nova ordem das linhas", () => {
+    // Linhas: Mini (tem P) primeiro; Grande (total 9, só G) depois, mesmo com total maior.
+    const lista = [
+      peca("g", [["Grande", "G"]], L1),
+      peca("g2", [["Grande", "G"]], L1),
+      peca("p", [["Mini", "P"]], L1),
+      peca("m", [["Mini", "G"]], L1),
+    ];
+    expect(ids(ordenarPedidosDaLista(lista, "M"))).toEqual(["p", "m", "g", "g2"]);
   });
 
   it("ordenarLoteMistos: duas listas não se misturam e sem lista fica no fim, com ou sem filtro", () => {

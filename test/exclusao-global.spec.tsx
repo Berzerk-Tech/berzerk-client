@@ -3,6 +3,7 @@
 // chips de origem e o PUT só quando a global mudou.
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { ApiError } from "../src/lib/api";
 import type { QueueProduct } from "../src/services/orders";
 
 const getQueueProducts = vi.fn();
@@ -110,5 +111,39 @@ describe("Filtro Exclusão com lista do galpão", () => {
     expect(adicionarExclusaoGlobal).not.toHaveBeenCalled();
     expect(removerExclusaoGlobal).not.toHaveBeenCalled();
     expect(props.onApply.mock.calls[0][0].excludeProducts).toEqual(["Camiseta Zeus"]);
+  });
+
+  it("podeEditar:false: lista visível, sem switch nem 'Limpar do galpão', com a linha da supervisão; marcar vai só pro local", async () => {
+    getExclusoesGlobais.mockResolvedValue({ ...GLOBAIS, podeEditar: false });
+    render(<PickingFiltersModal {...props} />);
+    await waitFor(() => expect(screen.getByText("galpão")).toBeTruthy());
+    expect(screen.getByText("Só a supervisão altera os produtos em falta.")).toBeTruthy();
+    expect(screen.queryByText("Em todas as estações")).toBeNull();
+    expect(screen.queryByText("Limpar do galpão")).toBeNull();
+    fireEvent.click(screen.getByText("Camiseta Zeus"));
+    fireEvent.click(screen.getByText("Moletom Cargo")); // global: não sai
+    fireEvent.click(screen.getByRole("button", { name: "Aplicar filtros" }));
+    await waitFor(() => expect(props.onApply).toHaveBeenCalledTimes(1));
+    expect(adicionarExclusaoGlobal).not.toHaveBeenCalled();
+    expect(removerExclusaoGlobal).not.toHaveBeenCalled();
+    expect(props.onApply.mock.calls[0][0].excludeProducts).toEqual(["Camiseta Zeus"]);
+  });
+
+  it("podeEditar:true (ou ausente) mantém os controles", async () => {
+    getExclusoesGlobais.mockResolvedValue({ ...GLOBAIS, podeEditar: true });
+    render(<PickingFiltersModal {...props} />);
+    await waitFor(() => expect(screen.getByText("Em todas as estações")).toBeTruthy());
+    expect(screen.queryByText("Só a supervisão altera os produtos em falta.")).toBeNull();
+    expect(screen.getByText("Limpar do galpão")).toBeTruthy();
+  });
+
+  it("403 na escrita mostra a mensagem da supervisão", async () => {
+    adicionarExclusaoGlobal.mockRejectedValue(new ApiError(403, "forbidden", {}));
+    render(<PickingFiltersModal {...props} />);
+    await waitFor(() => screen.getByText("galpão"));
+    fireEvent.click(screen.getByText("Camiseta Zeus"));
+    fireEvent.click(screen.getByRole("button", { name: "Aplicar filtros" }));
+    await waitFor(() => expect(screen.getByText("Só a supervisão altera os produtos em falta.")).toBeTruthy());
+    expect(props.onApply).not.toHaveBeenCalled();
   });
 });
