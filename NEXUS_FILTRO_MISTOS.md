@@ -104,3 +104,11 @@ Unitários: união local ∪ global; termo revivido não duplica; case-insensiti
 - Manda `mistosProdutos` no body dos mesmos endpoints em que manda `includeProducts` (**só o filtro local** — a exclusão global NÃO vai no body, o nexus une sozinho; o limite de 100 termos do body é respeitado); reaplica a regra em memória (`passaNosFiltros`); usa `produto` quando vem, senão deriva.
 - Aba "Filtro Mistos" no Filtro Inteligente (ranking "fecha sozinho", grade do picking, "Imprimir mistos"), Picking Geral por produto × grade, etiqueta Zebra 100×150 só com as peças fora do tamanho da fila.
 - Aba Exclusão: chips "galpão"/"só aqui", switch "Em todas as estações" (default ligado); ao aplicar manda o diff (`POST` por termo novo, `DELETE` por termo tirado); a lista só desta estação continua existindo pra caso raro (ex.: prateleira local vazia). Evento WS `exclusoes-globais.changed` → GET + reaplica o lote.
+
+---
+
+## Adendo 12/11/2026 — PP e G3 + sem limite (client 0.9.82+; nexus sobe ANTES)
+
+- **`mistosTamanhos?: string[]`** no body (`POST /separacao/lote`, `/claim`, `/claim-mixed`), SEMPRE junto de `mistosProdutos`: o client manda `["PP","P","M","G","GG","XG","G3"]`. É o conjunto em que a peça fora do predominante pode estar; G1, G2 e XXG continuam deixando o pedido de fora. Sem o campo, o servidor segue em P–XG. Os GETs (`queues`/`queue`/`queue-dates`/`queue-products`) hoje NÃO levam `mistosProdutos` no client, então também não levam `mistosTamanhos`.
+- **Sem limite**: com `mode: "total"` e `mistosProdutos` não vazio o client NÃO manda `quantidade` e mostra "Sem limite" no lugar do seletor; o servidor ignora `quantidade` e o teto de `separacao_lote_tamanho_mistos`, puxa todos que casam (guarda técnica de 500 por puxada).
+- Lista impressa/picking: PP e G3 ganham caixa só na linha (produto) que tem peça nesses tamanhos; ordem dos pedidos na lista PP, P, M, G, GG, XG, G3. "Fora do predominante" segue como antes (inclusive PP numa fila M).

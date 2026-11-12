@@ -328,6 +328,22 @@ describe("SeparacaoRunner — Filtro Mistos: fallback de tamanho e corpo do clai
     expect(claimLote.mock.calls[0][0].filters?.mistosProdutos).toEqual(["Myth"]);
   });
 
+  it("com Filtro Mistos o seletor vira 'Sem limite' e o claim não leva quantidade; sem filtro, leva", async () => {
+    localStorage.setItem("separacao.quantidadeMistos", "100");
+    claimLote.mockReset().mockResolvedValue({ orders: [], fila: { restantes: 0 } });
+    localStorage.setItem("berzerk_picking_filters_v2", JSON.stringify({ "total:M": { mistosProdutos: ["Myth"] } }));
+    await montarRunner({ mode: "total", size: "M", sizes: ["M"] });
+    expect(screen.getAllByText(/Sem limite/).length).toBeGreaterThan(0);
+    expect(claimLote.mock.calls[0][0].quantidade).toBeUndefined();
+    expect(localStorage.getItem("separacao.quantidadeMistos")).toBe("100");
+    cleanup();
+    localStorage.removeItem("berzerk_picking_filters_v2");
+    claimLote.mockClear();
+    await montarRunner({ mode: "total", size: "M", sizes: ["M"] });
+    expect(screen.queryByText(/Sem limite/)).toBeNull();
+    expect(claimLote.mock.calls[0][0].quantidade).toBe(100);
+  });
+
   it("nexus antigo (itens sem `produto`): filtro mistos salvo NÃO esconde nada nem liga o indicador", async () => {
     const o = pedido(1);
     o.separationMode = "total";

@@ -2,6 +2,7 @@
 // @berzerk/contracts (o app é repo separado, então duplicamos os shapes).
 
 import { ApiError, apiRequest } from "../lib/api";
+import { TAMANHOS_MISTOS } from "../lib/mistos";
 
 export type OrderStatus =
   | "received"
@@ -229,7 +230,7 @@ export type QueueFilters = {
    * Filtro Mistos (só `mode: "total"`): PRODUTOS (nome sem o tamanho, ver
    * `src/lib/mistos.ts`) que ficam nesta separação em todos os tamanhos. Só
    * passa o misto cujas peças de OUTRO tamanho são todas desses produtos, em
-   * P–XG. Contrato em NEXUS_FILTRO_MISTOS.md.
+   * PP–G3 (`mistosTamanhos` vai junto no body). Contrato em NEXUS_FILTRO_MISTOS.md.
    */
   mistosProdutos?: string[];
 };
@@ -242,7 +243,11 @@ function filtersBody(f?: QueueFilters): Record<string, unknown> {
   if (f.dateTo) out.dateTo = f.dateTo;
   if (f.includeProducts?.length) out.includeProducts = f.includeProducts;
   if (f.excludeProducts?.length) out.excludeProducts = f.excludeProducts;
-  if (f.mistosProdutos?.length) out.mistosProdutos = f.mistosProdutos;
+  if (f.mistosProdutos?.length) {
+    out.mistosProdutos = f.mistosProdutos;
+    // Sempre junto de `mistosProdutos`: sem ele o nexus segue em P–XG.
+    out.mistosTamanhos = [...TAMANHOS_MISTOS];
+  }
   return out;
 }
 
@@ -482,7 +487,10 @@ export function claimLote(params: {
         // ela (só mistos) vai como TETO opcional.
         mode,
         sizes: params.sizes,
-        ...(params.quantidade !== undefined ? { quantidade: params.quantidade } : {}),
+        // Com Filtro Mistos o nexus ignora `quantidade` (puxa tudo que casa): não manda.
+        ...(params.quantidade !== undefined && !params.filters?.mistosProdutos?.length
+          ? { quantidade: params.quantidade }
+          : {}),
         ...filtersBody(params.filters),
         ...(params.novaLista ? { novaLista: true } : {}),
         ...canalBody(params.canal),

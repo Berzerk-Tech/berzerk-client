@@ -59,3 +59,26 @@ describe("claimLote novaLista", () => {
     expect(limiteListasAbertas(new ApiError(409, "x", { error: "outro" }))).toBeNull();
   });
 });
+
+describe("claimLote com Filtro Mistos (PP–G3, sem limite)", () => {
+  beforeEach(() => {
+    chamadas.length = 0;
+    resposta = () => Promise.resolve({ orders: [] });
+  });
+
+  it("com mistosProdutos manda mistosTamanhos e NÃO manda quantidade", async () => {
+    await claimLote({ mode: "total", sizes: ["M"], quantidade: 100, filters: { mistosProdutos: ["Zeus"] } });
+    const body = chamadas[0][1]?.body ?? {};
+    expect(body.mistosProdutos).toEqual(["Zeus"]);
+    expect(body.mistosTamanhos).toEqual(["PP", "P", "M", "G", "GG", "XG", "G3"]);
+    expect("quantidade" in body).toBe(false);
+  });
+
+  it("sem filtro manda quantidade como sempre e não leva mistosTamanhos", async () => {
+    await claimLote({ mode: "total", sizes: ["M"], quantidade: 100 });
+    const body = chamadas[0][1]?.body ?? {};
+    expect(body.quantidade).toBe(100);
+    expect("mistosTamanhos" in body).toBe(false);
+    expect("mistosProdutos" in body).toBe(false);
+  });
+});

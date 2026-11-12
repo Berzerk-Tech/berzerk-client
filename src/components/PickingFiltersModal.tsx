@@ -32,7 +32,7 @@ import {
   pedidosMistosNosFiltros,
   pickingMistos,
   rankingMistos,
-  tamanhosForaDaFila,
+  tamanhosDaLinha,
   textoReservadosPorOutras,
   totalFora,
 } from "../lib/mistos";
@@ -790,7 +790,7 @@ export function PickingFiltersModal({ filters, queue, lote, abaInicial = "exclus
                     </small>
                     {marcado && queue && (
                       <span style={gradeRow}>
-                        {tamanhosForaDaFila(queue.size).map((t) => {
+                        {tamanhosDaLinha(g ?? { grade: {} }, queue.size).map((t) => {
                           const n = g?.grade[t] ?? 0;
                           return (
                             <span key={t} style={n ? gradeChip : gradeChipZero}>

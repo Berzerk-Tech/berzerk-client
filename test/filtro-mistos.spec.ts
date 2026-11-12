@@ -21,6 +21,7 @@ import {
   rankingMistos,
   tamanhoDaLinha,
   tamanhosForaDaFila,
+  tamanhosDaLinha,
   totalDele,
   totalFora,
   pedidosMistosNosFiltros,
@@ -148,15 +149,66 @@ describe("rankingMistos + fechamCom", () => {
     expect(r.map((x) => [x.produto, x.aparece, x.sozinho])).toEqual([
       ["Surpresa", 3, 1], // só o "a" fecha sozinho (b tem Punk Pink, c tem Vintage G3)
       ["Punk Pink", 2, 1], // "d"
-      ["Vintage", 1, 0], // G3 nunca fecha
+      ["Vintage", 1, 0], // c também tem Surpresa: não fecha sozinho
     ]);
   });
-  it("fica o pedido cujas peças fora são TODAS dos marcados e em P–XG", () => {
+  it("fica o pedido cujas peças fora são TODAS dos marcados e em PP–G3", () => {
     expect(fechamCom(peds, ["Surpresa"]).map((p) => p.id)).toEqual(["a"]);
     expect(fechamCom(peds, ["surpresa", "PUNK PINK"]).map((p) => p.id).sort()).toEqual(["a", "b", "d"]);
-    // "c" tem Vintage em G3: fora de P–XG, nunca entra.
-    expect(fechamCom(peds, ["Surpresa", "Punk Pink", "Vintage"]).map((p) => p.id).sort()).toEqual(["a", "b", "d"]);
+    // G3 agora é aceito: "c" (Surpresa G + Vintage G3) fecha com os dois marcados.
+    expect(fechamCom(peds, ["Surpresa", "Punk Pink", "Vintage"]).map((p) => p.id).sort()).toEqual(["a", "b", "c", "d"]);
     expect(fechamCom(peds, [])).toEqual([]);
+  });
+});
+
+describe("PP e G3 no Filtro Mistos", () => {
+  const peds = pedidosMistosDaFila(
+    [
+      linha("Leg Day - M", "M", 5, ["a", "b", "c", "d", "e"]),
+      linha("Zeus - PP", "PP", 1, ["a"]),
+      linha("Zeus - G3", "G3", 1, ["b"]),
+      linha("Zeus - G1", "G1", 1, ["c"]),
+      linha("Zeus - XXG", "XXG", 1, ["d"]),
+      linha("Zeus - G", "G", 1, ["e"]),
+    ],
+    "M",
+  );
+  it("peça fora em PP e G3 passa; G1/G2/XXG deixam o pedido de fora", () => {
+    expect(fechamCom(peds, ["Zeus"]).map((p) => p.id).sort()).toEqual(["a", "b", "e"]);
+  });
+  it("passaNoFiltroMistos (Order do lote) aceita PP e G3", () => {
+    const pp = pedido("x", "M", [{ nome: "Leg Day - M", tamanho: "M" }, { nome: "Zeus - PP", tamanho: "PP" }]);
+    const g3 = pedido("y", "M", [{ nome: "Leg Day - M", tamanho: "M" }, { nome: "Zeus - G3", tamanho: "G3" }]);
+    const g1 = pedido("z", "M", [{ nome: "Leg Day - M", tamanho: "M" }, { nome: "Zeus - G1", tamanho: "G1" }]);
+    expect([pp, g3, g1].map((o) => passaNoFiltroMistos(o, ["Zeus"], "M"))).toEqual([true, true, false]);
+  });
+  it("grade: PP e G3 só ganham caixa na linha que tem peça nesses tamanhos", () => {
+    const pick = pickingMistos(
+      pedidosMistosDaFila(
+        [
+          linha("Leg Day - M", "M", 3, ["a", "b", "c"]),
+          linha("Zeus - PP", "PP", 2, ["a", "b"]),
+          linha("Zeus - G", "G", 1, ["c"]),
+          linha("Myth - G3", "G3", 1, ["c"]),
+          linha("Myth - GG", "GG", 1, ["a"]),
+        ],
+        "M",
+      ),
+      "M",
+    );
+    const zeus = pick.find((x) => x.produto === "Zeus")!;
+    const myth = pick.find((x) => x.produto === "Myth")!;
+    expect(zeus.grade).toEqual({ P: 0, G: 1, GG: 0, XG: 0, PP: 2 });
+    expect(tamanhosDaLinha(zeus, "M")).toEqual(["PP", "P", "G", "GG", "XG"]);
+    expect(tamanhosDaLinha(myth, "M")).toEqual(["P", "G", "GG", "XG", "G3"]);
+    expect(tamanhosDaLinha({ grade: { P: 0, G: 1, GG: 0, XG: 0 } }, "M")).toEqual(["P", "G", "GG", "XG"]);
+    expect(tamanhosForaDaFila("M")).toEqual(["P", "G", "GG", "XG"]);
+  });
+  it("ordena a lista PP, P, M, G, GG, XG, G3", () => {
+    const L = { listaEm: "2026-11-11T10:00:00.000Z", listaId: "L1" };
+    const f = (id: string, t: string): Order => ({ ...pedido(id, "M", [{ nome: "Base - M", tamanho: "M" }, { nome: `A - ${t}`, tamanho: t }]), ...L });
+    const lista = ["g3", "xg", "pp", "gg", "p", "g"].map((t) => f(t, t.toUpperCase()));
+    expect(ordenarPedidosDaLista(lista, "M").map((o) => o.id)).toEqual(["pp", "p", "g", "gg", "xg", "g3"]);
   });
 });
 

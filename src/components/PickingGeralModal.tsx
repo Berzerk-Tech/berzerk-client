@@ -23,7 +23,7 @@ import { posicaoTamanho } from "../lib/tamanhos";
 import { agregarLote } from "../lib/agregarLote";
 import { gerarPickingPdf, type PickingSecao } from "../lib/pickingPdf";
 import {
-  TAMANHOS_MISTOS,
+  tamanhosDaLinha,
   fechamCom,
   pedidosMistosNosFiltros,
   pedidoMistoDoLote,
@@ -571,9 +571,8 @@ export function PickingGeralModal({
                       em {l.pedidos} {l.pedidos === 1 ? "pedido" : "pedidos"}
                     </small>
                     <div style={mistoGrade}>
-                      {TAMANHOS_MISTOS.map((t) => {
-                        const daFila = t === queue.size.toUpperCase();
-                        const n = daFila ? 0 : (l.grade[t] ?? 0);
+                      {tamanhosDaLinha(l, queue.size).map((t) => {
+                        const n = l.grade[t] ?? 0;
                         return (
                           <span key={t} style={n ? mistoCaixa : mistoCaixaZero}>
                             <b>{t}</b> {n}

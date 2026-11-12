@@ -4,7 +4,7 @@
 // Cada pedido misto pertence à fila do seu tamanho predominante: 1 Leg Day M +
 // 1 Zeus M + 1 Myth G é um "misto do M". As peças do M saem da própria fila do
 // M; só as peças de OUTRO tamanho (o Myth G) precisam vir de um picking. O
-// Filtro Mistos marca PRODUTOS (produto inteiro, todos os tamanhos de P a XG)
+// Filtro Mistos marca PRODUTOS (produto inteiro, todos os tamanhos de PP a G3)
 // e deixa na fila só os mistos cujas peças de outro tamanho são TODAS desses
 // produtos — assim uma separação pega poucos produtos da prateleira e fecha
 // muitos mistos de uma vez (vazão da Black).
@@ -19,8 +19,18 @@ import { itemSize } from "./itemParecido";
 import { listasDoLote } from "./listasDoLote";
 import { posicaoTamanho } from "./tamanhos";
 
-/** Tamanhos que entram no Filtro Mistos. Peça em PP/G3/XXG etc. deixa o pedido de fora. */
-export const TAMANHOS_MISTOS: readonly string[] = ["P", "M", "G", "GG", "XG"];
+/**
+ * Tamanhos que entram no Filtro Mistos, NA ORDEM (PP antes de P, G3 depois de
+ * XG). Peça em G1/G2/XXG etc. deixa o pedido de fora. Vai pro nexus como
+ * `mistosTamanhos` junto de `mistosProdutos` (NEXUS_FILTRO_MISTOS.md); sem o
+ * campo o servidor segue em P–XG.
+ */
+export const TAMANHOS_MISTOS: readonly string[] = ["PP", "P", "M", "G", "GG", "XG", "G3"];
+
+/** Tamanhos com caixa fixa na grade do picking (P–XG sem o da fila). */
+const TAMANHOS_BASE_MISTOS: readonly string[] = ["P", "M", "G", "GG", "XG"];
+/** PP e G3 só ganham caixa na linha (produto) que tem peça nesse tamanho. */
+const TAMANHOS_EXTRA_MISTOS: readonly string[] = ["PP", "G3"];
 
 /**
  * Sufixo de tamanho no FIM do nome. A MESMA regra do nexus (`produto-de.ts`,
@@ -217,7 +227,7 @@ export type ProdutoMisto = {
   imagemUrl: string | null;
   /** Em quantos mistos ele aparece como peça de outro tamanho. */
   aparece: number;
-  /** Quantos mistos ele fecha SOZINHO (é o único produto de outro tamanho, e em P–XG). */
+  /** Quantos mistos ele fecha SOZINHO (é o único produto de outro tamanho, e em PP–G3). */
   sozinho: number;
 };
 
@@ -242,7 +252,7 @@ export function rankingMistos(pedidos: PedidoMisto[]): ProdutoMisto[] {
   );
 }
 
-/** A regra: fica o pedido cujas peças de outro tamanho são TODAS dos produtos marcados, e em P–XG. */
+/** A regra: fica o pedido cujas peças de outro tamanho são TODAS dos produtos marcados, e em PP–G3. */
 export function fechaCom(pedido: PedidoMisto, marcados: ReadonlySet<string>): boolean {
   if (pedido.fora.length === 0) return false;
   return pedido.fora.every((i) => marcados.has(chaveMisto(i.produto)) && TAMANHOS_MISTOS.includes(i.tamanho));
@@ -307,7 +317,6 @@ export type PickingMisto = {
   pedidos: number;
 };
 
-/** Tamanhos da grade do picking: P–XG sem o da fila. */
 /**
  * Ordem por produto com o Filtro Mistos ativo (Nicole via Roger, 06/11/2026):
  * a lista alternava produtos (Chinigami, Punk Pink, Chinigami…) e ela quer
@@ -332,18 +341,32 @@ export function ordenarPorProdutoFora(pedidos: Order[], sizeFila: string): Order
   return [...[...grupos.values()].flat(), ...sem];
 }
 
+/** Tamanhos-base da grade do picking: P–XG sem o da fila (PP/G3 entram por linha, ver `tamanhosDaLinha`). */
 export function tamanhosForaDaFila(sizeFila: string): string[] {
   const s = sizeFila.trim().toUpperCase();
-  return TAMANHOS_MISTOS.filter((t) => t !== s);
+  return TAMANHOS_BASE_MISTOS.filter((t) => t !== s);
+}
+
+/**
+ * Caixas da grade de UMA linha do picking: as P–XG sem o da fila, mais PP e/ou
+ * G3 só se a linha tem peça nesses tamanhos (na ordem de `TAMANHOS_MISTOS`) —
+ * linha sem PP/G3 fica igual a antes, sem apertar a bobina térmica.
+ */
+export function tamanhosDaLinha(linha: Pick<PickingMisto, "grade">, sizeFila: string): string[] {
+  const s = sizeFila.trim().toUpperCase();
+  return TAMANHOS_MISTOS.filter(
+    (t) => t !== s && (TAMANHOS_BASE_MISTOS.includes(t) || (TAMANHOS_EXTRA_MISTOS.includes(t) && (linha.grade[t] ?? 0) > 0)),
+  );
 }
 
 /**
  * Picking das peças de OUTRO tamanho dos pedidos dados, por produto, do maior
- * pro menor. Peça fora de P–XG (G3…) entra no total mas não tem caixa na grade.
+ * pro menor. PP e G3 ganham caixa só na linha que tem peça nesses tamanhos; peça fora de PP–G3 (G1, XXG…) entra no total sem caixa.
  */
 export function pickingMistos(pedidos: PedidoMisto[], sizeFila: string): PickingMisto[] {
   const tamanhos = tamanhosForaDaFila(sizeFila);
   const acc = new Map<string, PickingMisto & { ids: Set<string> }>();
+  const fila = sizeFila.trim().toUpperCase();
   for (const p of pedidos) {
     for (const i of p.fora) {
       const chave = chaveMisto(i.produto);
@@ -361,6 +384,7 @@ export function pickingMistos(pedidos: PedidoMisto[], sizeFila: string): Picking
       }
       if (!g.imagemUrl && i.imagemUrl) g.imagemUrl = i.imagemUrl;
       if (i.tamanho in g.grade) g.grade[i.tamanho] += i.quantidade;
+      else if (TAMANHOS_EXTRA_MISTOS.includes(i.tamanho) && i.tamanho !== fila) g.grade[i.tamanho] = i.quantidade;
       g.total += i.quantidade;
       g.ids.add(p.id);
     }
@@ -425,7 +449,7 @@ export function semProdutosJaTirados(produtos: readonly string[], tirados: Reado
 
 /**
  * Ordem dos pedidos DENTRO de uma lista impressa (a ordem do picking que ela
- * leva na mão): 1) tamanho da peça fora, P, M, G, GG, XG — pedido com peças
+ * leva na mão): 1) tamanho da peça fora, PP, P, M, G, GG, XG, G3 — pedido com peças
  * de tamanhos diferentes entra pelo MENOR; tamanho fora desse conjunto ou
  * pedido sem peça fora vai pro fim; 2) dentro do tamanho, a ordem em que o
  * produto da peça sai no picking impresso (`pickingMistos` sobre os pedidos
