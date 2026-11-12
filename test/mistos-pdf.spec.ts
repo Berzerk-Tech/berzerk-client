@@ -42,3 +42,17 @@ describe("gerarMistosPdf", () => {
     expect(paginas(gerarMistosPdf({ fila: "M", pedidos: 0, linhas: [] }))).toBe(1);
   });
 });
+
+describe("gerarMistosPdf com PP/G3", () => {
+  it("linha com PP e G3 gera o PDF e mostra as caixas extras", () => {
+    const l: PickingMisto = { ...linha(1), grade: { P: 1, G: 2, GG: 0, XG: 0, PP: 3, G3: 1 } };
+    const pdf = Buffer.from(gerarMistosPdf({ fila: "M", pedidos: 2, linhas: [l, linha(2)] }), "base64").toString("latin1");
+    expect(pdf).toContain("(PP)");
+    expect(pdf).toContain("(G3)");
+  });
+  it("sem PP/G3 nenhuma caixa extra", () => {
+    const pdf = Buffer.from(gerarMistosPdf({ fila: "M", pedidos: 1, linhas: [linha(1)] }), "base64").toString("latin1");
+    expect(pdf).not.toContain("(PP)");
+    expect(pdf).not.toContain("(G3)");
+  });
+});

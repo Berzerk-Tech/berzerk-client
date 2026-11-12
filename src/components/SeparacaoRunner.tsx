@@ -569,6 +569,12 @@ export function SeparacaoRunner({
   const [quantidadeMistos, setQuantidadeMistosState] = useState<number | null>(() => carregarQuantidadeMistos());
   const quantidadeMistosRef = useRef(quantidadeMistos);
   quantidadeMistosRef.current = quantidadeMistos;
+  // Com Filtro Mistos marcado o nexus ignora `quantidade` e o teto (puxa tudo
+  // que casa): o seletor vira "Sem limite" e o claim não manda `quantidade`.
+  // Olha o filtro LOCAL, o mesmo que vai no body. O valor salvo não é apagado.
+  const semLimiteMistos = queue.mode === "total" && (filters.mistosProdutos?.length ?? 0) > 0;
+  const semLimiteMistosRef = useRef(semLimiteMistos);
+  semLimiteMistosRef.current = semLimiteMistos;
   const setQuantidadeMistos = useCallback((n: number | null) => {
     quantidadeMistosRef.current = n;
     setQuantidadeMistosState(n);
@@ -731,7 +737,7 @@ export function SeparacaoRunner({
                 canal: queue.canal,
                 ...(opts?.novaLista ? { novaLista: true } : {}),
                 // Teto do lote só nos mistos; nos puros nunca vai.
-                ...(queue.mode === "total" && quantidadeMistosRef.current !== null
+                ...(queue.mode === "total" && !semLimiteMistosRef.current && quantidadeMistosRef.current !== null
                   ? { quantidade: quantidadeMistosRef.current }
                   : {}),
               });
@@ -2056,7 +2062,7 @@ export function SeparacaoRunner({
         </button>
         {reposicao.suporte && <BotaoPedirReposicao meus={reposicao.meus} onClick={() => setReposicaoOpen(true)} />}
         {queue.mode === "total" && !pedidoInicial && (
-          <SeletorQuantidadeMistos valor={quantidadeMistos} onChange={setQuantidadeMistos} />
+          <SeletorQuantidadeMistos valor={quantidadeMistos} onChange={setQuantidadeMistos} semLimite={semLimiteMistos} />
         )}
         {queue.mode === "total" && comLista.length > 0 && !pedidoInicial && (
           <button
@@ -2189,7 +2195,7 @@ export function SeparacaoRunner({
           {phase === "error" && (
             <Centered>
               <div style={errorBox}>{error}</div>
-              {queue.mode === "total" && <SeletorQuantidadeMistos valor={quantidadeMistos} onChange={setQuantidadeMistos} />}
+              {queue.mode === "total" && <SeletorQuantidadeMistos valor={quantidadeMistos} onChange={setQuantidadeMistos} semLimite={semLimiteMistos} />}
               <button style={primaryBtn} onClick={() => void puxarLote()}>
                 Tentar de novo
               </button>
@@ -2220,7 +2226,7 @@ export function SeparacaoRunner({
                   </button>
                 </p>
               )}
-              {queue.mode === "total" && <SeletorQuantidadeMistos valor={quantidadeMistos} onChange={setQuantidadeMistos} />}
+              {queue.mode === "total" && <SeletorQuantidadeMistos valor={quantidadeMistos} onChange={setQuantidadeMistos} semLimite={semLimiteMistos} />}
               <button style={primaryBtn} onClick={() => void puxarLote()}>
                 Procurar de novo
               </button>
@@ -4622,7 +4628,26 @@ function salvarQuantidadeMistos(n: number | null): void {
 }
 
 /** Trocar não puxa nada: só vale no próximo puxar / "Tirar nova lista". */
-function SeletorQuantidadeMistos({ valor, onChange }: { valor: number | null; onChange: (n: number | null) => void }) {
+function SeletorQuantidadeMistos({
+  valor,
+  onChange,
+  semLimite = false,
+}: {
+  valor: number | null;
+  onChange: (n: number | null) => void;
+  /** Filtro Mistos ativo: o nexus puxa tudo que casa, a quantidade não vale. */
+  semLimite?: boolean;
+}) {
+  if (semLimite) {
+    return (
+      <span
+        style={{ ...topBarBtn, display: "inline-flex", alignItems: "center", gap: 6, cursor: "default", opacity: 0.7 }}
+        title="Com Filtro Mistos a lista leva todos os pedidos que casam"
+      >
+        Lote: Sem limite
+      </span>
+    );
+  }
   return (
     <label
       style={{ ...topBarBtn, display: "inline-flex", alignItems: "center", gap: 6, cursor: "default" }}

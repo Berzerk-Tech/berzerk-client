@@ -3,12 +3,12 @@
 // Réplica do `@media print` do protótipo do Lucas (04/11/2026): etiqueta
 // 100×150 mm, SÓ PRETO (térmica), sem foto. Cabeçalho "MISTOS · FILA M", o
 // resumo "N pedidos · Z peças fora do M", e por produto o nome, o total e a
-// grade dos 4 tamanhos fora da fila. Vai em base64 pra impressão silenciosa
+// grade dos tamanhos fora da fila (4; PP/G3 só na linha que tem). Vai em base64 pra impressão silenciosa
 // (mesmo caminho do `pickingPdf.ts`). Produto nunca quebra no meio da página;
 // as seguintes repetem o cabeçalho com "(2/3)".
 
 import { jsPDF } from "jspdf";
-import { tamanhosForaDaFila, type PickingMisto } from "./mistos";
+import { tamanhosDaLinha, type PickingMisto } from "./mistos";
 
 export type MistosDoc = {
   /** Tamanho da fila ("M"). */
@@ -91,7 +91,6 @@ function paginar(pdf: jsPDF, doc: MistosDoc): Bloco[][] {
 export function gerarMistosPdf(doc: MistosDoc): string {
   const pdf = new jsPDF({ orientation: "portrait", unit: "mm", format: [W, H] });
   const paginas = paginar(pdf, doc);
-  const tamanhos = tamanhosForaDaFila(doc.fila);
   const totalFora = doc.linhas.reduce((a, l) => a + l.total, 0);
   const agora = new Date();
   const p2 = (n: number) => String(n).padStart(2, "0");
@@ -136,9 +135,12 @@ export function gerarMistosPdf(doc: MistosDoc): string {
       texto(fmt(b.linha.total), W - M, y + 5.5, PT_TOTAL, "bold", "right");
       y = topoBloco + b.nome.length * LINHA_NOME + 1.5;
 
-      // Grade: 4 caixas ocupando 85% da largura útil, gap 2 mm.
+      // Grade: 4 caixas ocupando 85% da largura útil, gap 2 mm. Linha com peça
+      // em PP e/ou G3 ganha a caixa extra e usa a largura útil inteira.
+      const tamanhos = tamanhosDaLinha(b.linha, doc.fila);
       const gap = 2;
-      const largura = (LARGURA_UTIL * 0.85 - gap * (tamanhos.length - 1)) / tamanhos.length;
+      const ocupacao = tamanhos.length > 4 ? 1 : 0.85;
+      const largura = (LARGURA_UTIL * ocupacao - gap * (tamanhos.length - 1)) / tamanhos.length;
       tamanhos.forEach((t, k) => {
         const x = M + k * (largura + gap);
         const n = b.linha.grade[t] ?? 0;

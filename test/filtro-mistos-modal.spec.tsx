@@ -24,7 +24,7 @@ import { PickingFiltersModal } from "../src/components/PickingFiltersModal";
 function linha(nome: string, tamanho: string, orderIds: string[], comProduto = true): QueueProduct {
   return {
     nome,
-    produto: comProduto ? nome.replace(/ - (M|G|GG|G3)$/, "") : undefined, tamanho, ean: null, imagemUrl: null, quantidade: orderIds.length, pedidos: orderIds.length, orderIds,
+    produto: comProduto ? nome.replace(/ - (M|G|GG|G1)$/, "") : undefined, tamanho, ean: null, imagemUrl: null, quantidade: orderIds.length, pedidos: orderIds.length, orderIds,
   };
 }
 
@@ -32,7 +32,7 @@ const FILA: QueueProduct[] = [
   linha("Oversized - Leg Day - M", "M", ["a", "b", "c"]),
   linha("Oversized - Surpresa - G", "G", ["a", "b"]),
   linha("Oversized - Punk Pink - GG", "GG", ["b"]),
-  linha("Oversized - Vintage - G3", "G3", ["c"]),
+  linha("Oversized - Vintage - G1", "G1", ["c"]),
 ];
 
 const QUEUE = { mode: "total" as const, size: "M", sizes: ["M"] };
