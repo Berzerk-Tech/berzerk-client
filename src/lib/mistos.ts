@@ -394,8 +394,20 @@ export function pickingMistos(pedidos: PedidoMisto[], sizeFila: string): Picking
     .sort(compararPicking);
 }
 
-/** Ordem das linhas do picking impresso: total decrescente, depois produto em pt-BR. */
+/** Menor tamanho (ordem de `TAMANHOS_MISTOS`) com peça na linha; sem nenhum, vai pro fim. */
+function menorTamanhoDaLinha(l: Pick<PickingMisto, "grade">): number {
+  let menor = Number.POSITIVE_INFINITY;
+  for (const [t, q] of Object.entries(l.grade)) {
+    if (q > 0 && TAMANHOS_MISTOS.includes(t)) menor = Math.min(menor, posicaoTamanho(t));
+  }
+  return menor;
+}
+
+/** Ordem das linhas do picking: menor tamanho de peça fora presente, total decrescente, produto em pt-BR. */
 function compararPicking(a: PickingMisto, b: PickingMisto): number {
+  const ta = menorTamanhoDaLinha(a);
+  const tb = menorTamanhoDaLinha(b);
+  if (ta !== tb) return ta < tb ? -1 : 1;
   return b.total - a.total || a.produto.localeCompare(b.produto, "pt-BR");
 }
 

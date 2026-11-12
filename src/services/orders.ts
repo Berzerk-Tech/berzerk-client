@@ -507,11 +507,15 @@ export function limiteListasAbertas(e: unknown): { message: string; listasAberta
   if (!(e instanceof ApiError) || !e.body || typeof e.body !== "object") return null;
   const b = e.body as Record<string, unknown>;
   if (b.error !== "limite_listas_abertas") return null;
-  return {
-    message: typeof b.message === "string" && b.message.trim() ? b.message : "Você já tem o máximo de listas impressas em aberto. Confira ou devolva uma antes de tirar outra.",
-    listasAbertas: typeof b.listasAbertas === "number" ? b.listasAbertas : null,
-    limite: typeof b.limite === "number" ? b.limite : null,
-  };
+  const listasAbertas = typeof b.listasAbertas === "number" ? b.listasAbertas : null;
+  const limite = typeof b.limite === "number" ? b.limite : null;
+  const message =
+    listasAbertas !== null && limite !== null
+      ? `Você já tem ${listasAbertas} ${listasAbertas === 1 ? "lista" : "listas"} em aberto (limite ${limite}). Conclua uma lista ou chame o supervisor para devolver uma antes de tirar outra.`
+      : typeof b.message === "string" && b.message.trim()
+        ? b.message
+        : "Você já tem o máximo de listas impressas em aberto. Conclua uma lista ou chame o supervisor para devolver uma antes de tirar outra.";
+  return { message, listasAbertas, limite };
 }
 
 /** Corpo do 409 `mistos_produto_reservado` do `lote`/`claim-mixed` (produto do Filtro Mistos já é de outra operadora; null se é outro erro). */
