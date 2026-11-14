@@ -81,6 +81,7 @@ pub fn run() {
             rfid_usb::serial_sniff,
             printing::print_pdf_silent,
             printing::print_image_silent,
+            printing::save_pdf_to_downloads,
             printing::list_windows_printers,
             printing::print_engine_status,
             gpu_prefs::gpu_get_disabled,

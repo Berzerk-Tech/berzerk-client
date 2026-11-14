@@ -79,6 +79,11 @@ export function documentoDoPedido(pedido: PedidoComCanal): DocumentoReimpressao 
   return pedido.canal === "mercado_livre" ? "danfe" : "etiqueta";
 }
 
+/** Etiqueta J&T do pedido e-commerce (a mesma que `imprimirDocumentoDoPedido` manda pra impressora). */
+export function etiquetaEcommerceDoPedido(docs: Documentos): { base64: string; formato: "pdf" | "png" } | null {
+  return docs.etiqueta ?? null;
+}
+
 /** Rótulo do botão/aviso — segue a escolha por canal. */
 export function rotuloDocumento(documento: DocumentoReimpressao): string {
   return documento === "etiqueta" ? "etiqueta J&T" : "DANFE";
@@ -139,11 +144,12 @@ export async function imprimirDocumentoDoPedido(
         mensagem: `${alvo}: ${d.etiquetaMlErro?.mensagem?.trim() || MSG_ETIQUETA_ML_INDISPONIVEL}`,
       };
     } else if (documento === "etiqueta") {
-      if (!d.etiqueta) {
+      const et = etiquetaEcommerceDoPedido(d);
+      if (!et) {
         return { ok: false, mensagem: `${alvo} não tem etiqueta J&T disponível.` };
       }
-      base64 = d.etiqueta.base64;
-      formato = d.etiqueta.formato;
+      base64 = et.base64;
+      formato = et.formato;
     } else {
       if (!d.danfe) return { ok: false, mensagem: `${alvo} não tem nota fiscal.` };
       const pdf = gerarDanfeSimplificadaPdf(d.danfe);

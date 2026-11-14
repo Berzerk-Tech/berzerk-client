@@ -697,12 +697,14 @@ export type ImpressaoManualPedido = {
   tracking: string | null;
   emitidoEm: string | null;
   comBump: boolean;
+  /** Produto/tamanho do order bump (Nexus 13/11; ausente em servidor antigo). */
+  bump?: { produtoNome: string; tamanho: string | null } | null;
 };
 
 export type ImpressaoManualReserva = {
   loteId: string;
   grupo: { estampa: string; cor: string | null; tamanho: string };
-  /** Já na ordem de impressão: sem bump primeiro, com bump no fim. */
+  /** Já na ordem de impressão: sem bump primeiro, com bump no fim (agrupados por produto × tamanho do bump). */
   pedidos: ImpressaoManualPedido[];
   /** O servidor reservou só parte da fila (teto por rodada). */
   parcial: boolean;
@@ -963,6 +965,7 @@ function mockReservaImpressaoManual(estampa: string, tamanho: string, cor: strin
     tracking: `JT${String(900000 + i)}`,
     emitidoEm: new Date().toISOString(),
     comBump: i === 2,
+    bump: i === 2 ? { produtoNome: "Meia Berzerk", tamanho: "M" } : null,
   }));
   return { loteId: `mock-lote-${Date.now()}`, grupo: { estampa, cor, tamanho }, pedidos, parcial: false, restantesNaFila: 0 };
 }

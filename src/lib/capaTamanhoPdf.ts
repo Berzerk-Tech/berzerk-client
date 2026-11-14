@@ -65,7 +65,7 @@ export function gerarCapaTamanhoPdf(doc: CapaTamanhoDoc): string {
   pdf.line(MARGEM, y, CAPA_LARGURA_PT - MARGEM, y);
   y += 4;
   bloco(`${doc.pedidos} pedido${doc.pedidos === 1 ? "" : "s"}`, 20, "bold", 1);
-  if (doc.comBump > 0) bloco(`${doc.comBump} com order bump, no fim, depois da folha ORDER BUMP`, 10, "bold", 2);
+  if (doc.comBump > 0) bloco(`${doc.comBump} com order bump, no fim, cada bloco depois da sua capa`, 10, "bold", 2);
 
   pdf.setFont("helvetica", "normal");
   pdf.setFontSize(8);
@@ -76,31 +76,68 @@ export function gerarCapaTamanhoPdf(doc: CapaTamanhoDoc): string {
 }
 
 /**
- * Divisória do order bump: UMA página, impressa entre a última etiqueta sem bump e a primeira com bump,
- * pra quem embala saber no papel onde começam os pedidos que levam a peça extra.
+ * Capa de um BLOCO de order bump: UMA página, impressa antes das etiquetas dos pedidos que levam o mesmo
+ * produto × tamanho de bump. Tarja preta no topo e no pé pra se destacar na pilha. Servidor antigo
+ * (sem `produtoNome`) gera só "ORDER BUMP".
  */
-export function gerarDivisoriaBumpPdf(doc: { estampa: string; tamanho: string; comBump: number }): string {
+export function gerarCapaBumpPdf(doc: { produtoNome?: string | null; tamanho?: string | null; pedidos: number; estampa: string; tamanhoGrupo: string }): string {
   const pdf = new jsPDF({ orientation: "portrait", unit: "pt", format: [CAPA_LARGURA_PT, CAPA_ALTURA_PT] });
   const util = CAPA_LARGURA_PT - 2 * MARGEM;
   const centro = CAPA_LARGURA_PT / 2;
-  // Tarja preta no topo e no pé: a folha se destaca na pilha de etiquetas.
   pdf.setFillColor(0, 0, 0);
   pdf.rect(0, 0, CAPA_LARGURA_PT, 34, "F");
   pdf.rect(0, CAPA_ALTURA_PT - 34, CAPA_LARGURA_PT, 34, "F");
+  let y = 34 + 8;
   pdf.setFont("helvetica", "bold");
-  pdf.setFontSize(44);
-  pdf.text("ORDER", centro, 120, { align: "center" });
-  pdf.text("BUMP", centro, 166, { align: "center" });
-  pdf.setFontSize(16);
-  const n = doc.comBump;
-  const linhas = pdf.splitTextToSize(`Daqui pra baixo: ${n} pedido${n === 1 ? "" : "s"} com a peça extra`, util) as string[];
-  let y = 210;
-  for (const l of linhas.slice(0, 3)) {
-    pdf.text(l, centro, y, { align: "center" });
-    y += 19;
+  pdf.setFontSize(30);
+  y += 30;
+  pdf.text("ORDER BUMP", centro, y, { align: "center", maxWidth: util });
+  y += 6;
+  if (doc.produtoNome) {
+    pdf.setFontSize(14);
+    for (const l of (pdf.splitTextToSize(doc.produtoNome, util) as string[]).slice(0, 2)) {
+      y += 16;
+      pdf.text(l, centro, y, { align: "center" });
+    }
   }
+  y += 6;
+  if (doc.tamanho) {
+    const tam = doc.tamanho.toUpperCase();
+    let pt = 130;
+    pdf.setFontSize(pt);
+    while (pt > 40 && pdf.getTextWidth(tam) > util) {
+      pt -= 6;
+      pdf.setFontSize(pt);
+    }
+    y += pt * 0.78;
+    pdf.text(tam, centro, y, { align: "center" });
+    y += 10;
+  } else if (doc.produtoNome) {
+    pdf.setFontSize(16);
+    y += 20;
+    pdf.text("—", centro, y, { align: "center" });
+    y += 6;
+  }
+  y += 8;
+  pdf.setFontSize(18);
+  y += 18;
+  pdf.text(`${doc.pedidos} pedido${doc.pedidos === 1 ? "" : "s"}`, centro, y, { align: "center" });
   pdf.setFont("helvetica", "normal");
-  pdf.setFontSize(11);
-  pdf.text(`${doc.estampa} · ${(doc.tamanho || "").toUpperCase()}`, centro, y + 14, { align: "center", maxWidth: util });
+  pdf.setFontSize(9);
+  y += 16;
+  pdf.text(`peça principal: ${doc.estampa} ${(doc.tamanhoGrupo || "").toUpperCase()}`, centro, y, { align: "center", maxWidth: util });
+  return pdf.output("datauristring").split(",")[1] ?? "";
+}
+
+/** Página de demonstração (simulação): no lugar da etiqueta J&T, que o modo simulado não tem. */
+export function gerarEtiquetaSimuladaPdf(numero: string, rastreio: string | null): string {
+  const pdf = new jsPDF({ orientation: "portrait", unit: "pt", format: [CAPA_LARGURA_PT, CAPA_ALTURA_PT] });
+  pdf.setFont("helvetica", "bold");
+  pdf.setFontSize(10);
+  pdf.text("ETIQUETA SIMULADA", CAPA_LARGURA_PT / 2, 60, { align: "center" });
+  pdf.setFontSize(20);
+  pdf.text(`#${numero}`, CAPA_LARGURA_PT / 2, 160, { align: "center", maxWidth: CAPA_LARGURA_PT - 24 });
+  pdf.setFontSize(14);
+  pdf.text(rastreio ?? "sem rastreio", CAPA_LARGURA_PT / 2, 200, { align: "center", maxWidth: CAPA_LARGURA_PT - 24 });
   return pdf.output("datauristring").split(",")[1] ?? "";
 }
