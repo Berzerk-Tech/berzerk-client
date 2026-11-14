@@ -763,6 +763,30 @@ export async function devolverUnicosASeparacao(orderIds: string[]): Promise<{ de
   return { devolvidos, ignorados };
 }
 
+/**
+ * Devolve à separação TODOS os pedidos das estampas escolhidas (estampa × cor, todo tamanho), no período.
+ * Nexus ≥ 0.10.31 (`devolver-grupos`); o servidor vai em fatias e aqui repete enquanto sobrar.
+ */
+export async function devolverUnicosGrupos(grupos: { estampa: string; cor: string | null | undefined }[], periodo?: PeriodoUnicos | null): Promise<{ devolvidos: number; restantes: number }> {
+  if (isExpedicaoSimulacao()) return { devolvidos: grupos.length, restantes: 0 };
+  let devolvidos = 0;
+  let restantes = 0;
+  const { de, ate, dia } = recortePeriodo(periodo);
+  for (let i = 0; i < grupos.length; i += 1000) {
+    const bloco = grupos.slice(i, i + 1000).map((g) => ({ estampa: g.estampa, cor: g.cor ?? "" }));
+    for (let volta = 0; volta < 50; volta += 1) {
+      const r = await apiRequest<{ devolvidos: number; restantes: number }>("/expedicao/unicos/devolver-grupos", {
+        method: "POST",
+        body: { grupos: bloco, ...(de ?? dia ? { de: de ?? dia } : {}), ...(ate ?? dia ? { ate: ate ?? dia } : {}), motivo: "devolvido pelo app (aba Únicos, várias estampas)" },
+      });
+      devolvidos += r.devolvidos;
+      restantes = r.restantes;
+      if (r.restantes <= 0 || r.devolvidos <= 0) break;
+    }
+  }
+  return { devolvidos, restantes };
+}
+
 export function concluirImpressaoManual(args: { orderId: string; loteId: string }): Promise<ImpressaoManualConclusao> {
   if (isExpedicaoSimulacao()) {
     return new Promise((resolve) => setTimeout(() => resolve({ orderId: args.orderId, numero: null, status: "shipped" }), 300));
