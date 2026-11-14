@@ -205,6 +205,8 @@ function pedidoTemProduto(o: Order, termos: string[]): boolean {
 function passaNosProdutos(o: Order, f: QueueFilters, sizeFila = ""): boolean {
   if (f.includeProducts?.length && !pedidoTemProduto(o, f.includeProducts)) return false;
   if (f.excludeProducts?.length && pedidoTemProduto(o, f.excludeProducts)) return false;
+  // Só únicos: esconde só quem o servidor disse que NÃO é único (campo ausente = não filtra aqui).
+  if (f.soUnicos && o.unico === false && !o.listaEm) return false;
   // Filtro Mistos: só o misto cujas peças de outro tamanho são todas dos
   // produtos marcados. Pedido sem `predominantSize` usa o tamanho da FILA —
   // com "" toda peça virava "de outro tamanho" e o pedido sumia da sidebar
@@ -1881,7 +1883,8 @@ export function SeparacaoRunner({
   const filtrosAtivos =
     (filtrosEfetivos.includeProducts?.length ?? 0) +
     (filtrosEfetivos.excludeProducts?.length ?? 0) +
-    (filtrosEfetivos.mistosProdutos?.length ?? 0);
+    (filtrosEfetivos.mistosProdutos?.length ?? 0) +
+    (filtrosEfetivos.soUnicos ? 1 : 0);
   // Filtro Mistos ativo (só filas de mistos, nexus com suporte): liga o indicador da sidebar e o destaque no pedido.
   const filtroMistos = queue.mode === "total" && (filtrosEfetivos.mistosProdutos?.length ?? 0) > 0;
   const mistosAtivos = filtroMistos ? (filtrosEfetivos.mistosProdutos ?? SEM_PRODUTOS) : SEM_PRODUTOS;
@@ -2182,6 +2185,7 @@ export function SeparacaoRunner({
           emConferencia={emConferenciaForaDoFiltro}
           onSelecionar={selecionarPedido}
           onEscolherData={escolherData}
+          onAlternarSoUnicos={() => aplicarFiltros({ ...filters, soUnicos: filters.soUnicos ? undefined : true })}
           onPickingGeral={() => setPickingOpen(true)}
           mistosProdutos={mistosAtivos}
           mistosImagens={imagensMistos}
@@ -2594,6 +2598,7 @@ function LoteSidebar({
   emConferencia,
   onSelecionar,
   onEscolherData,
+  onAlternarSoUnicos,
   onPickingGeral,
   mistosProdutos,
   mistosImagens,
@@ -2618,6 +2623,7 @@ function LoteSidebar({
   emConferencia: Order | null;
   onSelecionar: (o: Order) => void;
   onEscolherData: (r: RecorteData) => void;
+  onAlternarSoUnicos: () => void;
   onPickingGeral: () => void;
   /** Produtos do Filtro Mistos ativo (vazio = indicador escondido). */
   mistosProdutos: string[];
@@ -2678,6 +2684,15 @@ function LoteSidebar({
             onEscolher={onEscolherData}
           />
         </div>
+        <button
+          type="button"
+          style={filters.soUnicos ? soUnicosLigado : soUnicosChip}
+          onClick={onAlternarSoUnicos}
+          aria-pressed={!!filters.soUnicos}
+          title="Ligado: esta fila só traz pedidos de uma peça (ou peça + order bump)"
+        >
+          {filters.soUnicos ? "✓ Só únicos (1 peça + bump): ligado" : "Só únicos (1 peça + bump)"}
+        </button>
         {mistosProdutos.length > 0 && (
           <div style={mistosWrap}>
             <button
@@ -3642,6 +3657,8 @@ const sidebarHeaderTop: CSSProperties = {
 
 const sidebarHeaderRow: CSSProperties = { display: "flex", alignItems: "center", gap: 8 };
 
+const soUnicosChip: CSSProperties = { width: "100%", marginTop: 6, padding: "8px 10px", borderRadius: 8, border: "1px solid var(--border)", background: "var(--bg-card)", color: "var(--text)", fontSize: 13, fontWeight: 700, cursor: "pointer", textAlign: "center" };
+const soUnicosLigado: CSSProperties = { ...soUnicosChip, border: "1px solid var(--info-text, #1d4ed8)", background: "var(--info-bg, #dbeafe)", color: "var(--info-text, #1d4ed8)" };
 const pickingChip: CSSProperties = {
   flex: 1,
   padding: "7px 10px",
