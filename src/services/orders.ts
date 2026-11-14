@@ -185,6 +185,11 @@ export type Me = {
    * mesa. Ausente/null (nexus antigo) = 5.
    */
   expedicaoEmbalagemSegundos?: number | null;
+  /**
+   * Impressão manual do tamanho inteiro na aba Únicos (Nexus 12/11): liberada pro
+   * cadastro do usuário. Ausente (nexus antigo) = escondida.
+   */
+  unicosImpressaoManual?: boolean;
 };
 
 export type QueueCounts = {

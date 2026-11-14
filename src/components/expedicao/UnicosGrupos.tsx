@@ -20,8 +20,11 @@ import {
   type PeriodoUnicos,
   type GrupoEscolhido,
 } from "../../lib/unicosExpedicao";
-import { getUnicos, type UnicosResponse } from "../../services/expedicao";
+import { getUnicos, liberarImpressaoManual, type UnicosResponse } from "../../services/expedicao";
+import { isExpedicaoSimulacao } from "../../services/expedicaoMode";
 import { getMe } from "../../services/orders";
+import { limparLoteEmCurso, lerLoteEmCurso } from "../../lib/impressaoManualLote";
+import { ImpressaoManualDialog } from "./ImpressaoManualDialog";
 import { OrderBumpModal } from "./OrderBumpModal";
 
 const POLL_MS = 30000;
@@ -55,12 +58,24 @@ export function UnicosGrupos({
   const [bumpAberto, setBumpAberto] = useState(false);
   // O PUT da config exige `separacao:manage` (coordenação do CD): a operadora não vê o botão.
   const [podeConfigurarBump, setPodeConfigurarBump] = useState(false);
+  // Impressão manual do tamanho inteiro: só com `me.unicosImpressaoManual === true` (ausente = servidor antigo).
+  const [impressaoManual, setImpressaoManual] = useState(() => isExpedicaoSimulacao());
+  const [chipAberto, setChipAberto] = useState<{ grupo: GrupoEscolhido; pedidos: number } | null>(null);
 
   useEffect(() => {
     let vivo = true;
+    // Rede de segurança: sobra de um lote interrompido (app fechou no meio) volta pra fila.
+    const sobra = lerLoteEmCurso();
+    if (sobra) {
+      void liberarImpressaoManual(sobra.orderIds)
+        .then(() => limparLoteEmCurso())
+        .catch(() => {});
+    }
     getMe()
       .then((me) => {
-        if (vivo) setPodeConfigurarBump(me.permissions.includes("*") || me.permissions.includes("separacao:manage"));
+        if (!vivo) return;
+        setPodeConfigurarBump(me.permissions.includes("*") || me.permissions.includes("separacao:manage"));
+        if (me.unicosImpressaoManual === true) setImpressaoManual(true);
       })
       .catch(() => {});
     return () => {
@@ -153,9 +168,23 @@ export function UnicosGrupos({
       ) : (
         <div style={grade} className="thin-scroll">
           {estampas.map((e) => (
-            <CardEstampa key={e.chave} e={e} onClick={() => clicarEstampa(e)} />
+            <CardEstampa
+              key={e.chave}
+              e={e}
+              onClick={() => clicarEstampa(e)}
+              onChip={impressaoManual ? (t) => setChipAberto({ grupo: { estampa: e.estampa, tamanho: t.tamanho, cor: e.cor }, pedidos: t.pedidos }) : undefined}
+            />
           ))}
         </div>
+      )}
+      {chipAberto && (
+        <ImpressaoManualDialog
+          grupo={chipAberto.grupo}
+          periodo={periodoEfetivo(periodo, suportado)}
+          totalNaFila={chipAberto.pedidos}
+          onFechar={() => setChipAberto(null)}
+          onAtualizar={() => void carregar()}
+        />
       )}
     </div>
   );
@@ -242,7 +271,7 @@ function TiposLinha({ e }: { e: EstampaAgrupada }) {
   );
 }
 
-function CardEstampa({ e, onClick }: { e: EstampaAgrupada; onClick: () => void }) {
+function CardEstampa({ e, onClick, onChip }: { e: EstampaAgrupada; onClick: () => void; onChip?: (t: EstampaAgrupada["tamanhos"][number]) => void }) {
   const img = miniaturaLeve(e.imagemUrl);
   const unico = e.tamanhos.length === 1 ? e.tamanhos[0].tamanho : null;
   const nome = e.cor ? `${e.estampa} ${e.cor}` : e.estampa;
@@ -264,11 +293,35 @@ function CardEstampa({ e, onClick }: { e: EstampaAgrupada; onClick: () => void }
           <ComBump n={e.comOrderBump} />
         </div>
         <div style={chips}>
-          {e.tamanhos.map((t) => (
-            <span key={t.tamanho} style={chip}>
-              <b>{t.tamanho}</b> {t.pedidos}
-            </span>
-          ))}
+          {e.tamanhos.map((t) =>
+            onChip ? (
+              // Dentro do card (um <button>): span clicável, sem disparar o clique do card.
+              <span
+                key={t.tamanho}
+                role="button"
+                tabIndex={0}
+                style={chipBotao}
+                title={`Imprimir o tamanho ${t.tamanho} inteiro`}
+                onClick={(ev) => {
+                  ev.stopPropagation();
+                  onChip(t);
+                }}
+                onKeyDown={(ev) => {
+                  if (ev.key === "Enter" || ev.key === " ") {
+                    ev.preventDefault();
+                    ev.stopPropagation();
+                    onChip(t);
+                  }
+                }}
+              >
+                <b>{t.tamanho}</b> {t.pedidos}
+              </span>
+            ) : (
+              <span key={t.tamanho} style={chip}>
+                <b>{t.tamanho}</b> {t.pedidos}
+              </span>
+            ),
+          )}
         </div>
       </div>
     </button>
@@ -368,6 +421,7 @@ const tiposTxt: CSSProperties = { fontSize: 12, color: "var(--text-secondary)", 
 const tiposCard: CSSProperties = { fontSize: 12, fontWeight: 700, color: "var(--text-secondary)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" };
 const chips: CSSProperties = { display: "flex", flexWrap: "wrap", gap: 4 };
 const chip: CSSProperties = { padding: "1px 7px", borderRadius: 6, background: "var(--bg-input)", border: "1px solid var(--border)", fontSize: 12, color: "var(--text-secondary)" };
+const chipBotao: CSSProperties = { ...chip, cursor: "pointer", border: "1px solid var(--border-strong)" };
 const painel: CSSProperties = { flex: 1, minHeight: 0, overflowY: "auto", display: "flex", flexDirection: "column", gap: 16 };
 const voltarBtn: CSSProperties = { alignSelf: "flex-start", padding: "9px 14px", background: "var(--bg-card)", border: "1px solid var(--border)", borderRadius: 10, color: "var(--text)", fontWeight: 700, cursor: "pointer" };
 const painelTopo: CSSProperties = { display: "flex", gap: 16, alignItems: "center" };
