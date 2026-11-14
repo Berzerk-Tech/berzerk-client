@@ -685,6 +685,80 @@ export function separarUnico(args: {
   });
 }
 
+// ---------------------------------------------------------------------------
+// Impressão manual do tamanho inteiro (Únicos, Nexus 12/11): reserva os pedidos
+// do grupo pro usuário, o app imprime capa + etiquetas e conclui um a um.
+// ---------------------------------------------------------------------------
+
+export type ImpressaoManualPedido = {
+  orderId: string;
+  numero: string | null;
+  cliente: string | null;
+  tracking: string | null;
+  emitidoEm: string | null;
+  comBump: boolean;
+};
+
+export type ImpressaoManualReserva = {
+  loteId: string;
+  grupo: { estampa: string; cor: string | null; tamanho: string };
+  /** Já na ordem de impressão: sem bump primeiro, com bump no fim. */
+  pedidos: ImpressaoManualPedido[];
+  /** O servidor reservou só parte da fila (teto por rodada). */
+  parcial: boolean;
+  restantesNaFila: number;
+};
+
+export type ImpressaoManualConclusao = { orderId: string; numero: string | null; status: "shipped" };
+
+/** Códigos 409/403 da impressão manual. */
+export const IMPRESSAO_MANUAL_ERR = {
+  PEDIDO_NAO_RESERVADO: "pedido_nao_reservado",
+  ETIQUETA_AUSENTE: "etiqueta_ausente",
+  NAO_LIBERADA: "impressao_manual_nao_liberada",
+} as const;
+
+export function reservarImpressaoManual(args: {
+  estampa: string;
+  tamanho: string;
+  /** "" = sem cor. */
+  cor: string | null;
+  periodo?: PeriodoUnicos | null;
+}): Promise<ImpressaoManualReserva> {
+  if (isExpedicaoSimulacao()) return Promise.resolve(mockReservaImpressaoManual(args.estampa, args.tamanho, args.cor));
+  const estacao = estacaoId();
+  return apiRequest<ImpressaoManualReserva>("/expedicao/unicos/impressao-manual/reservar", {
+    method: "POST",
+    body: {
+      estampa: args.estampa,
+      tamanho: args.tamanho,
+      cor: args.cor ?? "",
+      ...recortePeriodo(args.periodo),
+      ...(estacao ? { estacaoId: estacao } : {}),
+    },
+  });
+}
+
+export function concluirImpressaoManual(args: { orderId: string; loteId: string }): Promise<ImpressaoManualConclusao> {
+  if (isExpedicaoSimulacao()) {
+    return new Promise((resolve) => setTimeout(() => resolve({ orderId: args.orderId, numero: null, status: "shipped" }), 300));
+  }
+  const estacao = estacaoId();
+  return apiRequest<ImpressaoManualConclusao>("/expedicao/unicos/impressao-manual/concluir", {
+    method: "POST",
+    body: { orderId: args.orderId, loteId: args.loteId, ...(estacao ? { estacaoId: estacao } : {}) },
+  });
+}
+
+export function liberarImpressaoManual(orderIds: string[]): Promise<{ liberados: number }> {
+  if (orderIds.length === 0) return Promise.resolve({ liberados: 0 });
+  if (isExpedicaoSimulacao()) return Promise.resolve({ liberados: orderIds.length });
+  return apiRequest<{ liberados: number }>("/expedicao/unicos/impressao-manual/liberar", {
+    method: "POST",
+    body: { orderIds },
+  });
+}
+
 /** Documentos do pedido (etiqueta J&T + DANFE + rastreio). */
 export function getDocumentos(orderId: string): Promise<Documentos> {
   if (isExpedicaoSimulacao()) return Promise.resolve(mockDocumentos(orderId));
@@ -879,6 +953,18 @@ function mockUnicos(): UnicosResponse {
     totalPedidos: 5,
     filaUnicosAtiva: true,
   };
+}
+
+function mockReservaImpressaoManual(estampa: string, tamanho: string, cor: string | null): ImpressaoManualReserva {
+  const pedidos = mockUnicosPedidos(estampa, tamanho, cor).map((p, i): ImpressaoManualPedido => ({
+    orderId: p.id,
+    numero: p.numero,
+    cliente: p.cliente ?? null,
+    tracking: `JT${String(900000 + i)}`,
+    emitidoEm: new Date().toISOString(),
+    comBump: i === 2,
+  }));
+  return { loteId: `mock-lote-${Date.now()}`, grupo: { estampa, cor, tamanho }, pedidos, parcial: false, restantesNaFila: 0 };
 }
 
 function mockUnicosPedidos(estampa: string, tamanho: string, cor?: string | null): UnicoPedido[] {
