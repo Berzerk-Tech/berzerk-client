@@ -290,3 +290,28 @@ pub async fn print_engine_status(app: AppHandle) -> Result<PrintEngineStatus, St
         },
     })
 }
+
+/// Grava um PDF na pasta Downloads do usuário (impressão manual dos Únicos, "Baixar PDF") e devolve o
+/// caminho. O `<a download>` do webview não é confiável em todas as plataformas e não diz onde salvou.
+#[tauri::command]
+pub async fn save_pdf_to_downloads(base64: String, file_name: String) -> Result<String, String> {
+    let bytes = decode_b64(&base64)?;
+    // Só o nome: nada de separador de caminho vindo do front.
+    let limpo: String = file_name
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.' { c } else { '_' })
+        .collect();
+    let nome = if limpo.to_lowercase().ends_with(".pdf") { limpo } else { format!("{limpo}.pdf") };
+    let dir = dirs::download_dir()
+        .or_else(dirs::desktop_dir)
+        .or_else(dirs::home_dir)
+        .ok_or_else(|| "pasta Downloads não encontrada".to_string())?;
+    let caminho = dir.join(nome);
+    tokio::task::spawn_blocking(move || {
+        std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+        std::fs::write(&caminho, &bytes).map_err(|e| e.to_string())?;
+        Ok::<String, String>(caminho.to_string_lossy().to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}

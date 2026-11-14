@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { gerarCapaTamanhoPdf, gerarDivisoriaBumpPdf } from "../src/lib/capaTamanhoPdf";
+import { gerarCapaTamanhoPdf, gerarCapaBumpPdf } from "../src/lib/capaTamanhoPdf";
 
 describe("gerarCapaTamanhoPdf", () => {
   it("gera um PDF de 1 página, não vazio", () => {
@@ -15,11 +15,15 @@ describe("gerarCapaTamanhoPdf", () => {
   });
 });
 
-describe("gerarDivisoriaBumpPdf", () => {
-  it("gera um PDF não vazio de 1 página", () => {
-    const b64 = gerarDivisoriaBumpPdf({ estampa: "BabyMetal", tamanho: "p", comBump: 7 });
-    const bin = atob(b64);
-    expect(bin.startsWith("%PDF")).toBe(true);
-    expect((bin.match(/\/Type\s*\/Page[^s]/g) ?? []).length).toBe(1);
+describe("gerarCapaBumpPdf", () => {
+  const paginas = (b64: string) => (atob(b64).match(/\/Type\s*\/Page[^s]/g) ?? []).length;
+  it("gera 1 página com produto e tamanho", () => {
+    const b64 = gerarCapaBumpPdf({ produtoNome: "Meia Berzerk Cano Alto Preta", tamanho: "m", pedidos: 7, estampa: "BabyMetal", tamanhoGrupo: "p" });
+    expect(atob(b64).startsWith("%PDF")).toBe(true);
+    expect(paginas(b64)).toBe(1);
+  });
+  it("aceita tamanho nulo e servidor antigo (sem produto)", () => {
+    expect(paginas(gerarCapaBumpPdf({ produtoNome: "Meia", tamanho: null, pedidos: 1, estampa: "X", tamanhoGrupo: "P" }))).toBe(1);
+    expect(paginas(gerarCapaBumpPdf({ pedidos: 3, estampa: "X", tamanhoGrupo: "P" }))).toBe(1);
   });
 });
