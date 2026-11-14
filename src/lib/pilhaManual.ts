@@ -7,7 +7,7 @@ import type { ImpressaoManualPedido } from "../services/expedicao";
 
 export type FolhaPilha =
   | { tipo: "capa" }
-  | { tipo: "capaBump"; produtoNome: string | null; tamanho: string | null; pedidos: number }
+  | { tipo: "capaBump"; produtoNome: string | null; tamanho: string | null; pedidos: number; numeros: string[] }
   | { tipo: "etiqueta"; pedido: ImpressaoManualPedido };
 
 /** Chave do bloco de bump; null = pedido sem bump. Servidor antigo (comBump sem `bump`) = bloco único "". */
@@ -29,7 +29,7 @@ export function sequenciaDaPilha(pedidos: ImpressaoManualPedido[]): FolhaPilha[]
     let j = i;
     while (j < pedidos.length && chaveBump(pedidos[j]) === chave) j += 1;
     const b = pedidos[i].bump;
-    folhas.push({ tipo: "capaBump", produtoNome: b?.produtoNome ?? null, tamanho: b?.tamanho ?? null, pedidos: j - i });
+    folhas.push({ tipo: "capaBump", produtoNome: b?.produtoNome ?? null, tamanho: b?.tamanho ?? null, pedidos: j - i, numeros: pedidos.slice(i, j).map((x) => x.numero ?? "").filter(Boolean) });
     for (let k = i; k < j; k += 1) folhas.push({ tipo: "etiqueta", pedido: pedidos[k] });
     i = j;
   }

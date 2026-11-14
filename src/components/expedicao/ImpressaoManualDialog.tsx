@@ -166,7 +166,7 @@ export function ImpressaoManualDialog({
           capasBumpRef.current.add(p.orderId);
           if (!sim) {
             try {
-              const folha = gerarCapaBumpPdf({ produtoNome: capaBump.produtoNome, tamanho: capaBump.tamanho, pedidos: capaBump.pedidos, estampa: grupo.estampa, tamanhoGrupo: grupo.tamanho });
+              const folha = gerarCapaBumpPdf({ produtoNome: capaBump.produtoNome, tamanho: capaBump.tamanho, pedidos: capaBump.pedidos, numeros: capaBump.numeros, estampa: grupo.estampa, tamanhoGrupo: grupo.tamanho });
               await printEtiquetaUnica(folha, "pdf", { jobName: `ORDER BUMP ${capaBump.tamanho ?? ""} ${grupo.tamanho}`, printer: getLabelPrinter() });
             } catch {
               /* segue sem a capa do bloco */
@@ -329,7 +329,7 @@ export function ImpressaoManualDialog({
           return { tipo: "pdf", base64: gerarCapaTamanhoPdf({ estampa: grupo.estampa, cor: grupo.cor, tamanho: grupo.tamanho, pedidos: incluidos.length, comBump: incluidos.filter((x) => x.comBump).length, operador }) };
         }
         if (f.tipo === "capaBump") {
-          return { tipo: "pdf", base64: gerarCapaBumpPdf({ produtoNome: f.produtoNome, tamanho: f.tamanho, pedidos: f.pedidos, estampa: grupo.estampa, tamanhoGrupo: grupo.tamanho }) };
+          return { tipo: "pdf", base64: gerarCapaBumpPdf({ produtoNome: f.produtoNome, tamanho: f.tamanho, pedidos: f.pedidos, numeros: f.numeros, estampa: grupo.estampa, tamanhoGrupo: grupo.tamanho }) };
         }
         return etiquetas.get(f.pedido.orderId)!;
       });
