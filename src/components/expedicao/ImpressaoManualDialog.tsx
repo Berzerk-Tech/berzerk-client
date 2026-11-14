@@ -6,7 +6,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import { ApiError } from "../../lib/api";
-import { gerarCapaTamanhoPdf } from "../../lib/capaTamanhoPdf";
+import { gerarCapaTamanhoPdf, gerarDivisoriaBumpPdf } from "../../lib/capaTamanhoPdf";
 import {
   aplicarPausa,
   comBump,
@@ -87,6 +87,7 @@ export function ImpressaoManualDialog({
 
   const loteRef = useRef<LoteManual | null>(null);
   const rodandoRef = useRef(false);
+  const divisoriaRef = useRef(false);
   const fecharRef = useRef(false);
   const periodoDe = periodo?.de ?? null;
   const periodoAte = periodo?.ate ?? null;
@@ -153,6 +154,19 @@ export function ImpressaoManualDialog({
           break;
         }
         setSaindo(p);
+        // Divisória "ORDER BUMP" antes da 1ª etiqueta com bump (elas vêm no fim): sem ela, no papel não dá
+        // pra saber onde começam. Falhar aqui não segura o lote.
+        if (p.comBump && !divisoriaRef.current) {
+          divisoriaRef.current = true;
+          if (!sim) {
+            try {
+              const folha = gerarDivisoriaBumpPdf({ estampa: grupo.estampa, tamanho: grupo.tamanho, comBump: comBump(l) });
+              await printEtiquetaUnica(folha, "pdf", { jobName: `ORDER BUMP ${grupo.tamanho}`, printer: getLabelPrinter() });
+            } catch {
+              /* segue sem a divisória */
+            }
+          }
+        }
         let imprimiu = false;
         try {
           if (sim) {
@@ -202,7 +216,7 @@ export function ImpressaoManualDialog({
     } finally {
       rodandoRef.current = false;
     }
-  }, [finalizar]);
+  }, [finalizar, grupo.estampa, grupo.tamanho]);
 
   const iniciar = async () => {
     setErro(null);
@@ -225,6 +239,7 @@ export function ImpressaoManualDialog({
     }
     setReserva(r);
     const l0 = novoLote(r.loteId, r.pedidos);
+    divisoriaRef.current = false;
     atualizar(l0);
     setFase("imprimindo");
     setSaindo(null);
@@ -374,7 +389,7 @@ export function ImpressaoManualDialog({
               <div style={painel}>
                 <div style={rotuloPainel}>Pilha</div>
                 <div style={grande}>{lote.concluidos.length} saíram</div>
-                {comBump(lote) > 0 && <div style={texto}>{comBump(lote)} com order bump no fim</div>}
+                {comBump(lote) > 0 && <div style={texto}>{comBump(lote)} com order bump no fim, depois da folha "ORDER BUMP"</div>}
                 {lote.pulados.length > 0 && <div style={texto}>{lote.pulados.length} pulados (serão liberados)</div>}
                 {lote.pausaPedida && !lote.pausado && <div style={texto}>Vai pausar depois desta etiqueta…</div>}
               </div>
