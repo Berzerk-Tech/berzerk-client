@@ -65,12 +65,42 @@ export function gerarCapaTamanhoPdf(doc: CapaTamanhoDoc): string {
   pdf.line(MARGEM, y, CAPA_LARGURA_PT - MARGEM, y);
   y += 4;
   bloco(`${doc.pedidos} pedido${doc.pedidos === 1 ? "" : "s"}`, 20, "bold", 1);
-  if (doc.comBump > 0) bloco(`${doc.comBump} com order bump (no fim)`, 11, "bold", 1);
+  if (doc.comBump > 0) bloco(`${doc.comBump} com order bump, no fim, depois da folha ORDER BUMP`, 10, "bold", 2);
 
   pdf.setFont("helvetica", "normal");
   pdf.setFontSize(8);
   const rodape = [fmtDataHora(doc.quando ?? new Date()), doc.operador ?? ""].filter(Boolean).join(" · ");
   pdf.text(rodape, centro, CAPA_ALTURA_PT - MARGEM, { align: "center", maxWidth: util });
 
+  return pdf.output("datauristring").split(",")[1] ?? "";
+}
+
+/**
+ * Divisória do order bump: UMA página, impressa entre a última etiqueta sem bump e a primeira com bump,
+ * pra quem embala saber no papel onde começam os pedidos que levam a peça extra.
+ */
+export function gerarDivisoriaBumpPdf(doc: { estampa: string; tamanho: string; comBump: number }): string {
+  const pdf = new jsPDF({ orientation: "portrait", unit: "pt", format: [CAPA_LARGURA_PT, CAPA_ALTURA_PT] });
+  const util = CAPA_LARGURA_PT - 2 * MARGEM;
+  const centro = CAPA_LARGURA_PT / 2;
+  // Tarja preta no topo e no pé: a folha se destaca na pilha de etiquetas.
+  pdf.setFillColor(0, 0, 0);
+  pdf.rect(0, 0, CAPA_LARGURA_PT, 34, "F");
+  pdf.rect(0, CAPA_ALTURA_PT - 34, CAPA_LARGURA_PT, 34, "F");
+  pdf.setFont("helvetica", "bold");
+  pdf.setFontSize(44);
+  pdf.text("ORDER", centro, 120, { align: "center" });
+  pdf.text("BUMP", centro, 166, { align: "center" });
+  pdf.setFontSize(16);
+  const n = doc.comBump;
+  const linhas = pdf.splitTextToSize(`Daqui pra baixo: ${n} pedido${n === 1 ? "" : "s"} com a peça extra`, util) as string[];
+  let y = 210;
+  for (const l of linhas.slice(0, 3)) {
+    pdf.text(l, centro, y, { align: "center" });
+    y += 19;
+  }
+  pdf.setFont("helvetica", "normal");
+  pdf.setFontSize(11);
+  pdf.text(`${doc.estampa} · ${(doc.tamanho || "").toUpperCase()}`, centro, y + 14, { align: "center", maxWidth: util });
   return pdf.output("datauristring").split(",")[1] ?? "";
 }

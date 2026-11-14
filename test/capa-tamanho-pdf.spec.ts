@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { gerarCapaTamanhoPdf } from "../src/lib/capaTamanhoPdf";
+import { gerarCapaTamanhoPdf, gerarDivisoriaBumpPdf } from "../src/lib/capaTamanhoPdf";
 
 describe("gerarCapaTamanhoPdf", () => {
   it("gera um PDF de 1 página, não vazio", () => {
@@ -12,5 +12,14 @@ describe("gerarCapaTamanhoPdf", () => {
 
   it("aceita sem cor, sem bump e tamanho largo", () => {
     expect(gerarCapaTamanhoPdf({ estampa: "Estampa com nome muito comprido para quebrar em duas linhas na capa", tamanho: "XGG", pedidos: 1, comBump: 0 }).length).toBeGreaterThan(500);
+  });
+});
+
+describe("gerarDivisoriaBumpPdf", () => {
+  it("gera um PDF não vazio de 1 página", () => {
+    const b64 = gerarDivisoriaBumpPdf({ estampa: "BabyMetal", tamanho: "p", comBump: 7 });
+    const bin = atob(b64);
+    expect(bin.startsWith("%PDF")).toBe(true);
+    expect((bin.match(/\/Type\s*\/Page[^s]/g) ?? []).length).toBe(1);
   });
 });
