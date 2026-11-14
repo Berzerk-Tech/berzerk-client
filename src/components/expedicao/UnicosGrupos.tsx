@@ -20,7 +20,7 @@ import {
   type PeriodoUnicos,
   type GrupoEscolhido,
 } from "../../lib/unicosExpedicao";
-import { getUnicos, liberarImpressaoManual, type UnicosResponse } from "../../services/expedicao";
+import { devolverUnicosGrupos, getUnicos, liberarImpressaoManual, type UnicosResponse } from "../../services/expedicao";
 import { isExpedicaoSimulacao } from "../../services/expedicaoMode";
 import { getMe } from "../../services/orders";
 import { limparLoteEmCurso, lerLoteEmCurso } from "../../lib/impressaoManualLote";
@@ -127,7 +127,60 @@ export function UnicosGrupos({
     if (dados !== null && estampaAberta && !aberta) setEstampaAberta(null);
   }, [dados, estampaAberta, aberta]);
 
+  // "Devolver várias" (14/11, mutirão): os cards viram seleção e as estampas marcadas voltam inteiras pra separação.
+  const [modoDevolver, setModoDevolver] = useState(false);
+  const [marcadas, setMarcadas] = useState<Set<string>>(new Set());
+  const [confirmando, setConfirmando] = useState(false);
+  const [devolvendo, setDevolvendo] = useState(false);
+  const [msgDevolver, setMsgDevolver] = useState<string | null>(null);
+  const escolhidas = useMemo(() => estampas.filter((e) => marcadas.has(e.chave)), [estampas, marcadas]);
+  const pedidosEscolhidos = escolhidas.reduce((n, e) => n + e.pedidos, 0);
+  const sairDoModo = () => {
+    setModoDevolver(false);
+    setMarcadas(new Set());
+    setConfirmando(false);
+  };
+  const alternarMarcada = (chave: string) => {
+    setConfirmando(false);
+    setMarcadas((atual) => {
+      const prox = new Set(atual);
+      if (prox.has(chave)) prox.delete(chave);
+      else prox.add(chave);
+      return prox;
+    });
+  };
+  const devolverMarcadas = async () => {
+    if (escolhidas.length === 0 || devolvendo) return;
+    setDevolvendo(true);
+    setMsgDevolver(null);
+    try {
+      const r = await devolverUnicosGrupos(
+        escolhidas.map((e) => ({ estampa: e.estampa, cor: e.cor })),
+        periodoEfetivo({ de: periodoDe, ate: periodoAte }, suportado),
+      );
+      setMsgDevolver(`${r.devolvidos} pedido(s) de ${escolhidas.length} estampa(s) voltaram para a separação.${r.restantes > 0 ? ` Sobraram ${r.restantes}: repita.` : ""}`);
+      sairDoModo();
+    } catch (e) {
+      const status = (e as { status?: number } | null)?.status;
+      setMsgDevolver(
+        status === 403
+          ? "Seu cadastro não pode devolver pedidos à separação."
+          : status === 404
+            ? "O servidor ainda não tem a devolução por estampa. Tente de novo em alguns minutos."
+            : `Não consegui devolver: ${e instanceof Error ? e.message : String(e)}`,
+      );
+      setConfirmando(false);
+    } finally {
+      setDevolvendo(false);
+      void carregar();
+    }
+  };
+
   const clicarEstampa = (e: EstampaAgrupada) => {
+    if (modoDevolver) {
+      alternarMarcada(e.chave);
+      return;
+    }
     if (e.tamanhos.length === 1) onEscolher({ estampa: e.estampa, tamanho: e.tamanhos[0].tamanho, cor: e.cor });
     else setEstampaAberta(e.chave);
   };
@@ -157,6 +210,11 @@ export function UnicosGrupos({
             {semBump ? "Sem order bump: ligado" : "Sem order bump: desligado"}
           </button>
         )}
+        {podeConfigurarBump && !modoDevolver && (
+          <button type="button" style={bumpBtn} onClick={() => { setMsgDevolver(null); setEstampaAberta(null); setModoDevolver(true); }} title="Marcar várias estampas e mandar os pedidos delas de volta pra separação">
+            ↩ Devolver à separação
+          </button>
+        )}
         {dados?.orderBump && podeConfigurarBump && (
           <button type="button" style={bumpBtn} onClick={() => setBumpAberto(true)} title="Configurar order bump">
             {rotuloOrderBump(dados.orderBump)}
@@ -180,6 +238,35 @@ export function UnicosGrupos({
       {dados && dados.filaUnicosAtiva === false && (
         <div style={aviso}>Trava desligada: estes pedidos ainda aparecem na fila de separação.</div>
       )}
+      {modoDevolver && (
+        <div style={barraDevolver}>
+          <span style={{ flex: 1, minWidth: 220 }}>
+            <b>Devolver à separação:</b> clique nas estampas que voltam para as separadoras e depois em Devolver.{" "}
+            <b>
+              {escolhidas.length} estampa(s) marcada(s) · {pedidosEscolhidos} pedido(s)
+            </b>
+          </span>
+          <button type="button" style={bumpBtn} onClick={() => { setConfirmando(false); setMarcadas(new Set(estampas.map((e) => e.chave))); }} disabled={devolvendo}>
+            Marcar todas as {estampas.length} da tela
+          </button>
+          <button type="button" style={bumpBtn} onClick={() => { setConfirmando(false); setMarcadas(new Set()); }} disabled={devolvendo || marcadas.size === 0}>
+            Limpar
+          </button>
+          {confirmando ? (
+            <button type="button" style={devolverBtn} onClick={() => void devolverMarcadas()} disabled={devolvendo}>
+              {devolvendo ? "Devolvendo…" : `Tem certeza? Sim, devolver ${pedidosEscolhidos}`}
+            </button>
+          ) : (
+            <button type="button" style={devolverBtn} onClick={() => setConfirmando(true)} disabled={escolhidas.length === 0}>
+              {escolhidas.length === 0 ? "Devolver" : `Devolver ${pedidosEscolhidos} pedidos`}
+            </button>
+          )}
+          <button type="button" style={bumpBtn} onClick={sairDoModo} disabled={devolvendo}>
+            Cancelar
+          </button>
+        </div>
+      )}
+      {msgDevolver && <div style={aviso}>{msgDevolver}</div>}
       {erro && <div style={avisoErro}>{erro}</div>}
       {dados && grupos.length === 0 && (
         <div style={vazio}>{busca.trim() ? "Nenhuma fila combina com a busca." : "Nenhum pedido único aguardando."}</div>
@@ -194,7 +281,8 @@ export function UnicosGrupos({
               e={e}
               onClick={() => clicarEstampa(e)}
               semBump={semBump}
-              onChip={impressaoManual || podeConfigurarBump ? (t) => setChipAberto({ grupo: { estampa: e.estampa, tamanho: t.tamanho, cor: e.cor }, pedidos: t.pedidos }) : undefined}
+              marcada={modoDevolver ? marcadas.has(e.chave) : undefined}
+              onChip={!modoDevolver && (impressaoManual || podeConfigurarBump) ? (t) => setChipAberto({ grupo: { estampa: e.estampa, tamanho: t.tamanho, cor: e.cor }, pedidos: t.pedidos }) : undefined}
             />
           ))}
         </div>
@@ -296,9 +384,9 @@ function TiposLinha({ e }: { e: EstampaAgrupada }) {
   );
 }
 
-function CardEstampa({ e, onClick, onChip, semBump }: { e: EstampaAgrupada; onClick: () => void; onChip?: (t: EstampaAgrupada["tamanhos"][number]) => void; semBump?: boolean }) {
+function CardEstampa({ e, onClick, onChip, semBump, marcada }: { e: EstampaAgrupada; onClick: () => void; onChip?: (t: EstampaAgrupada["tamanhos"][number]) => void; semBump?: boolean; /** Modo "Devolver várias": definido = card é seleção. */ marcada?: boolean }) {
   // Com "Sem order bump" os números mostram só os pedidos sem bump (o selo "N com bump" segue, fora da conta).
-  const n = (pedidos: number, comBump: number | null | undefined) => (semBump ? pedidosSemBump(pedidos, comBump) : pedidos);
+  const n = (pedidos: number, comBump: number | null | undefined) => (semBump && marcada === undefined ? pedidosSemBump(pedidos, comBump) : pedidos);
   const totalCard = n(e.pedidos, e.comOrderBump);
   const img = miniaturaLeve(e.imagemUrl);
   const unico = e.tamanhos.length === 1 ? e.tamanhos[0].tamanho : null;
@@ -306,10 +394,16 @@ function CardEstampa({ e, onClick, onChip, semBump }: { e: EstampaAgrupada; onCl
   return (
     <button
       type="button"
-      style={card}
+      style={marcada ? { ...card, outline: "3px solid var(--warning-border, #f59e0b)", background: "var(--warning-bg)" } : card}
       onClick={onClick}
-      title={unico ? `Escolher a fila ${nome} ${unico}` : `Abrir ${nome}`}
+      aria-pressed={marcada}
+      title={marcada !== undefined ? `Marcar ${nome} para devolver` : unico ? `Escolher a fila ${nome} ${unico}` : `Abrir ${nome}`}
     >
+      {marcada !== undefined && (
+        <span style={marcada ? caixaMarcada : caixaVazia} aria-hidden>
+          {marcada ? "✓" : ""}
+        </span>
+      )}
       <div style={fotoBox}>{img ? <img src={img} alt="" style={foto} loading="lazy" /> : <span style={semFoto}>sem foto</span>}</div>
       <div style={cardCorpo}>
         <TiposLinha e={e} />
@@ -431,6 +525,10 @@ const total: CSSProperties = { color: "var(--text-secondary)", fontSize: 13, fon
 const atualizarBtn: CSSProperties = { padding: "9px 14px", background: "var(--bg-card)", border: "1px solid var(--border)", borderRadius: 10, color: "var(--text)", fontWeight: 700, cursor: "pointer" };
 const bumpBtn: CSSProperties = { padding: "9px 14px", background: "var(--bg-card)", border: "1px solid var(--border)", borderRadius: 10, color: "var(--text)", fontWeight: 700, cursor: "pointer", maxWidth: 280, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" };
 const bumpBtnLigado: CSSProperties = { ...bumpBtn, background: "var(--info-bg, #dbeafe)", color: "var(--info-text, #1d4ed8)", border: "1px solid var(--info-text, #1d4ed8)" };
+const barraDevolver: CSSProperties = { display: "flex", flexWrap: "wrap", alignItems: "center", gap: 8, padding: "8px 12px", borderRadius: 10, border: "1px solid var(--warning-border)", background: "var(--warning-bg)", color: "var(--warning-text)", fontSize: 13 };
+const caixaVazia: CSSProperties = { flex: "0 0 auto", alignSelf: "center", width: 26, height: 26, borderRadius: 6, border: "2px solid var(--border-strong, #94a3b8)", background: "var(--bg-card)", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 18, fontWeight: 900 };
+const caixaMarcada: CSSProperties = { ...caixaVazia, border: "2px solid var(--accent, #2563eb)", background: "var(--accent, #2563eb)", color: "#fff" };
+const devolverBtn: CSSProperties = { ...bumpBtn, background: "var(--accent, #2563eb)", color: "#fff", border: "1px solid transparent" };
 const bumpBadge: CSSProperties = { padding: "1px 7px", borderRadius: 999, background: "var(--info-bg, #dbeafe)", color: "var(--info-text, #1d4ed8)", fontSize: 11 };
 const aviso: CSSProperties = { padding: "6px 12px", borderRadius: 8, background: "var(--warning-bg)", border: "1px solid var(--warning-border)", color: "var(--warning-text)", fontSize: 12 };
 const avisoErro: CSSProperties = { ...aviso };
