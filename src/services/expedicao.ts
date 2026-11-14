@@ -726,6 +726,8 @@ export function reservarImpressaoManual(args: {
   /** "" = sem cor. */
   cor: string | null;
   periodo?: PeriodoUnicos | null;
+  /** Só os pedidos SEM order bump (Nexus ≥ 0.10.30; servidor antigo ignora o campo). */
+  semOrderBump?: boolean;
 }): Promise<ImpressaoManualReserva> {
   if (isExpedicaoSimulacao()) return Promise.resolve(mockReservaImpressaoManual(args.estampa, args.tamanho, args.cor));
   const estacao = estacaoId();
@@ -737,8 +739,28 @@ export function reservarImpressaoManual(args: {
       cor: args.cor ?? "",
       ...recortePeriodo(args.periodo),
       ...(estacao ? { estacaoId: estacao } : {}),
+      ...(args.semOrderBump ? { semOrderBump: true } : {}),
     },
   });
+}
+
+/**
+ * Manda pedidos únicos `ready` pra separação normal (saem da fila Únicos). Exige `separacao:manage`.
+ * O servidor aceita 500 por chamada; aqui vai em blocos. Quem já saiu da fila volta em `ignorados`.
+ */
+export async function devolverUnicosASeparacao(orderIds: string[]): Promise<{ devolvidos: number; ignorados: number }> {
+  if (isExpedicaoSimulacao()) return { devolvidos: orderIds.length, ignorados: 0 };
+  let devolvidos = 0;
+  let ignorados = 0;
+  for (let i = 0; i < orderIds.length; i += 500) {
+    const r = await apiRequest<{ devolvidos: number; ignorados: unknown[] }>("/expedicao/unicos/devolver-a-separacao", {
+      method: "POST",
+      body: { orderIds: orderIds.slice(i, i + 500), motivo: "devolvido pelo app (aba Únicos)" },
+    });
+    devolvidos += r.devolvidos;
+    ignorados += r.ignorados?.length ?? 0;
+  }
+  return { devolvidos, ignorados };
 }
 
 export function concluirImpressaoManual(args: { orderId: string; loteId: string }): Promise<ImpressaoManualConclusao> {

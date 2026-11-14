@@ -32,6 +32,7 @@ import { printEtiquetaUnica } from "../../lib/printer";
 import { rotuloDia, type GrupoEscolhido, type PeriodoUnicos } from "../../lib/unicosExpedicao";
 import {
   concluirImpressaoManual,
+  devolverUnicosASeparacao,
   getDocumentos,
   getUnicosPedidos,
   IMPRESSAO_MANUAL_ERR,
@@ -67,12 +68,21 @@ export function ImpressaoManualDialog({
   grupo,
   periodo,
   totalNaFila,
+  podeImprimir = true,
+  podeDevolver = false,
+  semOrderBump = false,
   onFechar,
   onAtualizar,
 }: {
   grupo: GrupoEscolhido;
   periodo?: PeriodoUnicos | null;
   totalNaFila: number;
+  /** Flag da impressão manual (`me.unicosImpressaoManual`); sem ela o diálogo só lista e devolve. */
+  podeImprimir?: boolean;
+  /** `separacao:manage`: checkbox por pedido + "Devolver à separação". */
+  podeDevolver?: boolean;
+  /** Chave "Sem order bump": a impressão manual só pega os pedidos sem bump. */
+  semOrderBump?: boolean;
   onFechar: () => void;
   /** Lote mexeu na fila: o pai recarrega a grade. */
   onAtualizar: () => void;
@@ -86,6 +96,9 @@ export function ImpressaoManualDialog({
   const [aviso, setAviso] = useState<string | null>(null);
   const [liberarFalhou, setLiberarFalhou] = useState(false);
   const [operador, setOperador] = useState<string | null>(null);
+  const [selecionados, setSelecionados] = useState<Set<string>>(new Set());
+  const [devolvendo, setDevolvendo] = useState(false);
+  const [info, setInfo] = useState<string | null>(null);
 
   const loteRef = useRef<LoteManual | null>(null);
   const rodandoRef = useRef(false);
@@ -235,7 +248,7 @@ export function ImpressaoManualDialog({
     fecharRef.current = false;
     let r: ImpressaoManualReserva;
     try {
-      r = await reservarImpressaoManual({ estampa: grupo.estampa, tamanho: grupo.tamanho, cor: grupo.cor ?? "", periodo: { de: periodoDe, ate: periodoAte } });
+      r = await reservarImpressaoManual({ estampa: grupo.estampa, tamanho: grupo.tamanho, cor: grupo.cor ?? "", periodo: { de: periodoDe, ate: periodoAte }, semOrderBump });
     } catch (e) {
       const cod = codigoDoErro(e);
       setErro(cod === IMPRESSAO_MANUAL_ERR.NAO_LIBERADA ? "Impressão manual não liberada para o seu cadastro." : `Não consegui reservar os pedidos: ${mensagemDoErro(e)}`);
@@ -395,6 +408,39 @@ export function ImpressaoManualDialog({
   const totalLote = lote?.pedidos.length ?? 0;
   const feitos = lote ? lote.concluidos.length + lote.pulados.length + lote.errosConclusao.length : 0;
   const itens = useMemo(() => pedidos ?? [], [pedidos]);
+  const idsComBump = useMemo(() => itens.filter((p) => p.orderBump).map((p) => p.id), [itens]);
+  // O que a impressão manual vai pegar: com "Sem order bump", só os sem bump.
+  const aImprimir = pedidos === null ? totalNaFila : semOrderBump ? itens.length - idsComBump.length : itens.length;
+  const todosMarcados = itens.length > 0 && itens.every((p) => selecionados.has(p.id));
+
+  const alternar = (id: string) =>
+    setSelecionados((atual) => {
+      const prox = new Set(atual);
+      if (prox.has(id)) prox.delete(id);
+      else prox.add(id);
+      return prox;
+    });
+
+  const devolver = async () => {
+    const ids = itens.filter((p) => selecionados.has(p.id)).map((p) => p.id);
+    if (ids.length === 0 || devolvendo) return;
+    setDevolvendo(true);
+    setErro(null);
+    setInfo(null);
+    try {
+      const r = await devolverUnicosASeparacao(ids);
+      setInfo(`${r.devolvidos} pedido(s) voltaram para a separação.${r.ignorados > 0 ? ` ${r.ignorados} já tinham saído da fila.` : ""}`);
+      const fora = new Set(ids);
+      setPedidos((atual) => (atual ? atual.filter((p) => !fora.has(p.id)) : atual));
+      setSelecionados(new Set());
+      onAtualizar();
+    } catch (e) {
+      const semPermissao = e instanceof ApiError && e.status === 403;
+      setErro(semPermissao ? "Seu cadastro não pode devolver pedidos à separação." : `Não consegui devolver: ${mensagemDoErro(e)}`);
+    } finally {
+      setDevolvendo(false);
+    }
+  };
 
   return (
     <div style={fundo} onClick={bloqueado ? undefined : onFechar} role="presentation">
@@ -404,41 +450,69 @@ export function ImpressaoManualDialog({
             <div style={titulo}>
               {nomeGrupo} · {grupo.tamanho} — {itens.length || totalNaFila} pedidos na fila
             </div>
+            {podeImprimir && (
             <div style={blocoImprimir}>
               <div style={blocoTopo}>
                 <b>Imprimir o tamanho inteiro</b>
                 <span style={badge}>liberado pro seu cadastro</span>
               </div>
               <div style={texto}>
-                Gera a capa e uma etiqueta J&amp;T por pedido, na ordem da fila (pedidos com order bump no fim, cada bloco depois da sua capa). Os pedidos ficam separados e expedidos sem bipar.
+                {semOrderBump
+                  ? `Gera a capa e uma etiqueta J&T por pedido, na ordem da fila. "Sem order bump" ligado: os ${idsComBump.length} pedido(s) com bump ficam na fila. Os pedidos ficam separados e expedidos sem bipar.`
+                  : "Gera a capa e uma etiqueta J&T por pedido, na ordem da fila (pedidos com order bump no fim, cada bloco depois da sua capa). Os pedidos ficam separados e expedidos sem bipar."}
               </div>
-              <button type="button" style={botaoPrimario} onClick={() => void iniciar()} disabled={fase === "reservando" || (pedidos !== null && itens.length === 0)}>
-                {fase === "reservando" ? "Reservando…" : `Imprimir ${itens.length || totalNaFila} etiquetas + capa`}
+              <button type="button" style={botaoPrimario} onClick={() => void iniciar()} disabled={fase === "reservando" || devolvendo || aImprimir === 0}>
+                {fase === "reservando" ? "Reservando…" : `Imprimir ${aImprimir} etiquetas + capa`}
               </button>
-              <button type="button" style={botaoSecundario} onClick={() => void baixarPdf()} disabled={fase === "reservando" || (pedidos !== null && itens.length === 0)}>
-                {`Baixar PDF (${itens.length || totalNaFila} etiquetas + capas)`}
+              <button type="button" style={botaoSecundario} onClick={() => void baixarPdf()} disabled={fase === "reservando" || devolvendo || aImprimir === 0}>
+                {`Baixar PDF (${aImprimir} etiquetas + capas)`}
               </button>
             </div>
+            )}
+            {podeDevolver && (
+              <div style={barraDevolver}>
+                <button type="button" style={botao} onClick={() => setSelecionados(new Set(todosMarcados ? [] : itens.map((p) => p.id)))} disabled={itens.length === 0 || devolvendo}>
+                  {todosMarcados ? "Desmarcar todos" : "Selecionar todos"}
+                </button>
+                {idsComBump.length > 0 && (
+                  <button type="button" style={botao} onClick={() => setSelecionados(new Set(idsComBump))} disabled={devolvendo}>
+                    Selecionar os {idsComBump.length} com bump
+                  </button>
+                )}
+                <button type="button" style={botaoDevolver} onClick={() => void devolver()} disabled={selecionados.size === 0 || devolvendo || fase === "reservando"}>
+                  {devolvendo ? "Devolvendo…" : `Devolver à separação (${selecionados.size})`}
+                </button>
+              </div>
+            )}
+            {info && <div style={avisoOk}>{info}</div>}
             {erro && <div style={avisoErro}>{erro}</div>}
             <div style={tabelaBox} className="thin-scroll">
               <table style={tabela}>
                 <thead>
                   <tr>
+                    {podeDevolver && <th style={th} />}
                     <th style={th}>#</th>
                     <th style={th}>Pedido</th>
                     <th style={th}>Cliente</th>
                     <th style={th}>Emitido</th>
                     <th style={th}>Rastreio</th>
+                    <th style={th}>Order bump</th>
                   </tr>
                 </thead>
                 <tbody>
                   {itens.map((p, i) => (
-                    <tr key={p.id}>
+                    <tr key={p.id} style={podeDevolver ? { cursor: "pointer" } : undefined} onClick={podeDevolver ? () => alternar(p.id) : undefined}>
+                      {podeDevolver && (
+                        <td style={td}>
+                          <input type="checkbox" checked={selecionados.has(p.id)} onChange={() => alternar(p.id)} onClick={(ev) => ev.stopPropagation()} aria-label={`Selecionar pedido ${p.numero ?? ""}`} />
+                        </td>
+                      )}
                       <td style={td}>{i + 1}</td>
                       <td style={td}>{p.numero ?? "—"}</td>
                       <td style={td}>{p.cliente ?? "—"}</td>
                       <td style={td}>{p.emitidoEm ? rotuloDia(p.emitidoEm.slice(0, 10)) : "—"}</td>
                       <td style={td}>{p.trackingNumber ?? "—"}</td>
+                      <td style={td}>{p.orderBump ? `+ ${[p.orderBump.produtoNome, p.orderBump.tamanho].filter(Boolean).join(" · ")}` : ""}</td>
                     </tr>
                   ))}
                 </tbody>
@@ -604,6 +678,9 @@ const botao: CSSProperties = { padding: "10px 16px", background: "var(--bg-card)
 const botaoPrimario: CSSProperties = { ...botao, alignSelf: "flex-start", background: "var(--accent, #2563eb)", color: "#fff", border: "1px solid transparent" };
 const botaoSecundario: CSSProperties = { ...botao, alignSelf: "flex-start" };
 const avisoErro: CSSProperties = { padding: "6px 12px", borderRadius: 8, background: "var(--warning-bg)", border: "1px solid var(--warning-border)", color: "var(--warning-text)", fontSize: 13 };
+const avisoOk: CSSProperties = { padding: "6px 12px", borderRadius: 8, background: "var(--info-bg, #dbeafe)", color: "var(--info-text, #1d4ed8)", fontSize: 13 };
+const barraDevolver: CSSProperties = { display: "flex", flexWrap: "wrap", alignItems: "center", gap: 8 };
+const botaoDevolver: CSSProperties = { ...botao, marginLeft: "auto", background: "var(--warning-bg)", border: "1px solid var(--warning-border)", color: "var(--warning-text)" };
 const tabelaBox: CSSProperties = { flex: 1, minHeight: 80, maxHeight: "40vh", overflowY: "auto" };
 const tabela: CSSProperties = { width: "100%", borderCollapse: "collapse", fontSize: 13 };
 const th: CSSProperties = { textAlign: "left", padding: "4px 8px", color: "var(--text-secondary)", borderBottom: "1px solid var(--border)" };
