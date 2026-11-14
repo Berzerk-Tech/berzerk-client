@@ -26,6 +26,7 @@ import { getMe } from "../../services/orders";
 import { limparLoteEmCurso, lerLoteEmCurso } from "../../lib/impressaoManualLote";
 import { ImpressaoManualDialog } from "./ImpressaoManualDialog";
 import { OrderBumpModal } from "./OrderBumpModal";
+import { lerSemOrderBump, pedidosSemBump, salvarSemOrderBump } from "../../lib/unicosSemBump";
 
 const POLL_MS = 30000;
 
@@ -61,6 +62,15 @@ export function UnicosGrupos({
   // Impressão manual do tamanho inteiro: só com `me.unicosImpressaoManual === true` (ausente = servidor antigo).
   const [impressaoManual, setImpressaoManual] = useState(() => isExpedicaoSimulacao());
   const [chipAberto, setChipAberto] = useState<{ grupo: GrupoEscolhido; pedidos: number } | null>(null);
+  // "Sem order bump" (14/11): contagem, lista e impressão manual ignoram os pedidos com bump. Só pra quem imprime.
+  const [semBumpPref, setSemBumpPref] = useState(() => lerSemOrderBump());
+  const semBump = impressaoManual && semBumpPref;
+  const alternarSemBump = () => {
+    setSemBumpPref((v) => {
+      salvarSemOrderBump(!v);
+      return !v;
+    });
+  };
 
   useEffect(() => {
     let vivo = true;
@@ -136,6 +146,17 @@ export function UnicosGrupos({
           <SeletorPeriodo dias={dados?.dias} periodo={periodoEfetivo(periodo, suportado)} suportado={suportado === true} onPeriodo={onPeriodo} />
         )}
         <span style={total}>{dados ? `${dados.totalPedidos ?? 0} pedidos` : ""}</span>
+        {impressaoManual && (
+          <button
+            type="button"
+            style={semBump ? bumpBtnLigado : bumpBtn}
+            onClick={alternarSemBump}
+            aria-pressed={semBump}
+            title="Ligado: os pedidos com order bump ficam fora da contagem e da impressão manual"
+          >
+            {semBump ? "Sem order bump: ligado" : "Sem order bump: desligado"}
+          </button>
+        )}
         {dados?.orderBump && podeConfigurarBump && (
           <button type="button" style={bumpBtn} onClick={() => setBumpAberto(true)} title="Configurar order bump">
             {rotuloOrderBump(dados.orderBump)}
@@ -172,7 +193,8 @@ export function UnicosGrupos({
               key={e.chave}
               e={e}
               onClick={() => clicarEstampa(e)}
-              onChip={impressaoManual ? (t) => setChipAberto({ grupo: { estampa: e.estampa, tamanho: t.tamanho, cor: e.cor }, pedidos: t.pedidos }) : undefined}
+              semBump={semBump}
+              onChip={impressaoManual || podeConfigurarBump ? (t) => setChipAberto({ grupo: { estampa: e.estampa, tamanho: t.tamanho, cor: e.cor }, pedidos: t.pedidos }) : undefined}
             />
           ))}
         </div>
@@ -182,6 +204,9 @@ export function UnicosGrupos({
           grupo={chipAberto.grupo}
           periodo={periodoEfetivo(periodo, suportado)}
           totalNaFila={chipAberto.pedidos}
+          podeImprimir={impressaoManual}
+          podeDevolver={podeConfigurarBump}
+          semOrderBump={semBump}
           onFechar={() => setChipAberto(null)}
           onAtualizar={() => void carregar()}
         />
@@ -271,7 +296,10 @@ function TiposLinha({ e }: { e: EstampaAgrupada }) {
   );
 }
 
-function CardEstampa({ e, onClick, onChip }: { e: EstampaAgrupada; onClick: () => void; onChip?: (t: EstampaAgrupada["tamanhos"][number]) => void }) {
+function CardEstampa({ e, onClick, onChip, semBump }: { e: EstampaAgrupada; onClick: () => void; onChip?: (t: EstampaAgrupada["tamanhos"][number]) => void; semBump?: boolean }) {
+  // Com "Sem order bump" os números mostram só os pedidos sem bump (o selo "N com bump" segue, fora da conta).
+  const n = (pedidos: number, comBump: number | null | undefined) => (semBump ? pedidosSemBump(pedidos, comBump) : pedidos);
+  const totalCard = n(e.pedidos, e.comOrderBump);
   const img = miniaturaLeve(e.imagemUrl);
   const unico = e.tamanhos.length === 1 ? e.tamanhos[0].tamanho : null;
   const nome = e.cor ? `${e.estampa} ${e.cor}` : e.estampa;
@@ -288,7 +316,7 @@ function CardEstampa({ e, onClick, onChip }: { e: EstampaAgrupada; onClick: () =
         <div style={estampaTxt}>{e.estampa}</div>
         {e.cor && <div style={corTxt}>{e.cor}</div>}
         <div style={contagem}>
-          {e.pedidos} pedido{e.pedidos === 1 ? "" : "s"}
+          {totalCard} pedido{totalCard === 1 ? "" : "s"}
           <Prioritarios n={e.prioritarios} />
           <ComBump n={e.comOrderBump} />
         </div>
@@ -301,7 +329,7 @@ function CardEstampa({ e, onClick, onChip }: { e: EstampaAgrupada; onClick: () =
                 role="button"
                 tabIndex={0}
                 style={chipBotao}
-                title={`Imprimir o tamanho ${t.tamanho} inteiro`}
+                title={`Abrir os pedidos do tamanho ${t.tamanho}`}
                 onClick={(ev) => {
                   ev.stopPropagation();
                   onChip(t);
@@ -314,11 +342,11 @@ function CardEstampa({ e, onClick, onChip }: { e: EstampaAgrupada; onClick: () =
                   }
                 }}
               >
-                <b>{t.tamanho}</b> {t.pedidos}
+                <b>{t.tamanho}</b> {n(t.pedidos, t.comOrderBump)}
               </span>
             ) : (
               <span key={t.tamanho} style={chip}>
-                <b>{t.tamanho}</b> {t.pedidos}
+                <b>{t.tamanho}</b> {n(t.pedidos, t.comOrderBump)}
               </span>
             ),
           )}
@@ -402,6 +430,7 @@ const diaRotulo: CSSProperties = { display: "flex", alignItems: "center", gap: 6
 const total: CSSProperties = { color: "var(--text-secondary)", fontSize: 13, fontWeight: 700 };
 const atualizarBtn: CSSProperties = { padding: "9px 14px", background: "var(--bg-card)", border: "1px solid var(--border)", borderRadius: 10, color: "var(--text)", fontWeight: 700, cursor: "pointer" };
 const bumpBtn: CSSProperties = { padding: "9px 14px", background: "var(--bg-card)", border: "1px solid var(--border)", borderRadius: 10, color: "var(--text)", fontWeight: 700, cursor: "pointer", maxWidth: 280, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" };
+const bumpBtnLigado: CSSProperties = { ...bumpBtn, background: "var(--info-bg, #dbeafe)", color: "var(--info-text, #1d4ed8)", border: "1px solid var(--info-text, #1d4ed8)" };
 const bumpBadge: CSSProperties = { padding: "1px 7px", borderRadius: 999, background: "var(--info-bg, #dbeafe)", color: "var(--info-text, #1d4ed8)", fontSize: 11 };
 const aviso: CSSProperties = { padding: "6px 12px", borderRadius: 8, background: "var(--warning-bg)", border: "1px solid var(--warning-border)", color: "var(--warning-text)", fontSize: 12 };
 const avisoErro: CSSProperties = { ...aviso };
