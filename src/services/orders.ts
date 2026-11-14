@@ -93,6 +93,8 @@ export type Order = {
    * realoca — a coleta dos mistos leva o dia. Ausente = nexus antigo.
    */
   listaEm?: string | null;
+  /** Pedido único (1 peça ou peça + order bump). Ausente = nexus antigo ou rota que não traz a coluna. */
+  unico?: boolean;
   /** A lista é de um dia ANTERIOR — o app oferece Retomar/Devolver. */
   listaDeOutroDia?: boolean;
   /** Id de `separacao_listas` gerado na última impressão que carimbou este
@@ -238,6 +240,11 @@ export type QueueFilters = {
    * PP–G3 (`mistosTamanhos` vai junto no body). Contrato em NEXUS_FILTRO_MISTOS.md.
    */
   mistosProdutos?: string[];
+  /**
+   * Só únicos (14/11, mutirão): só pedido de UMA peça (ou peça + order bump). Com a fila
+   * Únicos ligada, são os que o gestor devolveu à separação. Nexus ≥ 0.10.32.
+   */
+  soUnicos?: boolean;
 };
 
 /** Filtros → campos do body do claim (arrays vão como estão). */
@@ -248,6 +255,7 @@ function filtersBody(f?: QueueFilters): Record<string, unknown> {
   if (f.dateTo) out.dateTo = f.dateTo;
   if (f.includeProducts?.length) out.includeProducts = f.includeProducts;
   if (f.excludeProducts?.length) out.excludeProducts = f.excludeProducts;
+  if (f.soUnicos) out.soUnicos = true;
   if (f.mistosProdutos?.length) {
     out.mistosProdutos = f.mistosProdutos;
     // Sempre junto de `mistosProdutos`: sem ele o nexus segue em P–XG.
@@ -273,6 +281,7 @@ export function getQueueCounts(filters?: QueueFilters, canal?: CanalSeparacao): 
       excludeProducts: filters?.excludeProducts?.length
         ? filters.excludeProducts.join(",")
         : undefined,
+      soUnicos: filters?.soUnicos ? "true" : undefined,
     },
   });
 }
@@ -364,6 +373,7 @@ export function getQueueProducts(params: {
         dateTo: params.dateTo || undefined,
         includeProducts: f?.includeProducts?.length ? f.includeProducts.join(",") : undefined,
         excludeProducts: f?.excludeProducts?.length ? f.excludeProducts.join(",") : undefined,
+        soUnicos: f?.soUnicos ? "true" : undefined,
       },
     }),
   );
@@ -425,6 +435,7 @@ export function getQueueDates(params: {
         sizes: params.sizes?.length ? params.sizes.join(",") : undefined,
         includeProducts: f?.includeProducts?.length ? f.includeProducts.join(",") : undefined,
         excludeProducts: f?.excludeProducts?.length ? f.excludeProducts.join(",") : undefined,
+        soUnicos: f?.soUnicos ? "true" : undefined,
       },
     }),
   );

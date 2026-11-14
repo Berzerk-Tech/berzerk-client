@@ -105,6 +105,7 @@ export function loadFilters(mode: SeparationMode, size: string, canal?: CanalSep
       includeProducts: Array.isArray(f.includeProducts) ? f.includeProducts : undefined,
       excludeProducts: Array.isArray(f.excludeProducts) ? f.excludeProducts : undefined,
       mistosProdutos: Array.isArray(f.mistosProdutos) ? f.mistosProdutos : undefined,
+      soUnicos: f.soUnicos === true ? true : undefined,
     };
   } catch {
     return {};
@@ -642,6 +643,8 @@ export function PickingFiltersModal({ filters, queue, lote, abaInicial = "exclus
       // Sem a aba (fila carregando / nexus antigo) o filtro salvo passa INTACTO —
       // mexer só numa exclusão não pode apagar o Filtro Mistos de ontem.
       mistosProdutos: temMistos ? (mistos.length ? mistos : undefined) : filters.mistosProdutos,
+      // "Só únicos" é o botão da sidebar — passa intacto.
+      soUnicos: filters.soUnicos,
     };
     const extra = {
       imagens: Object.fromEntries(
