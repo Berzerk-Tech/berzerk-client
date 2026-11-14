@@ -170,7 +170,17 @@ export function ImpressaoManualDialog({
         }
         if (imprimiu) {
           try {
-            await concluirImpressaoManual({ orderId: p.orderId, loteId: l.loteId });
+            // Falha de rede ou 5xx: a etiqueta já saiu, então insiste (o servidor é idempotente e retoma de onde parou).
+            for (let tentativa = 0; ; tentativa += 1) {
+              try {
+                await concluirImpressaoManual({ orderId: p.orderId, loteId: l.loteId });
+                break;
+              } catch (e) {
+                const transitorio = !(e instanceof ApiError) || e.status >= 500;
+                if (!transitorio || tentativa >= 2) throw e;
+                await sleep(1500);
+              }
+            }
             l = registrarConcluido(l, p.orderId);
           } catch (e) {
             l = registrarErroConclusao(l, p, {
@@ -412,7 +422,7 @@ export function ImpressaoManualDialog({
                       <tr key={p.orderId}>
                         <td style={td}>#{p.numero ?? p.orderId.slice(0, 8)}</td>
                         <td style={td}>
-                          erro ao concluir{p.codigo ? ` (${p.codigo})` : ""}: {p.mensagem}. A etiqueta saiu; o pedido voltou à fila — não embale.
+                          erro ao concluir{p.codigo ? ` (${p.codigo})` : ""}: {p.mensagem}. A etiqueta saiu, mas o pedido NÃO foi expedido — separe o pacote e avise a supervisão.
                         </td>
                       </tr>
                     ))}
