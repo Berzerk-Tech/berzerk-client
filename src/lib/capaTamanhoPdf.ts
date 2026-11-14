@@ -76,56 +76,97 @@ export function gerarCapaTamanhoPdf(doc: CapaTamanhoDoc): string {
 }
 
 /**
- * Capa de um BLOCO de order bump: UMA página, impressa antes das etiquetas dos pedidos que levam o mesmo
- * produto × tamanho de bump. Tarja preta no topo e no pé pra se destacar na pilha. Servidor antigo
- * (sem `produtoNome`) gera só "ORDER BUMP".
+ * Capa de um BLOCO de order bump, no layout pedido pelo Lucas (13/11): "TAMANHO DO BUMP", a letra do
+ * tamanho numa caixa, "N PEDIDOS", o que vai em cada pacote, os números dos pedidos e "etiquetas destes
+ * pedidos logo abaixo". Impressa antes das etiquetas do bloco. Servidor antigo (sem `produtoNome`/`tamanho`)
+ * gera a caixa com "BUMP".
  */
-export function gerarCapaBumpPdf(doc: { produtoNome?: string | null; tamanho?: string | null; pedidos: number; estampa: string; tamanhoGrupo: string }): string {
+export function gerarCapaBumpPdf(doc: {
+  produtoNome?: string | null;
+  tamanho?: string | null;
+  pedidos: number;
+  estampa: string;
+  tamanhoGrupo: string;
+  /** Números dos pedidos do bloco, na ordem da pilha. */
+  numeros?: string[];
+}): string {
   const pdf = new jsPDF({ orientation: "portrait", unit: "pt", format: [CAPA_LARGURA_PT, CAPA_ALTURA_PT] });
   const util = CAPA_LARGURA_PT - 2 * MARGEM;
   const centro = CAPA_LARGURA_PT / 2;
+  const tamGrupo = (doc.tamanhoGrupo || "").toUpperCase();
+  const tamBump = (doc.tamanho || "").toUpperCase();
+
+  // Tarja preta "ORDER BUMP" no topo.
   pdf.setFillColor(0, 0, 0);
-  pdf.rect(0, 0, CAPA_LARGURA_PT, 34, "F");
-  pdf.rect(0, CAPA_ALTURA_PT - 34, CAPA_LARGURA_PT, 34, "F");
-  let y = 34 + 8;
+  pdf.rect(0, 0, CAPA_LARGURA_PT, 40, "F");
+  pdf.setTextColor(255, 255, 255);
   pdf.setFont("helvetica", "bold");
-  pdf.setFontSize(30);
-  y += 30;
-  pdf.text("ORDER BUMP", centro, y, { align: "center", maxWidth: util });
-  y += 6;
+  pdf.setFontSize(19);
+  pdf.text("ORDER BUMP", centro, 27, { align: "center" });
+  pdf.setTextColor(0, 0, 0);
+
+  let topo = 56;
+  pdf.setFont("helvetica", "normal");
+  pdf.setFontSize(10);
+  pdf.text(`${doc.estampa} ${tamGrupo}`.toUpperCase(), centro, topo, { align: "center", maxWidth: util });
   if (doc.produtoNome) {
-    pdf.setFontSize(14);
-    for (const l of (pdf.splitTextToSize(doc.produtoNome, util) as string[]).slice(0, 2)) {
-      y += 16;
+    pdf.setFont("helvetica", "bold");
+    pdf.setFontSize(13);
+    for (const l of (pdf.splitTextToSize(`+ ${doc.produtoNome.toUpperCase()}`, util) as string[]).slice(0, 2)) {
+      topo += 16;
+      pdf.text(l, centro, topo, { align: "center" });
+    }
+  }
+  if (doc.tamanho) {
+    pdf.setFont("helvetica", "normal");
+    pdf.setFontSize(10);
+    topo += 15;
+    pdf.text("TAMANHO DO BUMP", centro, topo, { align: "center" });
+  }
+
+  // Caixa com a letra do tamanho.
+  const caixaY = topo + 8;
+  const caixaH = 128;
+  pdf.setLineWidth(2.5);
+  pdf.rect(MARGEM + 4, caixaY, util - 8, caixaH);
+  const letra = tamBump || "BUMP";
+  pdf.setFont("helvetica", "bold");
+  pdf.setFont("helvetica", "bold");
+  let pt = 130;
+  pdf.setFontSize(pt);
+  while (pt > 30 && pdf.getTextWidth(letra) > util - 28) {
+    pt -= 6;
+    pdf.setFontSize(pt);
+  }
+  pdf.text(letra, centro, caixaY + caixaH / 2 + pt * 0.36, { align: "center" });
+
+  let y = caixaY + caixaH + 26;
+  pdf.setFontSize(24);
+  pdf.text(`${doc.pedidos} PEDIDO${doc.pedidos === 1 ? "" : "S"}`, centro, y, { align: "center" });
+
+  pdf.setFont("helvetica", "normal");
+  pdf.setFontSize(8);
+  y += 8;
+  const bump = doc.produtoNome ? `1 ${doc.produtoNome}${tamBump ? ` ${tamBump}` : ""}` : "1 peça do order bump";
+  for (const l of (pdf.splitTextToSize(`cada um: 1 ${doc.estampa} ${tamGrupo} + ${bump}`, util) as string[]).slice(0, 3)) {
+    y += 11;
+    pdf.text(l, centro, y, { align: "center" });
+  }
+
+  const rodapeY = CAPA_ALTURA_PT - MARGEM - 4;
+  if (doc.numeros?.length) {
+    y += 6;
+    const linhas = pdf.splitTextToSize(doc.numeros.join(" · "), util) as string[];
+    const cabem = Math.max(1, Math.floor((rodapeY - 14 - y) / 10));
+    const mostradas = linhas.slice(0, cabem);
+    if (linhas.length > cabem) mostradas[cabem - 1] = `${mostradas[cabem - 1]} …`;
+    for (const l of mostradas) {
+      y += 10;
       pdf.text(l, centro, y, { align: "center" });
     }
   }
-  y += 6;
-  if (doc.tamanho) {
-    const tam = doc.tamanho.toUpperCase();
-    let pt = 130;
-    pdf.setFontSize(pt);
-    while (pt > 40 && pdf.getTextWidth(tam) > util) {
-      pt -= 6;
-      pdf.setFontSize(pt);
-    }
-    y += pt * 0.78;
-    pdf.text(tam, centro, y, { align: "center" });
-    y += 10;
-  } else if (doc.produtoNome) {
-    pdf.setFontSize(16);
-    y += 20;
-    pdf.text("—", centro, y, { align: "center" });
-    y += 6;
-  }
-  y += 8;
-  pdf.setFontSize(18);
-  y += 18;
-  pdf.text(`${doc.pedidos} pedido${doc.pedidos === 1 ? "" : "s"}`, centro, y, { align: "center" });
-  pdf.setFont("helvetica", "normal");
-  pdf.setFontSize(9);
-  y += 16;
-  pdf.text(`peça principal: ${doc.estampa} ${(doc.tamanhoGrupo || "").toUpperCase()}`, centro, y, { align: "center", maxWidth: util });
+  pdf.text("etiquetas destes pedidos logo abaixo", centro, rodapeY, { align: "center" });
+
   return pdf.output("datauristring").split(",")[1] ?? "";
 }
 
