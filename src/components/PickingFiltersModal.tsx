@@ -87,18 +87,31 @@ export function emptyFilters(): QueueFilters {
   return {};
 }
 
+/** Dia de hoje em `YYYY-MM-DD` no fuso de São Paulo (o dia da operação). */
+export function hojeSP(agora: Date = new Date()): string {
+  return agora.toLocaleDateString("en-CA", { timeZone: "America/Sao_Paulo" });
+}
+
+/** Entrada gravada: os filtros + o dia (SP) em que foram salvos (`salvoEm`). */
+type FiltrosSalvos = QueueFilters & { salvoEm?: string };
+
 export function loadFilters(mode: SeparationMode, size: string, canal?: CanalSeparacao): QueueFilters {
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
     if (!raw) return {};
-    const all = JSON.parse(raw) as Record<string, QueueFilters | undefined>;
+    const all = JSON.parse(raw) as Record<string, FiltrosSalvos | undefined>;
     const f = all[queueKey(mode, size, canal)];
     if (!f) return {};
     // Janela de data salva por uma versão anterior (dateFrom ≠ dateTo) é
     // DESCARTADA: o seletor novo é de dia único e não teria como mostrar a
     // janela — ela ficaria filtrando a fila sem aparecer em lugar nenhum.
+    // O filtro de data também NÃO atravessa o dia: um chip de ontem esconderia
+    // pedido hoje sem ela lembrar que o marcou (16/11). Entrada sem o carimbo
+    // `salvoEm` (formato antigo) é descartada do mesmo jeito; os demais filtros ficam.
     const diaUnico =
-      typeof f.dateFrom === "string" && f.dateFrom === f.dateTo ? f.dateFrom : undefined;
+      typeof f.dateFrom === "string" && f.dateFrom === f.dateTo && f.salvoEm === hojeSP()
+        ? f.dateFrom
+        : undefined;
     return {
       dateFrom: diaUnico,
       dateTo: diaUnico,
@@ -115,8 +128,8 @@ export function loadFilters(mode: SeparationMode, size: string, canal?: CanalSep
 export function saveFilters(mode: SeparationMode, size: string, f: QueueFilters, canal?: CanalSeparacao): void {
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
-    const all = raw ? (JSON.parse(raw) as Record<string, QueueFilters | undefined>) : {};
-    all[queueKey(mode, size, canal)] = f;
+    const all = raw ? (JSON.parse(raw) as Record<string, FiltrosSalvos | undefined>) : {};
+    all[queueKey(mode, size, canal)] = { ...f, salvoEm: hojeSP() };
     localStorage.setItem(STORAGE_KEY, JSON.stringify(all));
   } catch {
     /* localStorage indisponível ou corrompido: filtros valem só na sessão */
