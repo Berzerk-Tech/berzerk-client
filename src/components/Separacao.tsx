@@ -18,6 +18,14 @@ import { ApiError } from "../lib/api";
 import { getSessaoSync } from "../lib/cognito";
 import { QUEUES, SEM_TAMANHO, queueFor, type Queue } from "../lib/filas";
 import { subscribeQueueChanged } from "../lib/realtime";
+import { hojeSP } from "./PickingFiltersModal";
+import {
+  filtrosDaData,
+  normalizarData,
+  rotuloDaData,
+  somarDias,
+  type DataDaSelecao,
+} from "../lib/dataDaSelecao";
 import {
   claimOrder,
   devolverLote,
@@ -55,6 +63,18 @@ export function Separacao({ onBack }: Props) {
   /** Trava do Nexus desligada: 409 `fila_mercado_livre_desligada` nas contagens do canal ML. */
   const [mlDesligada, setMlDesligada] = useState(false);
   const [selected, setSelected] = useState<Selected>(null);
+  /**
+   * Data de emissão escolhida nesta tela (só memória, com o dia SP em que foi
+   * escolhida: não atravessa o dia). Conta os tiles e entra na mesa como filtro.
+   */
+  const [dataEscolhida, setDataEscolhida] = useState<(DataDaSelecao & { em: string }) | null>(null);
+  const dataAtiva: DataDaSelecao | null =
+    dataEscolhida && dataEscolhida.em === hojeSP() ? normalizarData(dataEscolhida) : null;
+  const dataRef = useRef<DataDaSelecao | null>(null);
+  dataRef.current = dataAtiva;
+  const dataChave = dataAtiva ? `${dataAtiva.de}|${dataAtiva.ate}` : "";
+  const escolherData = (d: DataDaSelecao | null) =>
+    setDataEscolhida(d ? { ...d, em: hojeSP() } : null);
   const [confirmed, setConfirmed] = useState<{
     size: Queue;
     mode: QueueMode;
@@ -66,6 +86,8 @@ export function Separacao({ onBack }: Props) {
     retomandoLista?: boolean;
     /** Entrou pela aba "Entrega em mãos": o pedido pego pelo clique abre na mesa. */
     pedidoInicial?: Order;
+    /** Data de emissão escolhida na seleção: a mesa abre com o filtro de data já ligado. */
+    dataInicial?: DataDaSelecao | null;
   } | null>(null);
   /** Espelho síncrono de `confirmed` pra callbacks assíncronos (ver `separarEmMaos`). */
   const confirmedRef = useRef(confirmed);
@@ -113,7 +135,8 @@ export function Separacao({ onBack }: Props) {
     setCounts(null);
     setMlDesligada(false);
     const load = () => {
-      getQueueCounts(undefined, canal)
+      // Data da seleção (se houver, e só do dia em que foi escolhida): sem ela, a chamada é a de sempre.
+      getQueueCounts(filtrosDaData(dataRef.current), canal)
         .then((c) => {
           if (!alive) return;
           setCounts(c);
@@ -180,7 +203,7 @@ export function Separacao({ onBack }: Props) {
       if (pendente !== null) clearTimeout(pendente);
       unsubscribe();
     };
-  }, [canal]);
+  }, [canal, dataChave]);
 
   // Lote em aberto de antes: app fechado no meio do turno, troca de estação,
   // sessão derrubada. Sem isto os pedidos ficariam reservados e invisíveis pra
@@ -259,6 +282,7 @@ export function Separacao({ onBack }: Props) {
         }}
         retomandoLista={confirmed.retomandoLista}
         pedidoInicial={confirmed.pedidoInicial}
+        dataInicial={confirmed.dataInicial}
         onBack={() => setConfirmed(null)}
       />
     );
@@ -577,6 +601,12 @@ export function Separacao({ onBack }: Props) {
           número é quantos pedidos estão prontos agora.
         </p>
 
+        <SeletorDeData
+          data={dataAtiva}
+          total={counts === null ? null : totalFor("puro") + totalFor("mistos")}
+          onChange={escolherData}
+        />
+
         <div style={tabsRow}>
           <div style={modeTabs}>
             {(["ecommerce", "mercado_livre"] as const).map((c) => (
@@ -657,6 +687,7 @@ export function Separacao({ onBack }: Props) {
               mode,
               sizes: sizesForQueue(effectiveSelected, mode),
               canal,
+              dataInicial: dataAtiva,
             })
           }
           disabled={!effectiveSelected || mlDesligada || separandoEmMaos !== null}
@@ -677,6 +708,66 @@ export function Separacao({ onBack }: Props) {
           />
         )}
       </main>
+    </div>
+  );
+}
+
+/**
+ * Data de emissão da tela de seleção: dia único ou De/Até (dia de SP), com
+ * atalhos. O total ao lado é o número pra conferir com o do Tiny.
+ */
+function SeletorDeData({
+  data,
+  total,
+  onChange,
+}: {
+  data: DataDaSelecao | null;
+  total: number | null;
+  onChange: (d: DataDaSelecao | null) => void;
+}) {
+  const hoje = hojeSP();
+  const ontem = somarDias(hoje, -1);
+  const ehDia = (d: string) => data?.de === d && data?.ate === d;
+  return (
+    <div style={dataBox} data-testid="seletor-data-selecao">
+      <div style={dataLinha}>
+        <label style={dataLabel}>
+          De
+          <input
+            type="date"
+            style={dataInput}
+            aria-label="Data de emissão inicial"
+            value={data?.de ?? ""}
+            max={hoje}
+            onChange={(e) => onChange(e.target.value ? { de: e.target.value, ate: data?.ate ?? e.target.value } : data?.ate ? { de: data.ate, ate: data.ate } : null)}
+          />
+        </label>
+        <label style={dataLabel}>
+          Até
+          <input
+            type="date"
+            style={dataInput}
+            aria-label="Data de emissão final"
+            value={data?.ate ?? ""}
+            max={hoje}
+            onChange={(e) => onChange(e.target.value ? { de: data?.de ?? e.target.value, ate: e.target.value } : data?.de ? { de: data.de, ate: data.de } : null)}
+          />
+        </label>
+        <button style={ehDia(hoje) ? dataAtalhoOn : dataAtalho} onClick={() => onChange({ de: hoje, ate: hoje })}>
+          Hoje
+        </button>
+        <button style={ehDia(ontem) ? dataAtalhoOn : dataAtalho} onClick={() => onChange({ de: ontem, ate: ontem })}>
+          Ontem
+        </button>
+        <button style={!data ? dataAtalhoOn : dataAtalho} onClick={() => onChange(null)}>
+          Todas
+        </button>
+      </div>
+      {data && total !== null && (
+        <span style={dataTotal}>
+          <strong>{total}</strong> {total === 1 ? "pedido" : "pedidos"} de {rotuloDaData(data)}
+        </span>
+      )}
     </div>
   );
 }
@@ -1201,3 +1292,26 @@ const startBtnDisabled: CSSProperties = {
   cursor: "not-allowed",
   fontWeight: 700,
 };
+
+const dataBox: CSSProperties = { display: "flex", flexDirection: "column", alignItems: "center", gap: 6 };
+const dataLinha: CSSProperties = { display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap", justifyContent: "center" };
+const dataLabel: CSSProperties = { display: "inline-flex", alignItems: "center", gap: 6, fontSize: 12, color: "var(--text-faint)" };
+const dataInput: CSSProperties = {
+  background: "var(--surface-2, transparent)",
+  color: "var(--text)",
+  border: "1px solid var(--border, #444)",
+  borderRadius: 6,
+  padding: "4px 8px",
+  fontSize: 13,
+};
+const dataAtalho: CSSProperties = {
+  background: "transparent",
+  color: "var(--text-dim, var(--text))",
+  border: "1px solid var(--border, #444)",
+  borderRadius: 6,
+  padding: "4px 10px",
+  fontSize: 12,
+  cursor: "pointer",
+};
+const dataAtalhoOn: CSSProperties = { ...dataAtalho, borderColor: "var(--accent, #cba6f7)", color: "var(--accent, #cba6f7)" };
+const dataTotal: CSSProperties = { fontFamily: "var(--font-mono)", fontSize: 12, color: "var(--text-dim, var(--text))" };

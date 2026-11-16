@@ -270,7 +270,7 @@ describe("SeparacaoRunner — Filtro Mistos", () => {
     for (let i = 0; i < 12; i++) await act(async () => { await Promise.resolve(); });
     await act(async () => { await new Promise((r) => setTimeout(r, 60)); });
 
-    expect(screen.getByText("1 oculto pelo filtro")).toBeTruthy();
+    expect(screen.getByText(/^1 oculto:/)).toBeTruthy();
     expect(screen.getByText("Filtro Mistos ativo")).toBeTruthy();
     expect(screen.getByText("Filtros (1)")).toBeTruthy();
     expect(screen.getByText("FILTRO MISTOS")).toBeTruthy();
@@ -316,7 +316,7 @@ describe("SeparacaoRunner — Filtro Mistos: fallback de tamanho e corpo do clai
     claimLote.mockReset().mockResolvedValue({ orders: [o], fila: { restantes: 0 } });
     localStorage.setItem("berzerk_picking_filters_v2", JSON.stringify({ "total:M": { mistosProdutos: ["Myth"] } }));
     await montarRunner({ mode: "total", size: "M", sizes: ["M"] });
-    expect(screen.queryByText(/oculto pelo filtro/)).toBeNull();
+    expect(screen.queryByText(/oculto:/)).toBeNull();
     expect(screen.getByText("Filtro Mistos ativo")).toBeTruthy();
   });
 
@@ -354,7 +354,7 @@ describe("SeparacaoRunner — Filtro Mistos: fallback de tamanho e corpo do clai
     claimLote.mockReset().mockResolvedValue({ orders: [o], fila: { restantes: 0 } });
     localStorage.setItem("berzerk_picking_filters_v2", JSON.stringify({ "total:M": { mistosProdutos: ["Myth"] } }));
     await montarRunner({ mode: "total", size: "M", sizes: ["M"] });
-    expect(screen.queryByText(/oculto pelo filtro/)).toBeNull();
+    expect(screen.queryByText(/oculto:/)).toBeNull();
     expect(screen.queryByText("Filtro Mistos ativo")).toBeNull();
   });
 
@@ -416,7 +416,7 @@ describe("SeparacaoRunner — exclusão do galpão", () => {
     );
     for (let i = 0; i < 12; i++) await act(async () => { await Promise.resolve(); });
     await act(async () => { await new Promise((r) => setTimeout(r, 60)); });
-    expect(screen.getByText("1 oculto pelo filtro")).toBeTruthy();
+    expect(screen.getByText(/1 oculto:/)).toBeTruthy();
     expect(screen.getByText("Filtros (1)")).toBeTruthy();
   });
 });

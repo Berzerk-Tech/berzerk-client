@@ -53,8 +53,10 @@ import { PedirReposicaoModal } from "./PedirReposicaoModal";
 import { agoraDoServidor, resumoDosMeus, tamanhoInicial } from "../lib/pedirReposicao";
 import { useMeusPedidosReposicao } from "../lib/usePedidosReposicao";
 import { TAMANHOS_REPOSICAO, type TamanhoReposicao } from "../services/reposicaoPedidos";
+import { contarOcultos, diaDeEmissao, partesDosOcultos, passaNosFiltros, passaNosProdutos, resumoDosOcultos, type OcultosPorMotivo } from "../lib/recorteLote";
+import { mesclarFiltrosIniciais, type DataDaSelecao } from "../lib/dataDaSelecao";
 import { PickingFiltersModal, emptyFilters, loadFilters, saveFilters, type Aba } from "./PickingFiltersModal";
-import { chaveMisto, ordenarLoteMistos, visivelNoFiltroMistos, pedidoMistoDoLote, produtosJaTirados } from "../lib/mistos";
+import { chaveMisto, ordenarLoteMistos, pedidoMistoDoLote, produtosJaTirados } from "../lib/mistos";
 import { motivoDaFalhaDoLote, prepararFiltroDaNovaLista, reservarComRollback, type ReservaMistosResultado } from "../lib/reservaMistos";
 import { ApiError } from "../lib/api";
 import {
@@ -180,56 +182,6 @@ export type RecorteData = { de?: string; ate?: string } | null;
 // o NOME do item — case-insensitive, substring, qualquer item do pedido basta.
 // `includes` sobre minúsculas é exatamente isso; `%`/`_` do termo são literais
 // dos dois lados (o servidor escapa antes de montar o LIKE).
-
-/** Dia de emissão do pedido em `YYYY-MM-DD` **no fuso de São Paulo** — o mesmo
- *  `at time zone 'America/Sao_Paulo'` que o servidor usa. A estação pode estar
- *  em outro fuso; o dia da operação é sempre o de SP. */
-function diaDeEmissao(o: Order): string | null {
-  if (!o.dataEmissao) return null;
-  const d = new Date(o.dataEmissao);
-  if (Number.isNaN(d.getTime())) return null;
-  return d.toLocaleDateString("en-CA", { timeZone: "America/Sao_Paulo" });
-}
-
-/** Algum item do pedido cujo nome contém algum dos termos (mesmo `ilike %t%`). */
-function pedidoTemProduto(o: Order, termos: string[]): boolean {
-  const alvos = termos.map((t) => t.trim().toLowerCase()).filter((t) => t.length > 0);
-  if (alvos.length === 0) return false;
-  return o.items.some((it) => {
-    const nome = (it.nome ?? "").toLowerCase();
-    return alvos.some((t) => nome.includes(t));
-  });
-}
-
-/** Só o recorte de PRODUTO — usado onde a DATA é o que está sendo enumerado. */
-function passaNosProdutos(o: Order, f: QueueFilters, sizeFila = ""): boolean {
-  if (f.includeProducts?.length && !pedidoTemProduto(o, f.includeProducts)) return false;
-  if (f.excludeProducts?.length && pedidoTemProduto(o, f.excludeProducts)) return false;
-  // Só únicos: esconde só quem o servidor disse que NÃO é único (campo ausente = não filtra aqui).
-  if (f.soUnicos && o.unico === false && !o.listaEm) return false;
-  // Filtro Mistos: só o misto cujas peças de outro tamanho são todas dos
-  // produtos marcados. Pedido sem `predominantSize` usa o tamanho da FILA —
-  // com "" toda peça virava "de outro tamanho" e o pedido sumia da sidebar
-  // enquanto o servidor o mantinha reservado pra ela (revisão 04/11).
-  if (f.mistosProdutos?.length && o.separationMode === "total") {
-    // Pedido de lista impressa nunca some da mesa (ver `visivelNoFiltroMistos`).
-    return visivelNoFiltroMistos(o, f.mistosProdutos, o.predominantSize?.trim() || sizeFila);
-  }
-  return true;
-}
-
-/** O pedido passa pelos filtros ATIVOS (data de emissão + inclui/exclui produto). */
-function passaNosFiltros(o: Order, f: QueueFilters, sizeFila = ""): boolean {
-  if (f.dateFrom || f.dateTo) {
-    // Pedido sem data de emissão não passa em filtro de data — é o que o SQL
-    // faz (`null::date >= x` é NULL, e NULL não entra no WHERE).
-    const dia = diaDeEmissao(o);
-    if (!dia) return false;
-    if (f.dateFrom && dia < f.dateFrom) return false;
-    if (f.dateTo && dia > f.dateTo) return false;
-  }
-  return passaNosProdutos(o, f, sizeFila);
-}
 
 /**
  * Contagem por dia de emissão de uma lista de pedidos, no MESMO shape que o
@@ -491,6 +443,11 @@ type Props = {
    * lote com a fila automática só porque ela veio separar um pedido avulso.
    */
   pedidoInicial?: Order;
+  /**
+   * Data de emissão escolhida na tela de seleção das filas: entra por cima da
+   * data salva (os demais filtros salvos da fila ficam). Ignorada na entrega em mãos.
+   */
+  dataInicial?: DataDaSelecao | null;
   onBack: () => void;
 };
 
@@ -501,6 +458,7 @@ export function SeparacaoRunner({
   queue,
   retomandoLista,
   pedidoInicial,
+  dataInicial,
   onBack,
 }: Props) {
   const rfid = useRfid();
@@ -560,9 +518,14 @@ export function SeparacaoRunner({
   // filtro fantasma que a chave global (v1) causava entre filas diferentes.
   // Entrega em mãos: começa SEM filtro (o salvo da fila esconderia o pedido
   // que ela veio separar); nada é gravado até ela aplicar um.
-  const [filters, setFilters] = useState<QueueFilters>(() =>
-    pedidoInicial ? emptyFilters() : loadFilters(queue.mode, queue.size, queue.canal),
-  );
+  const [filters, setFilters] = useState<QueueFilters>(() => {
+    if (pedidoInicial) return emptyFilters();
+    const salvos = loadFilters(queue.mode, queue.size, queue.canal);
+    const iniciais = mesclarFiltrosIniciais(salvos, dataInicial);
+    // Data vinda da seleção vira o filtro salvo da fila (carimbo de hoje).
+    if (iniciais !== salvos) saveFilters(queue.mode, queue.size, iniciais, queue.canal);
+    return iniciais;
+  });
   const filtersRef = useRef(filters);
   filtersRef.current = filters;
   // Quantidade do lote de mistos (06/11, Nicole via Roger): teto por estação;
@@ -1842,6 +1805,12 @@ export function SeparacaoRunner({
   // reconstrói peças por pedido — não é pra rodar por leitura.
   const visiveis = useMemo(() => loteVisivel(lote, pulados, filtrosEfetivos, queue.size), [lote, pulados, filtrosEfetivos, queue.size]);
   const ocultos = lote.length - visiveis.length;
+  // Por que cada pedido ficou de fora (data → galpão → produto → únicos → mistos):
+  // o rodapé diz o motivo, senão "87 ocultos pelo filtro" não diz QUAL filtro.
+  const ocultosPorMotivo = useMemo(
+    () => contarOcultos(lote, filtrosEfetivos, queue.size, termosDoGalpao),
+    [lote, filtrosEfetivos, queue.size, termosDoGalpao],
+  );
   // Listas impressas em aberto (Mistos: até 2) pro seletor de reimpressão do
   // Picking Geral — só pedidos COM lista, na ordem do número ("Lista 1/2").
   const listasDoPicking = useMemo(() => {
@@ -2177,6 +2146,8 @@ export function SeparacaoRunner({
           todos={lote}
           pulados={pulados}
           ocultos={ocultos}
+          ocultosPorMotivo={ocultosPorMotivo}
+          onVerTodasAsDatas={() => aplicarFiltros({ ...filters, dateFrom: undefined, dateTo: undefined })}
           restantes={restantes}
           atualId={order?.id ?? null}
           filters={filtrosLocais}
@@ -2210,7 +2181,7 @@ export function SeparacaoRunner({
               <div style={emptyTitle}>{ocultos > 0 ? "Nada visível no filtro" : "Fila vazia"}</div>
               <p style={emptyText}>
                 {ocultos > 0
-                  ? `Você tem ${lote.length} ${lote.length === 1 ? "pedido" : "pedidos"} no lote, ${ocultos === lote.length ? "todos" : `${ocultos}`} fora do filtro atual.`
+                  ? `Você tem ${lote.length} ${lote.length === 1 ? "pedido" : "pedidos"} no lote, ${ocultos === lote.length ? "todos" : `${ocultos}`} fora do filtro atual (${partesDosOcultos(ocultosPorMotivo).map((p) => p.texto).join(" · ")}).`
                   : restantes && restantes > 0
                     ? `Seu lote acabou, mas ainda há ${restantes} na fila — procure de novo.`
                     : emptyHint}
@@ -2590,6 +2561,8 @@ function LoteSidebar({
   todos,
   pulados,
   ocultos,
+  ocultosPorMotivo,
+  onVerTodasAsDatas,
   restantes,
   atualId,
   filters,
@@ -2613,6 +2586,10 @@ function LoteSidebar({
   pulados: Set<string>;
   /** Pedidos do lote escondidos pelo filtro — contados no rodapé. */
   ocultos: number;
+  /** Os mesmos ocultos, por motivo (data, produto em falta, filtro de produto…). */
+  ocultosPorMotivo: OcultosPorMotivo;
+  /** Limpa só o filtro de DATA (o resto do recorte fica). */
+  onVerTodasAsDatas: () => void;
   restantes: number | null;
   atualId: string | null;
   filters: QueueFilters;
@@ -2714,7 +2691,7 @@ function LoteSidebar({
             >
               <span>
                 {mistosProdutos.length} {mistosProdutos.length === 1 ? "produto" : "produtos"}
-                {ocultos > 0 ? ` · ${ocultos} ocultos pelos filtros` : ""}
+                {ocultos > 0 ? ` · ${resumoDosOcultos(ocultosPorMotivo)}` : ""}
               </span>
               <span aria-hidden="true">{mistosAberto ? "▾" : "▸"}</span>
             </button>
@@ -2797,7 +2774,21 @@ function LoteSidebar({
               explicação e ela achava que tinha perdido pedido. */}
           {ocultos > 0 && (
             <div>
-              {ocultos} {ocultos === 1 ? "oculto" : "ocultos"} pelo filtro
+              {ocultos} {ocultos === 1 ? "oculto" : "ocultos"}:{" "}
+              {partesDosOcultos(ocultosPorMotivo).map((p, i) => (
+                <span key={p.motivo}>
+                  {i > 0 ? " · " : ""}
+                  {p.texto}
+                  {p.motivo === "data" && (
+                    <>
+                      {" "}
+                      <button type="button" style={verTodosBtn} onClick={onVerTodasAsDatas}>
+                        ver todos
+                      </button>
+                    </>
+                  )}
+                </span>
+              ))}
             </div>
           )}
           {restantes !== null && (
@@ -3673,6 +3664,16 @@ const pickingChip: CSSProperties = {
 };
 
 /** "faltam X na fila" — o que ainda está sem dono, fora do lote dela. */
+const verTodosBtn: CSSProperties = {
+  background: "none",
+  border: "none",
+  padding: 0,
+  font: "inherit",
+  color: "var(--accent, #4da3ff)",
+  textDecoration: "underline",
+  cursor: "pointer",
+};
+
 const sidebarFooter: CSSProperties = {
   display: "flex",
   flexDirection: "column",

@@ -122,7 +122,7 @@ function passaNoServidor(o: Order, f: QueueFilters): boolean {
   return true;
 }
 
-async function montar() {
+async function montar(dataInicial?: { de?: string; ate?: string }) {
   render(
     <StrictMode>
       <SeparacaoRunner
@@ -130,6 +130,7 @@ async function montar() {
         kicker="Fila M — Puro"
         emptyHint="Fila vazia"
         queue={QUEUE}
+        dataInicial={dataInicial}
         onBack={() => {}}
       />
     </StrictMode>,
@@ -301,5 +302,21 @@ describe("seletor Data com filtro de produto ativo", () => {
     expect(
       screen.getAllByRole("button", { name: /26\/08 → 27\/08\/2026 ▾/ }).length,
     ).toBeGreaterThan(0);
+  });
+
+  it("data vinda da seleção sobrepõe a salva, mantém os outros filtros e é gravada", async () => {
+    localStorage.setItem(
+      "berzerk_picking_filters_v2",
+      JSON.stringify({ "normal:M": { excludeProducts: ["Regata Atlas - M"] } }),
+    );
+    await montar({ de: "2026-08-27", ate: "2026-08-27" });
+    expect(filtrosDoUltimoClaim()).toMatchObject({
+      dateFrom: "2026-08-27",
+      dateTo: "2026-08-27",
+      excludeProducts: ["Regata Atlas - M"],
+    });
+    const salvo = JSON.parse(localStorage.getItem("berzerk_picking_filters_v2")!)["normal:M"];
+    expect(salvo.dateFrom).toBe("2026-08-27");
+    expect(typeof salvo.salvoEm).toBe("string");
   });
 });
