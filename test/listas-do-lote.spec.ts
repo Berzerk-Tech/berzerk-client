@@ -43,3 +43,41 @@ describe("listasDoLote", () => {
     expect(chaveDaLista(null)).toBeNull();
   });
 });
+
+import { faltamNasListas, resumirListas, rotuloDoDia, textoLinhaDaLista, textoProgresso } from "../src/lib/listasDoLote";
+
+describe("resumirListas", () => {
+  const agora = new Date("2026-11-16T18:00:00Z"); // 15:00 em SP
+  const lote = [
+    { id: "a1", listaEm: "2026-11-16T17:19:00Z", listaId: "L1" },
+    { id: "a2", listaEm: "2026-11-16T17:19:01Z", listaId: "L1" },
+    { id: "b1", listaEm: "2026-11-15T13:00:00Z", listaId: "L0" },
+    { id: "s1", listaEm: null },
+  ];
+
+  it("rótulo do dia em SP", () => {
+    expect(rotuloDoDia("2026-11-16T17:19:00Z", agora)).toBe("hoje");
+    expect(rotuloDoDia("2026-11-15T13:00:00Z", agora)).toBe("ontem");
+    expect(rotuloDoDia("2026-11-12T13:00:00Z", agora)).toBe("12/11");
+  });
+
+  it("com dados do servidor: feitos = total − pendentes − fora", () => {
+    const rs = resumirListas(
+      lote,
+      [{ id: "L1", criadoEm: "2026-11-16T17:19:00Z", totalPedidos: 50, pedidosRecuperaveis: 3 }],
+      agora,
+    );
+    expect(rs.map((r) => r.rotulo)).toEqual(["Lista 1", "Lista 2"]);
+    expect(rs[0]).toMatchObject({ chave: "L0", deOutroDia: true, dia: "ontem", total: null, pendentes: 1 });
+    expect(rs[1]).toMatchObject({ chave: "L1", pendentes: 2, fora: 3, total: 50, feitos: 45, hora: "14:19", dia: "hoje" });
+    expect(textoLinhaDaLista(rs[1])).toBe("Lista 2 · impressa hoje 14:19 · 45 de 50 separados");
+    expect(textoProgresso(rs[0])).toBe("1 pendente");
+    expect(faltamNasListas(rs)).toBe(6);
+  });
+
+  it("sem servidor mostra pendentes", () => {
+    const [r] = resumirListas([{ id: "x", listaEm: "2026-11-16T17:19:00Z" }], [], agora);
+    expect(r.total).toBeNull();
+    expect(textoProgresso(r)).toBe("1 pendente");
+  });
+});

@@ -5,7 +5,7 @@ import { OperatorChip } from "./OperatorChip";
 import { SeparacaoRunner } from "./SeparacaoRunner";
 import { SupervisorModal } from "./SupervisorModal";
 import { EscolhaListaDevolucao } from "./EscolhaListaDevolucao";
-import { TODAS_AS_LISTAS, idsDaDevolucao, listasDoLote } from "../lib/listasDoLote";
+import { TODAS_AS_LISTAS, idsDaDevolucao, listasDoLote, resumirListas, textoLinhaDaLista } from "../lib/listasDoLote";
 import { SoltarPedidoDialog } from "./SoltarPedidoDialog";
 import {
   MSG_SERVIDOR_EXIGE_SUPERVISOR,
@@ -340,7 +340,7 @@ export function Separacao({ onBack }: Props) {
    * essa saída (e o motivo de `meus-pedidos` marcar `listaDeOutroDia`).
    */
   const comLista = emAberto.filter((o) => !!o.listaEm);
-  const listaDeOutroDia = comLista.find((o) => o.listaDeOutroDia);
+  const resumoListas = resumirListas(emAberto);
   /**
    * Entrega em mãos em aberto (app fechou no meio): o "Retomar" entra no
    * `meus-pedidos` (`retomandoLista`) com ele aberto — pelo `/lote` da fila
@@ -507,48 +507,63 @@ export function Separacao({ onBack }: Props) {
       )}
 
       {filaEmAberto && (
-        <div style={listaDeOutroDia ? retomarBannerAlerta : retomarBanner}>
+        <section style={retomarCard} aria-label="Pedidos em aberto">
+          <div style={retomarTopo}>
+            <div style={retomarTitulo}>
+              {comLista.length > 0 ? "Você tem listas em aberto" : "Você tem pedidos em aberto"}
+            </div>
+            <div style={retomarAcoes}>
+              <button
+                style={retomarBtn}
+                disabled={separandoEmMaos !== null}
+                onClick={() =>
+                  setConfirmed({
+                    ...filaEmAberto,
+                    retomandoLista: comLista.length > 0 || !!emMaosEmAberto,
+                    pedidoInicial: emMaosEmAberto ?? undefined,
+                  })
+                }
+              >
+                Retomar
+              </button>
+              <button style={retomarSecundarioBtn} onClick={() => void devolverEmAberto()} disabled={devolvendo}>
+                {devolvendo ? "devolvendo…" : "devolver pra fila"}
+              </button>
+            </div>
+          </div>
           {comLista.length > 0 ? (
-            <>
-              🖨 Você tem uma <strong>lista de {filaEmAberto.mode === "mistos" ? "mistos" : "pedidos"}</strong>{" "}
-              {listaDeOutroDia ? (
-                <>
-                  de <strong>{fmtDia(listaDeOutroDia.listaEm!)}</strong>
-                </>
-              ) : (
-                "de hoje"
-              )}{" "}
-              com <strong>{comLista.length}</strong>{" "}
-              {comLista.length === 1 ? "pedido" : "pedidos"} reservados.{" "}
-            </>
+            <ul style={retomarLinhas}>
+              {resumoListas.map((r) => (
+                <li key={r.chave} style={r.deOutroDia ? retomarLinhaAlerta : retomarLinha}>
+                  <span style={retomarLinhaTexto}>
+                    {r.deOutroDia && (
+                      <span aria-hidden="true" style={retomarAviso}>
+                        ⚠
+                      </span>
+                    )}
+                    {textoLinhaDaLista(r)}
+                    {r.deOutroDia ? ` · de ${r.dia}` : ""}
+                  </span>
+                  {r.total !== null && r.feitos !== null && (
+                    <span style={retomarBarra} aria-hidden="true">
+                      <span style={{ ...retomarBarraFill, width: `${Math.min(100, Math.round((r.feitos / r.total) * 100))}%` }} />
+                    </span>
+                  )}
+                </li>
+              ))}
+            </ul>
           ) : (
-            <>
-              Você tem <strong>{emAberto.length}</strong>{" "}
-              {emAberto.length === 1 ? "pedido em aberto" : "pedidos em aberto"} na fila{" "}
-              <strong>
-                {filaEmAberto.size} {filaEmAberto.mode === "mistos" ? "Mistos" : "Puro"}
-                {filaEmAberto.canal === "mercado_livre" ? " · Mercado Livre" : ""}
-              </strong>
-              .{" "}
-            </>
+            <div style={retomarLinha}>
+              <span style={retomarLinhaTexto}>
+                {emAberto.length} {emAberto.length === 1 ? "pedido" : "pedidos"} na fila{" "}
+                <strong>
+                  {filaEmAberto.size} {filaEmAberto.mode === "mistos" ? "Mistos" : "Puro"}
+                  {filaEmAberto.canal === "mercado_livre" ? " · Mercado Livre" : ""}
+                </strong>
+              </span>
+            </div>
           )}
-          <button
-            style={retomarBtn}
-            disabled={separandoEmMaos !== null}
-            onClick={() =>
-              setConfirmed({
-                ...filaEmAberto,
-                retomandoLista: comLista.length > 0 || !!emMaosEmAberto,
-                pedidoInicial: emMaosEmAberto ?? undefined,
-              })
-            }
-          >
-            Retomar
-          </button>
-          <button style={devolverBtn} onClick={() => void devolverEmAberto()} disabled={devolvendo}>
-            {devolvendo ? "devolvendo…" : "devolver pra fila"}
-          </button>
-          {avisoLista && <div style={{ marginTop: 8, fontSize: 13 }}>{avisoLista}</div>}
+          {avisoLista && <div style={retomarAvisoTexto}>{avisoLista}</div>}
           {comLista.some((o) => podeSoltarSemPin(o, getSessaoSync()?.sub)) && (
             <ul style={soltarLista}>
               {comLista.map((o) =>
@@ -563,7 +578,7 @@ export function Separacao({ onBack }: Props) {
               )}
             </ul>
           )}
-        </div>
+        </section>
       )}
 
       {soltando && (
@@ -772,20 +787,6 @@ function SeletorDeData({
   );
 }
 
-/** ISO → `DD/MM` no fuso de SP (o dia da operação é sempre o de SP — mesmo
- *  fuso de `diaDeEmissao` em SeparacaoRunner.tsx, que usa o MESMO campo pra
- *  filtrar/agrupar; sem isso a data exibida podia divergir do dia do filtro). */
-function fmtDia(iso: string): string {
-  const d = new Date(iso);
-  return Number.isNaN(d.getTime())
-    ? iso
-    : d.toLocaleDateString("pt-BR", {
-        day: "2-digit",
-        month: "2-digit",
-        timeZone: "America/Sao_Paulo",
-      });
-}
-
 /**
  * Seção "Entrega em mãos" da tela de filas: os pedidos marcados no Nexus,
  * fora da fila automática. `ready` tem o botão "Separar"; `separating` de
@@ -954,33 +955,91 @@ const mesaDownBanner: CSSProperties = {
   textAlign: "center",
 };
 
-const retomarBanner: CSSProperties = {
+/** Cartão de "listas em aberto": mesmo idioma dos tiles (card, borda, raio 16). */
+const retomarCard: CSSProperties = {
+  position: "relative",
   display: "flex",
-  alignItems: "center",
-  justifyContent: "center",
-  flexWrap: "wrap",
-  gap: 8,
-  padding: "10px 32px",
-  background: "var(--info-bg)",
-  color: "var(--info-text)",
+  flexDirection: "column",
+  gap: 10,
+  margin: "16px 32px 0",
+  padding: "16px 20px",
+  background: "var(--bg-card)",
+  border: "1px solid var(--border)",
+  borderRadius: 16,
+  color: "var(--text-secondary)",
   fontSize: 13,
 };
 
-/** Lista que atravessou a virada do dia: pede decisão, não só informa. */
-const retomarBannerAlerta: CSSProperties = {
-  ...retomarBanner,
-  background: "var(--warning-bg)",
-  color: "var(--warning-text)",
+const retomarTopo: CSSProperties = {
+  display: "flex",
+  alignItems: "center",
+  justifyContent: "space-between",
+  flexWrap: "wrap",
+  gap: 10,
 };
 
+const retomarTitulo: CSSProperties = { fontSize: 15, fontWeight: 700, color: "var(--text)" };
+
+const retomarAcoes: CSSProperties = { display: "flex", alignItems: "center", gap: 8 };
+
+const retomarLinhas: CSSProperties = {
+  listStyle: "none",
+  margin: 0,
+  padding: 0,
+  display: "flex",
+  flexDirection: "column",
+  gap: 8,
+};
+
+const retomarLinha: CSSProperties = { display: "flex", flexDirection: "column", gap: 5 };
+
+/** Lista que atravessou a virada do dia: pede decisão, sem pintar o cartão inteiro. */
+const retomarLinhaAlerta: CSSProperties = {
+  ...retomarLinha,
+  paddingLeft: 10,
+  borderLeft: "3px solid var(--warning-border)",
+};
+
+const retomarLinhaTexto: CSSProperties = { display: "flex", alignItems: "center", gap: 6 };
+
+const retomarAviso: CSSProperties = { color: "var(--warning-text)", fontWeight: 800 };
+
+const retomarBarra: CSSProperties = {
+  display: "block",
+  height: 4,
+  borderRadius: 999,
+  background: "var(--bg-input)",
+  overflow: "hidden",
+};
+
+const retomarBarraFill: CSSProperties = {
+  display: "block",
+  height: "100%",
+  background: "var(--info-text)",
+  borderRadius: 999,
+};
+
+const retomarAvisoTexto: CSSProperties = { fontSize: 13, color: "var(--text-secondary)" };
+
 const retomarBtn: CSSProperties = {
-  padding: "5px 14px",
+  padding: "7px 18px",
   background: "var(--info-text)",
   border: "1px solid var(--info-text)",
   borderRadius: 8,
   color: "var(--bg)",
-  fontSize: 12,
+  fontSize: 13,
   fontWeight: 800,
+  cursor: "pointer",
+};
+
+const retomarSecundarioBtn: CSSProperties = {
+  padding: "7px 14px",
+  background: "transparent",
+  border: "1px solid var(--border)",
+  borderRadius: 8,
+  color: "var(--text-secondary)",
+  fontSize: 12,
+  fontWeight: 600,
   cursor: "pointer",
 };
 
