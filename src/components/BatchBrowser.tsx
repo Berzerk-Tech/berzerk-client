@@ -6,6 +6,7 @@ import {
   type CSSProperties,
 } from "react";
 import { getStationId } from "../lib/station";
+import { useJobsDispensados } from "../lib/jobsDispensados";
 import { miniatura } from "../lib/imagens";
 import { subscribePrintJobsChanged } from "../lib/realtime";
 import { printJob as itagPrintJob } from "../lib/itag/iprint";
@@ -188,7 +189,13 @@ export function BatchBrowser({
   const [batchesWithTest, setBatchesWithTest] = useState<Set<string>>(
     new Set(),
   );
-  const [activeJobs, setActiveJobs] = useState<RfidPrintJob[]>([]);
+  const [jobsBrutos, setActiveJobs] = useState<RfidPrintJob[]>([]);
+  // ✕ da fila é definitivo por job (ver lib/jobsDispensados.ts).
+  const {
+    visiveis: activeJobs,
+    dispensar: dispensarJob,
+    restaurar: restaurarJob,
+  } = useJobsDispensados(jobsBrutos);
   const [awaitingJobs, setAwaitingJobs] = useState<JobAwaitingMovimentacao[]>(
     [],
   );
@@ -1011,10 +1018,17 @@ export function BatchBrowser({
       );
       if (!ok) return;
     }
+    // Some na hora e não volta, mesmo que o servidor recuse ou o WS esteja fora.
+    dispensarJob(job.id);
     printJobsService.cancelPrintJob(job.id).catch((e) => {
       console.error("[BatchBrowser] cancelPrintJob failed:", e);
+      // Job ainda vivo (na fila/imprimindo) que o servidor não cancelou: volta
+      // pra fila em vez de esconder algo que continua rodando. `falhou` fica oculto.
+      if (job.status === "falhou") return;
+      restaurarJob(job.id);
+      void avisar(`Não foi possível cancelar ${job.batch_code}: ${formatError(e)}`);
     });
-  }, []);
+  }, [confirmar, avisar, dispensarJob, restaurarJob]);
 
   return (
     <div style={page}>

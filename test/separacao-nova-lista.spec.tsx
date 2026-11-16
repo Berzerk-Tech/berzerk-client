@@ -194,4 +194,22 @@ describe("Tirar nova lista (mistos)", () => {
     expect(cards.indexOf("#700001")).toBeLessThan(cards.indexOf("#700007"));
     expect(cards.indexOf("#700007")).toBeLessThan(cards.indexOf("#700009"));
   });
+
+  it("barra única de listas + sidebar presa em lista (chips por lista e regra do pedido novo)", async () => {
+    const lote = [pedido(7, LISTA_2), pedido(1, LISTA_1), pedido(8, LISTA_2), pedido(2, LISTA_1), pedido(3, LISTA_1)];
+    claimLote.mockResolvedValue({ orders: lote, fila: { restantes: 0 } });
+    await montar();
+    expect(screen.getByText("Você está nas suas listas impressas")).toBeTruthy();
+    expect(screen.getByText(/Lista 1: 3 pendentes/)).toBeTruthy();
+    expect(screen.getByText(/Lista 2: 2 pendentes/)).toBeTruthy();
+    expect(screen.getByText(/faltam 5/)).toBeTruthy();
+    expect(screen.getByText(/Suas listas — M Mistos/)).toBeTruthy();
+    expect(screen.getByText("Pedido novo só entra tirando nova lista.")).toBeTruthy();
+    // chip filtra só a exibição
+    fireEvent.click(screen.getByText("Lista 2 · 2"));
+    expect(screen.queryByText("#700002")).toBeNull();
+    expect(screen.getByText("#700007")).toBeTruthy();
+    fireEvent.click(screen.getByText("Todas"));
+    expect(screen.getByText("#700002")).toBeTruthy();
+  });
 });

@@ -34,7 +34,17 @@ import { onBeforeForcedLogout } from "../lib/idleSession";
 import { onAntesDeBloquear } from "../lib/updateGate";
 import { SupervisorModal, type SobressalenteInfo } from "./SupervisorModal";
 import { EscolhaListaDevolucao } from "./EscolhaListaDevolucao";
-import { TODAS_AS_LISTAS, chaveDaLista, idsDaDevolucao, listasDoLote } from "../lib/listasDoLote";
+import {
+  TODAS_AS_LISTAS,
+  chaveDaLista,
+  faltamNasListas,
+  idsDaDevolucao,
+  listasDoLote,
+  resumirListas,
+  textoProgresso,
+  type ListaDoServidor,
+  type ResumoLista,
+} from "../lib/listasDoLote";
 import { ConfirmDialog } from "./ConfirmDialog";
 import { SoltarPedidoDialog } from "./SoltarPedidoDialog";
 import {
@@ -1561,6 +1571,10 @@ export function SeparacaoRunner({
    * lembrar de abrir "Listas impressas".
    */
   const [listasEscapadas, setListasEscapadas] = useState<ListaResumo[]>([]);
+  /** Listas de HOJE desta operadora (mesma chamada do vigia): dão o total de cada uma pro "13 de 50". */
+  const [listasDoServidor, setListasDoServidor] = useState<ListaDoServidor[]>([]);
+  /** Teto de listas abertas, só quando o servidor já o informou (409 `limite_listas_abertas`). */
+  const [limiteListas, setLimiteListas] = useState<number | null>(null);
   const imprimindoRef = useRef(false);
   /** Pedidos da lista fora da mesa dela: na fila sem claim + com outra mesa que ainda não começou. */
   const escapados = (l: ListaResumo) => l.pedidosRecuperaveis + (l.pedidosRetomaveis ?? 0);
@@ -1576,6 +1590,7 @@ export function SeparacaoRunner({
       setListasEscapadas(
         listas.filter((l) => !l.devolvidaEm && escapados(l) > 0 && diaDe(l.criadoEm) === hoje),
       );
+      setListasDoServidor(listas.filter((l) => !l.devolvidaEm && diaDe(l.criadoEm) === hoje));
     } catch {
       /* rede: tenta no próximo ciclo */
     }
@@ -1626,6 +1641,7 @@ export function SeparacaoRunner({
     } catch (e) {
       const limite = limiteListasAbertas(e);
       if (limite) {
+        if (limite.limite !== null) setLimiteListas(limite.limite);
         showReject(limite.message);
         return;
       }
@@ -2011,7 +2027,12 @@ export function SeparacaoRunner({
 
   /** Pedidos do lote com lista impressa — o banner e o chip da sidebar. */
   const comLista = lote.filter((o) => !!o.listaEm);
-  const listaDeOutroDia = comLista.find((o) => o.listaDeOutroDia);
+  const resumoListas = useMemo(() => resumirListas(lote, listasDoServidor), [lote, listasDoServidor]);
+  /** Pedidos das listas fora da mesa (na fila ou em outra mesa) — vira alerta dentro da barra. */
+  const foraDaMesa = listasEscapadas.reduce((n, l) => n + escapados(l), 0);
+  /** Já teve lista nesta mesa: lote vazio = "terminou as listas", não "fila vazia". */
+  const teveListaRef = useRef(false);
+  if (comLista.length > 0) teveListaRef.current = true;
 
   const operadora = nomeDaOperadora(getSessaoSync()?.email ?? null);
 
@@ -2035,16 +2056,6 @@ export function SeparacaoRunner({
         {reposicao.suporte && <BotaoPedirReposicao meus={reposicao.meus} onClick={() => setReposicaoOpen(true)} />}
         {queue.mode === "total" && !pedidoInicial && (
           <SeletorQuantidadeMistos valor={quantidadeMistos} onChange={setQuantidadeMistos} semLimite={semLimiteMistos} />
-        )}
-        {queue.mode === "total" && comLista.length > 0 && !pedidoInicial && (
-          <button
-            style={topBarBtn}
-            onClick={() => void tirarNovaLista()}
-            disabled={tirandoLista}
-            title="Puxa pedidos novos da fila e imprime só a lista nova; a lista que está na coleta continua na mesa"
-          >
-            {tirandoLista ? "Puxando…" : "➕ Tirar nova lista"}
-          </button>
         )}
         <button
           style={topBarBtn}
@@ -2120,23 +2131,19 @@ export function SeparacaoRunner({
       {reject && extras.length === 0 && <div style={rejectBanner}>⚠ {reject}</div>}
       {notice && <div style={noticeBanner}>ℹ {notice}</div>}
       {pedidoSaiu && !order && <div style={rejectBanner}>⚠ {AVISO_PEDIDO_SAIU}</div>}
-      {listasEscapadas.length > 0 && (
-        <div style={listaBannerAlerta}>
-          🚨 <strong>{listasEscapadas.reduce((n, l) => n + escapados(l), 0)}</strong>{" "}
-          {listasEscapadas.reduce((n, l) => n + escapados(l), 0) === 1 ? "pedido da sua lista impressa está" : "pedidos da sua lista impressa estão"}{" "}
-          fora da sua mesa — eles são seus até o fim do dia.{" "}
-          <button style={inlineReconnect} disabled={recuperandoListas} onClick={() => void recuperarListasEscapadas()}>
-            {recuperandoListas ? "recuperando…" : "Recuperar agora"}
-          </button>
-        </div>
-      )}
-      {comLista.length > 0 && (
-        <div style={listaDeOutroDia ? listaBannerAlerta : listaBanner}>
-          🖨 Lista impressa {listaDeOutroDia ? `de ${fmtDataISO(diaDe(listaDeOutroDia.listaEm!))}` : "de hoje"} —{" "}
-          <strong>{comLista.length}</strong>{" "}
-          {comLista.length === 1 ? "pedido reservado" : "pedidos reservados"} pra você até concluir
-          — ficam com você até o fim do dia.
-        </div>
+      {(comLista.length > 0 || listasEscapadas.length > 0) && (
+        <BarraListas
+          resumo={resumoListas}
+          fora={foraDaMesa}
+          recuperando={recuperandoListas}
+          onRecuperar={() => void recuperarListasEscapadas()}
+          onReimprimir={() => setListasOpen(true)}
+          onNovaLista={
+            queue.mode === "total" && comLista.length > 0 && !pedidoInicial ? () => void tirarNovaLista() : undefined
+          }
+          tirandoLista={tirandoLista}
+          onDevolver={comLista.length > 0 ? abrirDevolverLista : undefined}
+        />
       )}
 
       <div style={layoutRow}>
@@ -2144,6 +2151,8 @@ export function SeparacaoRunner({
           queue={queue}
           lote={visiveis}
           todos={lote}
+          resumoListas={resumoListas}
+          limiteListas={limiteListas}
           pulados={pulados}
           ocultos={ocultos}
           ocultosPorMotivo={ocultosPorMotivo}
@@ -2176,7 +2185,23 @@ export function SeparacaoRunner({
               </button>
             </Centered>
           )}
-          {phase === "empty" && (
+          {phase === "empty" && teveListaRef.current && lote.length === 0 && !temRecorte && (
+            <Centered>
+              <div style={emptyTitle}>Você terminou suas listas.</div>
+              <p style={emptyText}>Tire uma nova lista ou volte pra fila.</p>
+              <div style={{ display: "flex", gap: 10 }}>
+                {queue.mode === "total" && !pedidoInicial && (
+                  <button style={primaryBtn} onClick={() => void tirarNovaLista()} disabled={tirandoLista}>
+                    {tirandoLista ? "Puxando…" : "➕ Tirar nova lista"}
+                  </button>
+                )}
+                <button style={ghostBtn} onClick={handleBack}>
+                  Voltar pra fila
+                </button>
+              </div>
+            </Centered>
+          )}
+          {phase === "empty" && !(teveListaRef.current && lote.length === 0 && !temRecorte) && (
             <Centered>
               <div style={emptyTitle}>{ocultos > 0 ? "Nada visível no filtro" : "Fila vazia"}</div>
               <p style={emptyText}>
@@ -2555,10 +2580,93 @@ function useLarguraSidebar() {
   return { largura, alca };
 }
 
+/**
+ * Barra única de estado das listas impressas (0.9.92): substitui as duas faixas
+ * ("fora da sua mesa" e "lista impressa de hoje"). Só apresentação — as ações
+ * são as que já existiam (Listas impressas, tirar nova lista, devolver, recuperar).
+ */
+function BarraListas({
+  resumo,
+  fora,
+  recuperando,
+  onRecuperar,
+  onReimprimir,
+  onNovaLista,
+  tirandoLista,
+  onDevolver,
+}: {
+  resumo: ResumoLista[];
+  fora: number;
+  recuperando: boolean;
+  onRecuperar: () => void;
+  onReimprimir: () => void;
+  onNovaLista?: () => void;
+  tirandoLista: boolean;
+  onDevolver?: () => void;
+}) {
+  const faltam = faltamNasListas(resumo);
+  const outroDia = resumo.find((r) => r.deOutroDia);
+  return (
+    <div style={barraListas} role="status" aria-label="Estado das suas listas">
+      <div style={barraListasLinha}>
+        <span style={barraListasTexto}>
+          <strong>Você está nas suas listas impressas</strong>
+          {resumo.map((r) => (
+            <span key={r.chave}>
+              {" · "}
+              {r.rotulo}: {r.total !== null && r.feitos !== null ? `${r.feitos} de ${r.total}` : textoProgresso(r)}
+              {r.deOutroDia ? ` (de ${r.dia})` : ""}
+            </span>
+          ))}
+          {" · "}
+          <strong>faltam {faltam}</strong>
+        </span>
+        <span style={barraListasAcoes}>
+          <button type="button" style={barraBtn} onClick={onReimprimir} title="Ver e reimprimir as listas impressas">
+            🖨 Reimprimir
+          </button>
+          {onNovaLista && (
+            <button
+              type="button"
+              style={barraBtn}
+              onClick={onNovaLista}
+              disabled={tirandoLista}
+              title="Puxa pedidos novos da fila e imprime só a lista nova; a lista que está na coleta continua na mesa"
+            >
+              {tirandoLista ? "Puxando…" : "➕ Tirar nova lista"}
+            </button>
+          )}
+          {onDevolver && (
+            <button type="button" style={barraBtn} onClick={onDevolver} title="Devolver lista à fila (chave do supervisor)">
+              Devolver listas…
+            </button>
+          )}
+        </span>
+      </div>
+      {outroDia && !fora && (
+        <div style={barraAlerta}>
+          ⚠ Há lista de {outroDia.dia}: ela continua com você — retome ou peça ao supervisor pra devolver.
+        </div>
+      )}
+      {fora > 0 && (
+        <div style={barraAlerta}>
+          🚨 {fora} {fora === 1 ? "pedido da sua lista está" : "pedidos da sua lista estão"} fora da sua mesa — eles são
+          seus até o fim do dia.{" "}
+          <button type="button" style={barraBtn} disabled={recuperando} onClick={onRecuperar}>
+            {recuperando ? "recuperando…" : "Recuperar agora"}
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function LoteSidebar({
   queue,
   lote,
   todos,
+  resumoListas,
+  limiteListas,
   pulados,
   ocultos,
   ocultosPorMotivo,
@@ -2582,6 +2690,10 @@ function LoteSidebar({
   lote: Order[];
   /** Lote INTEIRO (sem os filtros de exibição): a busca olha aqui, senão pedido recuperado fora do recorte "some". */
   todos: Order[];
+  /** Uma linha por lista impressa do lote (vazio = sem lista). */
+  resumoListas: ResumoLista[];
+  /** Teto de listas abertas quando o servidor já informou; null = não sei. */
+  limiteListas: number | null;
   /** Ids pulados (mostrados no fim, com marca). */
   pulados: Set<string>;
   /** Pedidos do lote escondidos pelo filtro — contados no rodapé. */
@@ -2621,7 +2733,21 @@ function LoteSidebar({
   // Com termo, busca no lote INTEIRO (ignora data/produto do filtro): a
   // operadora que recuperou a lista impressa e não achava o pedido estava
   // com um recorte antigo escondendo (04/09).
-  const visiveis = termo.length === 0 ? lote : todos.filter((o) => casaBusca(o, termo));
+  const [listaSel, setListaSel] = useState<string | null>(null);
+  const presaEmListas = resumoListas.length > 0;
+  // Chip de lista (só exibição): some se a lista acabou.
+  const listaAtiva = presaEmListas && resumoListas.some((r) => r.chave === listaSel) ? listaSel : null;
+  const visiveisBusca = termo.length === 0 ? lote : todos.filter((o) => casaBusca(o, termo));
+  const visiveis = listaAtiva ? visiveisBusca.filter((o) => chaveDaLista(o) === listaAtiva) : visiveisBusca;
+  const pendentesListas = resumoListas.reduce((n, r) => n + r.pendentes, 0);
+  const totalListas = resumoListas.every((r) => r.total !== null)
+    ? resumoListas.reduce((n, r) => n + (r.total ?? 0), 0)
+    : null;
+  const regraListas = (() => {
+    const abertas = resumoListas.length;
+    const sufixo = limiteListas !== null ? ` (${abertas} de ${limiteListas} abertas)` : "";
+    return `Pedido novo só entra tirando nova lista${sufixo}.`;
+  })();
   const comLista = todos.filter((o) => !!o.listaEm).length; // lote inteiro, não o recorte
   // "Lista 1"/"Lista 2" só com duas ou mais listas na mesa (pipeline dos mistos).
   const numeroDaLista = numerarListas(todos);
@@ -2633,11 +2759,14 @@ function LoteSidebar({
       <div style={sidebarHeader}>
         <div style={sidebarHeaderTop}>
           <span style={sidebarTitle}>
-            Fila {queue.size} — {queue.mode === "total" ? "Mistos" : "Puro"}
+            {presaEmListas ? "Suas listas" : `Fila ${queue.size}`} — {presaEmListas ? `${queue.size} ` : ""}
+            {queue.mode === "total" ? "Mistos" : "Puro"}
             {queue.canal === "mercado_livre" ? " · Mercado Livre" : ""}
           </span>
           <span style={sidebarCount}>
-            {lote.length} {lote.length === 1 ? "pedido" : "pedidos"}
+            {presaEmListas && totalListas !== null
+              ? `${pendentesListas}/${totalListas} pendentes`
+              : `${lote.length} ${lote.length === 1 ? "pedido" : "pedidos"}`}
           </span>
           {comLista > 0 && (
             <span style={listaChip} title="Lista de picking impressa — estes pedidos ficam reservados">
@@ -2661,6 +2790,24 @@ function LoteSidebar({
             onEscolher={onEscolherData}
           />
         </div>
+        {resumoListas.length > 1 && (
+          <div style={listaChips} role="group" aria-label="Filtrar por lista">
+            <button type="button" style={listaAtiva === null ? listaChipOn : listaChipOff} onClick={() => setListaSel(null)}>
+              Todas
+            </button>
+            {resumoListas.map((r) => (
+              <button
+                key={r.chave}
+                type="button"
+                style={listaAtiva === r.chave ? listaChipOn : listaChipOff}
+                onClick={() => setListaSel(r.chave)}
+                title={textoProgresso(r)}
+              >
+                {r.rotulo} · {r.pendentes}
+              </button>
+            ))}
+          </div>
+        )}
         <button
           type="button"
           style={filters.soUnicos ? soUnicosLigado : soUnicosChip}
@@ -2729,7 +2876,9 @@ function LoteSidebar({
       <span style={sidebarHint}>
         {termo
           ? "Buscando dentro do seu lote."
-          : "Estes pedidos são só seus. Clique pra escolher qual vem agora, ou aperte P pra pular o da mesa."}
+          : presaEmListas && queue.mode === "total"
+            ? regraListas
+            : "Estes pedidos são só seus. Clique pra escolher qual vem agora, ou aperte P pra pular o da mesa."}
       </span>
       <div className="thin-scroll" style={sidebarList}>
         {/* O pedido em conferência que saiu do recorte: fica à parte, com o
@@ -4102,19 +4251,65 @@ const mesaDownBanner: CSSProperties = {
 };
 
 /** Lista de picking impressa: informa que o lote está reservado pra ela. */
-const listaBanner: CSSProperties = {
-  padding: "9px 32px",
-  background: "var(--info-bg)",
-  color: "var(--info-text)",
+const barraListas: CSSProperties = {
+  display: "flex",
+  flexDirection: "column",
+  gap: 6,
+  padding: "8px 32px",
+  background: "var(--bg-card)",
+  borderBottom: "1px solid var(--border)",
+  color: "var(--text-secondary)",
   fontSize: 13,
-  textAlign: "center",
 };
 
-/** Lista que atravessou a virada do dia — pede decisão. */
-const listaBannerAlerta: CSSProperties = {
-  ...listaBanner,
-  background: "var(--warning-bg)",
+const barraListasLinha: CSSProperties = {
+  display: "flex",
+  alignItems: "center",
+  justifyContent: "space-between",
+  flexWrap: "wrap",
+  gap: 8,
+};
+
+const barraListasTexto: CSSProperties = { lineHeight: 1.4 };
+
+const barraListasAcoes: CSSProperties = { display: "inline-flex", alignItems: "center", gap: 6, flexWrap: "wrap" };
+
+const barraBtn: CSSProperties = {
+  padding: "4px 10px",
+  background: "var(--bg-input)",
+  border: "1px solid var(--border)",
+  borderRadius: 999,
+  color: "var(--text-secondary)",
+  fontSize: 11,
+  fontWeight: 700,
+  cursor: "pointer",
+  whiteSpace: "nowrap",
+};
+
+/** Alerta dentro da barra (lista de outro dia / pedido fora da mesa): discreto, não pinta a barra. */
+const barraAlerta: CSSProperties = {
+  padding: "4px 0 2px 10px",
+  borderLeft: "3px solid var(--warning-border)",
   color: "var(--warning-text)",
+  fontSize: 12,
+};
+
+const listaChips: CSSProperties = { display: "flex", flexWrap: "wrap", gap: 6, marginTop: 6 };
+const listaChipOff: CSSProperties = {
+  padding: "3px 10px",
+  background: "var(--bg-card)",
+  border: "1px solid var(--border)",
+  borderRadius: 999,
+  color: "var(--text-secondary)",
+  fontSize: 11,
+  fontWeight: 700,
+  cursor: "pointer",
+};
+const listaChipOn: CSSProperties = {
+  ...listaChipOff,
+  background: "var(--info-bg)",
+  border: "1px solid var(--info-border)",
+  color: "var(--info-text)",
 };
 
 /** "Itens faltantes": ação destrutiva-ish (tira o pedido da fila) mas comum. */
