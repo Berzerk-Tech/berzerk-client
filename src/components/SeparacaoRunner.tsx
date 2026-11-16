@@ -54,6 +54,7 @@ import { agoraDoServidor, resumoDosMeus, tamanhoInicial } from "../lib/pedirRepo
 import { useMeusPedidosReposicao } from "../lib/usePedidosReposicao";
 import { TAMANHOS_REPOSICAO, type TamanhoReposicao } from "../services/reposicaoPedidos";
 import { contarOcultos, diaDeEmissao, partesDosOcultos, passaNosFiltros, passaNosProdutos, resumoDosOcultos, type OcultosPorMotivo } from "../lib/recorteLote";
+import { mesclarFiltrosIniciais, type DataDaSelecao } from "../lib/dataDaSelecao";
 import { PickingFiltersModal, emptyFilters, loadFilters, saveFilters, type Aba } from "./PickingFiltersModal";
 import { chaveMisto, ordenarLoteMistos, pedidoMistoDoLote, produtosJaTirados } from "../lib/mistos";
 import { motivoDaFalhaDoLote, prepararFiltroDaNovaLista, reservarComRollback, type ReservaMistosResultado } from "../lib/reservaMistos";
@@ -442,6 +443,11 @@ type Props = {
    * lote com a fila automática só porque ela veio separar um pedido avulso.
    */
   pedidoInicial?: Order;
+  /**
+   * Data de emissão escolhida na tela de seleção das filas: entra por cima da
+   * data salva (os demais filtros salvos da fila ficam). Ignorada na entrega em mãos.
+   */
+  dataInicial?: DataDaSelecao | null;
   onBack: () => void;
 };
 
@@ -452,6 +458,7 @@ export function SeparacaoRunner({
   queue,
   retomandoLista,
   pedidoInicial,
+  dataInicial,
   onBack,
 }: Props) {
   const rfid = useRfid();
@@ -511,9 +518,14 @@ export function SeparacaoRunner({
   // filtro fantasma que a chave global (v1) causava entre filas diferentes.
   // Entrega em mãos: começa SEM filtro (o salvo da fila esconderia o pedido
   // que ela veio separar); nada é gravado até ela aplicar um.
-  const [filters, setFilters] = useState<QueueFilters>(() =>
-    pedidoInicial ? emptyFilters() : loadFilters(queue.mode, queue.size, queue.canal),
-  );
+  const [filters, setFilters] = useState<QueueFilters>(() => {
+    if (pedidoInicial) return emptyFilters();
+    const salvos = loadFilters(queue.mode, queue.size, queue.canal);
+    const iniciais = mesclarFiltrosIniciais(salvos, dataInicial);
+    // Data vinda da seleção vira o filtro salvo da fila (carimbo de hoje).
+    if (iniciais !== salvos) saveFilters(queue.mode, queue.size, iniciais, queue.canal);
+    return iniciais;
+  });
   const filtersRef = useRef(filters);
   filtersRef.current = filters;
   // Quantidade do lote de mistos (06/11, Nicole via Roger): teto por estação;
