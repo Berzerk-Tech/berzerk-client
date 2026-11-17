@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState, type CSSProperties } from "react";
 import { BackButton } from "./BackButton";
 import { AmbientBackground } from "./AmbientBackground";
+import { BalancoTiny } from "./BalancoTiny";
 import { OperatorChip } from "./OperatorChip";
 import { SeparacaoRunner } from "./SeparacaoRunner";
 import { SupervisorModal } from "./SupervisorModal";
@@ -621,6 +622,8 @@ export function Separacao({ onBack }: Props) {
           total={counts === null ? null : totalFor("puro") + totalFor("mistos")}
           onChange={escolherData}
         />
+
+        {dataAtiva && counts?.balanco && <BalancoTiny balanco={counts.balanco} />}
 
         <div style={tabsRow}>
           <div style={modeTabs}>
