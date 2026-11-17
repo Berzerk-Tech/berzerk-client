@@ -201,6 +201,30 @@ export type QueueCounts = {
   mixed: number;
   /** Mistos por tamanho predominante — aba "Mistos" de cada fila. */
   mixedBySize: Record<string, number>;
+  /**
+   * Conta da fila até os faturados do Tiny, do universo inteiro da conta no período
+   * (independe da aba de canal). Só vem com `dateFrom`/`dateTo`; ausente (nexus antigo
+   * ou sem data) = nada muda.
+   */
+  balanco?: BalancoFilas;
+};
+
+export type BalancoFilas = {
+  periodo: { de: string; ate: string } | null;
+  naFila: number;
+  naFilaDetalhe?: { puros: number; mistos: number; unicos: number; outros: number };
+  semEtiqueta: number;
+  faturadoNaoLiberado: number;
+  emSeparacao: number;
+  emEspera: number;
+  aguardandoEmbalar: number;
+  mercadoLivre: number;
+  entregaEmMaos: number;
+  duplicatas: number;
+  /** Soma de todas as parcelas. */
+  abertos: number;
+  /** Faturados no Tiny; `null` = sem medição agora. */
+  tiny: { total: number; medidoEm: string } | null;
 };
 
 /** Entrada da fila (resumo pro card da sidebar; itens completos só no claim). */
