@@ -63,7 +63,7 @@ import { PedirReposicaoModal } from "./PedirReposicaoModal";
 import { agoraDoServidor, resumoDosMeus, tamanhoInicial } from "../lib/pedirReposicao";
 import { useMeusPedidosReposicao } from "../lib/usePedidosReposicao";
 import { TAMANHOS_REPOSICAO, type TamanhoReposicao } from "../services/reposicaoPedidos";
-import { contarOcultos, diaDeEmissao, partesDosOcultos, passaNosFiltros, passaNosProdutos, resumoDosOcultos, type OcultosPorMotivo } from "../lib/recorteLote";
+import { avisoDevolvidosPorFiltro, contarOcultos, diaDeEmissao, partesDosOcultos, passaNosFiltros, passaNosProdutos, pedidosDevolviveisPorFiltro, resumoDosOcultos, type OcultosPorMotivo } from "../lib/recorteLote";
 import { mesclarFiltrosIniciais, type DataDaSelecao } from "../lib/dataDaSelecao";
 import { PickingFiltersModal, emptyFilters, loadFilters, saveFilters, type Aba } from "./PickingFiltersModal";
 import { chaveMisto, ordenarLoteMistos, pedidoMistoDoLote, produtosJaTirados } from "../lib/mistos";
@@ -186,6 +186,18 @@ export type RecorteData = { de?: string; ate?: string } | null;
 // filtro), e o que ela VÊ e o que o "próximo" percorre é o subconjunto que bate
 // com o filtro. O rodapé conta quantos ficaram ocultos, pra não parecer que
 // sumiram.
+//
+// REGRA NOVA (16/11, Matheus): na troca EXPLÍCITA de filtro o que ela VÊ tem
+// que ser o que ela TEM. O claim do servidor (`lote()`) já devolve a posse fora
+// do recorte (sem `iniciado_em`, lista ou entrega em mãos); o client só
+// devolve ANTES (`pedidosDevolviveisPorFiltro` → `devolverLote`, depois
+// puxa) quando não há claim que faça isso: mesa presa em lista impressa
+// (`getMeusPedidos`) ou filtro invisível ao servidor (só "só únicos"). O
+// `devolverLote` NÃO protege `iniciado_em`, então o pedido da mesa nunca vai na
+// lista. Não reabre o bug de 27/08 (81 pedidos): a posse é devolvida de fato
+// antes do claim, o teto é do servidor e o que passa no filtro novo nunca é
+// devolvido. A troca nunca se perde: com a mesa ocupada fica PENDENTE e é
+// aplicada ao liberar. WS, recarga de fundo e exclusões do galpão não devolvem.
 //
 // A regra de casamento é a MESMA do servidor (`produtosNoPedido` em
 // `apps/api/src/modules/separacao/separacao.service.ts`): `ilike %termo%` sobre
@@ -625,6 +637,10 @@ export function SeparacaoRunner({
   }, []);
   /** Sequência dos `puxarLote`: só a resposta do mais recente é aplicada (evita resposta velha de fundo zerar a mesa). */
   const seqPuxarRef = useRef(0);
+  /** A devolução da data escolhida na seleção das filas já rodou nesta mesa. */
+  const entradaAjustadaRef = useRef(false);
+  const trocarFiltroDevolvendoRef = useRef<() => void>(() => {});
+  const consumirPendenteRef = useRef<() => void>(() => {});
   // O aviso some assim que há pedido na mesa de novo (clique num card, etc.).
   useEffect(() => {
     if (order) setPedidoSaiu(false);
@@ -670,7 +686,7 @@ export function SeparacaoRunner({
    * tinham feito (relato do 1º dia na 0.9.4).
    */
   const puxarLote = useCallback(
-    async (opts?: { preservarAtual?: boolean; depoisDe?: string; novaLista?: boolean; reserva?: boolean; porFiltro?: boolean }): Promise<Order[] | undefined> => {
+    async (opts?: { preservarAtual?: boolean; depoisDe?: string; novaLista?: boolean; reserva?: boolean; porFiltro?: boolean; forcar?: boolean }): Promise<Order[] | undefined> => {
       // Reposição em background (push do WS, troca de filtro) cede a vez: o
       // caminho do complete já vai repor, e duas chamadas em voo trocariam o
       // pedido da mesa no meio da conferência.
@@ -678,7 +694,8 @@ export function SeparacaoRunner({
       // um lote() com recorte no meio soltava pedidos que a folha já tem e
       // eles ficavam fora do snapshot — irrecuperáveis (achado da revisão 04/09).
       // `reserva`: o "Imprimir e reservar" já segurou `imprimindoRef` de propósito e é ele quem puxa.
-      if (opts?.preservarAtual && (puxandoRef.current || completingRef.current || (imprimindoRef.current && !opts.reserva))) return;
+      // `forcar`: a troca de filtro que acabou de devolver segura `puxandoRef` ela mesma.
+      if (opts?.preservarAtual && ((puxandoRef.current && !opts.forcar) || completingRef.current || (imprimindoRef.current && !opts.reserva))) return;
       const atual = opts?.preservarAtual ? orderRef.current : null;
       const seq = ++seqPuxarRef.current;
       // Refresh de FUNDO com a mesa vazia porque o pedido saiu: só atualiza o
@@ -828,7 +845,11 @@ export function SeparacaoRunner({
         setPhase("error");
         return undefined;
       } finally {
-        if (seq === seqPuxarRef.current) puxandoRef.current = false;
+        if (seq === seqPuxarRef.current) {
+          puxandoRef.current = false;
+          // Troca de filtro que esperou a mesa liberar.
+          setTimeout(() => consumirPendenteRef.current(), 0);
+        }
       }
     },
     [queue.mode, queue.sizes, resetLeitura, showNotice, candidatosDepoisDe, setPedidoSaiu],
@@ -837,7 +858,15 @@ export function SeparacaoRunner({
 
   // Entrar na fila = puxar o lote.
   useEffect(() => {
-    void puxarLote();
+    // Data escolhida na seleção das filas: a posse que ela já tinha de outro
+    // dia volta pra fila e o lote é puxado de novo com a data (uma vez só).
+    const aplicarDataDaEntrada = !!dataInicial && !pedidoInicial && !entradaAjustadaRef.current;
+    void puxarLote().then(() => {
+      if (!aplicarDataDaEntrada || entradaAjustadaRef.current) return;
+      entradaAjustadaRef.current = true;
+      trocarFiltroDevolvendoRef.current();
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [puxarLote]);
 
   // A trava da liberação por supervisor vem do `/me` ao entrar na fila. Falhou
@@ -1068,6 +1097,7 @@ export function SeparacaoRunner({
       showNotice(negocio ? `Não dá pra concluir: ${msg}` : `Falha ao concluir: ${msg} — tenta de novo ou chama o suporte.`);
     } finally {
       completingRef.current = false;
+      setTimeout(() => consumirPendenteRef.current(), 0);
       setCompleting(false);
     }
   }, [completing, collectedTags, puxarLote, showNotice, leiturasPayload, avisarEntregaEmMaos]);
@@ -1940,8 +1970,118 @@ export function SeparacaoRunner({
     }
     // "Imprimir e reservar" puxa a lista nova logo em seguida (`reservarMistos`):
     // um lote de fundo aqui deixaria `puxandoRef` ocupado e a lista não sairia.
-    if (opts?.puxar !== false) void puxarLote({ preservarAtual: true, porFiltro: true });
+    if (opts?.puxar === false) return;
+    // Troca explícita: devolve o que ficou fora do filtro e só então puxa.
+    void trocarFiltroDevolvendo();
   };
+
+  /** Sequência das trocas de filtro: só a mais nova devolve/puxa (as anteriores, ainda na fila, não fazem nada). */
+  const filtroSeqRef = useRef(0);
+  /** Trocas serializadas: devolver → puxar de uma termina antes de a próxima começar. */
+  const filtroFilaRef = useRef<Promise<void>>(Promise.resolve());
+
+  /**
+   * Ids do lote que o filtro EFETIVO atual deixa fora e que o CLIENT pode
+   * devolver. O pedido da MESA nunca entra (nem sem leitura: uma leitura pode
+   * estar em voo no `resolveEpcs` e o servidor soltaria o pedido com as peças
+   * na bancada — `devolverLote` não olha `iniciado_em`); nem os pulados, os
+   * abertos nesta sessão e os `iniciadoEm`. O que continua oculto aqui o claim
+   * seguinte trata no servidor (que respeita `iniciado_em`).
+   */
+  const devolviveisPorFiltro = () => {
+    const protegidos = new Set<string>([...iniciadosRef.current, ...puladosRef.current]);
+    if (orderRef.current) protegidos.add(orderRef.current.id);
+    const fixo = pedidoInicial?.id ?? pedidoInicialRef.current?.id;
+    if (fixo) protegidos.add(fixo);
+    return pedidosDevolviveisPorFiltro(loteRef.current, efetivosRef.current, {
+      sizeFila: queue.size,
+      termosGalpao: termosGlobais(globaisRef.current),
+      protegidos,
+    });
+  };
+
+  const mesaOcupada = () => puxandoRef.current || completingRef.current || imprimindoRef.current;
+
+  /** Há troca esperando a mesa liberar (a última sempre acaba aplicada). */
+  const filtroPendenteRef = useRef(false);
+  consumirPendenteRef.current = () => {
+    if (!filtroPendenteRef.current || mesaOcupada()) return;
+    filtroPendenteRef.current = false;
+    trocarFiltroDevolvendoRef.current();
+  };
+
+  /**
+   * Troca explícita de filtro (ou entrada com data escolhida). O claim do
+   * servidor (`lote()`) já devolve a posse que ficou fora do recorte; o client
+   * só devolve ANTES quando não há claim que faça isso: mesa presa em lista
+   * impressa (`getMeusPedidos`) ou filtro que o servidor não enxerga (só
+   * "só únicos"). Ordem: devolver → puxar, no máximo uma de cada por troca.
+   * Falha ao devolver não aborta a troca (o claim segue; a posse no servidor
+   * conta sem filtro, então não acumula). Mesa ocupada além da espera: a troca
+   * fica PENDENTE e é aplicada quando ela liberar.
+   */
+  const trocarFiltroDevolvendo = () => {
+    const meu = ++filtroSeqRef.current;
+    const rodar = async () => {
+      // Outra troca chegou depois: ela calcula tudo de novo com o filtro mais novo.
+      if (meu !== filtroSeqRef.current) return;
+      // Um lote de fundo/complete/impressão em voo: espera (e o claim dele não
+      // re-reserva o que devolvermos).
+      for (let i = 0; i < 100 && mesaOcupada(); i++) {
+        await new Promise((r) => setTimeout(r, 50));
+      }
+      if (meu !== filtroSeqRef.current) return;
+      if (mesaOcupada()) {
+        filtroPendenteRef.current = true; // consumida ao liberar (finally do puxarLote/complete/impressão)
+        return;
+      }
+      filtroPendenteRef.current = false;
+      const f = efetivosRef.current;
+      const servidorRecorta =
+        !!(f.dateFrom || f.dateTo || f.includeProducts?.length || f.excludeProducts?.length || f.mistosProdutos?.length);
+      const presaEmLista = presaNaListaRef.current || loteRef.current.some((o) => !!o.listaEm);
+      const { ids, porMotivo } = !servidorRecorta || presaEmLista ? devolviveisPorFiltro() : { ids: [], porMotivo: null };
+      if (ids.length === 0 || !porMotivo) {
+        await puxarLote({ preservarAtual: true, porFiltro: true });
+        return;
+      }
+      let chamouPuxar = false;
+      puxandoRef.current = true; // segura os lotes de fundo até o claim abaixo assumir
+      try {
+        let devolveu = false;
+        try {
+          await devolverLote(ids);
+          devolveu = true;
+        } catch {
+          // Segue pro claim: o erro só aparece se ele também falhar (o próprio puxarLote avisa).
+        }
+        if (devolveu) {
+          const foram = new Set(ids);
+          const resto = loteRef.current.filter((o) => !foram.has(o.id));
+          loteRef.current = resto;
+          setLote(resto);
+          for (const id of foram) iniciadosRef.current.delete(id);
+          showNotice(avisoDevolvidosPorFiltro(porMotivo));
+        }
+        // Ocupou no meio (complete/impressão): o claim fica pendente.
+        if (completingRef.current || imprimindoRef.current) {
+          filtroPendenteRef.current = true;
+          return;
+        }
+        if (meu !== filtroSeqRef.current) return; // a troca mais nova puxa
+        chamouPuxar = true;
+        await puxarLote({ preservarAtual: true, porFiltro: true, forcar: true });
+      } finally {
+        // O `puxarLote` solta a trava no próprio finally; se nem chegou lá, solta aqui.
+        if (!chamouPuxar) {
+          puxandoRef.current = false;
+          setTimeout(() => consumirPendenteRef.current(), 0);
+        }
+      }
+    };
+    filtroFilaRef.current = filtroFilaRef.current.then(rodar, rodar).catch(() => undefined);
+  };
+  trocarFiltroDevolvendoRef.current = trocarFiltroDevolvendo;
 
   /**
    * "Imprimir e reservar" do Filtro Mistos: aplica o filtro escolhido no modal e
@@ -2354,6 +2494,7 @@ export function SeparacaoRunner({
           onListaImpressa={marcarLotePresoLocalmente}
           onImprimindo={(v) => {
             imprimindoRef.current = v;
+            if (!v) consumirPendenteRef.current();
           }}
           onLimparFiltros={() => aplicarFiltros(emptyFilters())}
           rotuloLote={novaLista ? `Nova lista (${novaLista.length})` : undefined}
@@ -2391,6 +2532,7 @@ export function SeparacaoRunner({
           onListaImpressa={marcarLotePresoLocalmente}
           onImprimindo={(v) => {
             imprimindoRef.current = v;
+            if (!v) consumirPendenteRef.current();
           }}
           onApply={(f, extra) => {
             if (extra) {

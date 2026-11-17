@@ -115,3 +115,57 @@ describe("ocultos por motivo", () => {
     expect(motivoOculto(pedido("u", "A - M", HOJE, { unico: false }), { soUnicos: true })).toBe("unicos");
   });
 });
+
+// Quem a troca de filtro pode devolver (16/11).
+import { avisoDevolvidosPorFiltro, pedidosDevolviveisPorFiltro } from "../src/lib/recorteLote";
+
+describe("pedidosDevolviveisPorFiltro", () => {
+  const fNovo = { dateFrom: "2026-11-06", dateTo: "2026-11-06" };
+  const velho = (id: string, extra: Partial<Order> = {}) => pedido(id, "Calça Legging - M", "2026-10-31T15:00:00Z", extra);
+  const novo = pedido("n", "Calça Legging - M", HOJE);
+
+  it("devolve só quem ficou fora do filtro novo", () => {
+    const r = pedidosDevolviveisPorFiltro([velho("a"), novo, velho("b")], fNovo);
+    expect(r.ids).toEqual(["a", "b"]);
+    expect(r.porMotivo.data).toBe(2);
+    expect(r.porMotivo.total).toBe(2);
+  });
+
+  it.each([
+    ["lista impressa", { listaEm: "2026-11-05T10:00:00Z" }],
+    ["entrega em mãos", { entregaEmMaos: true }],
+    ["prioritário", { prioritario: true }],
+    ["já iniciado (conferência aberta)", { iniciadoEm: "2026-11-06T10:00:00Z" }],
+  ] as [string, Partial<Order>][])("não devolve: %s", (_n, extra) => {
+    expect(pedidosDevolviveisPorFiltro([velho("a", extra)], fNovo).ids).toEqual([]);
+  });
+
+  it("não devolve o protegido (mesa, aberto nesta sessão, pedido fixo)", () => {
+    const r = pedidosDevolviveisPorFiltro([velho("a"), velho("b")], fNovo, { protegidos: new Set(["a"]) });
+    expect(r.ids).toEqual(["b"]);
+  });
+
+  it("não devolve o escondido pelo produto em falta do galpão", () => {
+    const f = { ...fNovo, excludeProducts: ["legging"] };
+    const r = pedidosDevolviveisPorFiltro([novo], f, { termosGalpao: ["legging"] });
+    expect(r.ids).toEqual([]);
+  });
+
+  it("filtro de produto e só únicos também devolvem; o que continua dentro nunca", () => {
+    const calca = pedido("c", "Calça Cargo - M", HOJE);
+    const camis = pedido("k", "Camiseta - M", HOJE);
+    const r = pedidosDevolviveisPorFiltro([calca, camis], { excludeProducts: ["Calça"] });
+    expect(r.ids).toEqual(["c"]);
+    expect(r.porMotivo.produto).toBe(1);
+    expect(pedidosDevolviveisPorFiltro([camis], {}).ids).toEqual([]);
+  });
+
+  it("aviso conforme o motivo", () => {
+    expect(avisoDevolvidosPorFiltro(pedidosDevolviveisPorFiltro([velho("a"), velho("b")], fNovo).porMotivo)).toBe(
+      "2 pedidos de outras datas voltaram pra fila.",
+    );
+    expect(avisoDevolvidosPorFiltro(pedidosDevolviveisPorFiltro([velho("a")], fNovo).porMotivo)).toBe(
+      "1 pedido de outra data voltou pra fila.",
+    );
+  });
+});

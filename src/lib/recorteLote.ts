@@ -3,6 +3,13 @@
 // sidebar, e POR QUÊ. O filtro governa o que é PUXADO da fila; pedido de LISTA
 // IMPRESSA (`listaEm`) já está na folha dela e nunca é escondido por filtro —
 // senão 87 pedidos sumiam por causa de um chip de data de ontem (16/11).
+//
+// DEVOLUÇÃO NA TROCA DE FILTRO (16/11): o claim do servidor (`lote()`) devolve
+// a posse fora do recorte (sem `iniciado_em`, lista ou entrega em mãos), mas
+// quando NÃO há claim (mesa presa em lista → `getMeusPedidos`) ou o servidor não
+// enxerga o filtro (só "só únicos"), o client devolve ANTES de puxar
+// (`pedidosDevolviveisPorFiltro`). `devolverLote` não protege `iniciado_em`:
+// o client é a única proteção, por isso o pedido da mesa nunca vai na lista.
 import type { Order, QueueFilters } from "../services/orders";
 import { visivelNoFiltroMistos } from "./mistos";
 
@@ -129,4 +136,68 @@ export function resumoDosOcultos(c: OcultosPorMotivo): string {
   if (c.total === 0) return "";
   const partes = partesDosOcultos(c).map((p) => p.texto).join(" · ");
   return `${c.total} ${c.total === 1 ? "oculto" : "ocultos"}${partes ? `: ${partes}` : ""}`;
+}
+
+// ---------------------------------------------------------------------------
+// Devolução por troca de filtro (16/11, supervisor Matheus)
+// ---------------------------------------------------------------------------
+
+export type DevolviveisPorFiltro = {
+  /** Ids a devolver à fila, na ordem do lote. */
+  ids: string[];
+  /** Quantos de cada motivo (o `galpao` nunca entra). */
+  porMotivo: OcultosPorMotivo;
+};
+
+/**
+ * Quais pedidos do lote a TROCA EXPLÍCITA de filtro devolve à fila: os que
+ * ficaram fora do filtro novo e que a operadora ainda não tocou. Na dúvida,
+ * fica com ela — só é devolvido o que é seguro soltar:
+ *  - lista impressa (`listaEm`): já está na folha, nunca é devolvida por filtro
+ *    (o servidor também recusaria com 409 `lista_impressa`);
+ *  - entrega em mãos, prioritário (na troca com claim é o servidor que decide) e
+ *    pedido fixado/escolhido à mão;
+ *  - pedido já aberto pra conferir (`iniciadoEm` ou `protegidos`: o da mesa,
+ *    os que ela abriu nesta sessão);
+ *  - pedido escondido pela exclusão do GALPÃO: isso não é escolha dela e o
+ *    servidor já o trata à parte.
+ */
+export function pedidosDevolviveisPorFiltro(
+  lote: Order[],
+  f: QueueFilters,
+  opts: { sizeFila?: string; termosGalpao?: string[]; protegidos?: ReadonlySet<string> } = {},
+): DevolviveisPorFiltro {
+  const protegidos = opts.protegidos ?? new Set<string>();
+  const porMotivo: OcultosPorMotivo = { data: 0, galpao: 0, produto: 0, unicos: 0, mistos: 0, total: 0 };
+  const ids: string[] = [];
+  for (const o of lote) {
+    if (o.listaEm || o.entregaEmMaos || o.prioritario || o.iniciadoEm || protegidos.has(o.id)) continue;
+    const m = motivoOculto(o, f, opts.sizeFila ?? "", opts.termosGalpao ?? []);
+    if (!m || m === "galpao") continue;
+    ids.push(o.id);
+    porMotivo[m] += 1;
+    porMotivo.total += 1;
+  }
+  return { ids, porMotivo };
+}
+
+/** "34 pedidos de outras datas voltaram pra fila." (motivo único) ou, misturado, "… fora do filtro …". */
+export function avisoDevolvidosPorFiltro(c: OcultosPorMotivo): string {
+  const n = c.total;
+  if (n === 0) return "";
+  const volt = n === 1 ? "voltou" : "voltaram";
+  const ped = n === 1 ? "pedido" : "pedidos";
+  const unico = ORDEM_MOTIVOS.filter((m) => c[m] > 0);
+  const motivo = unico.length === 1 ? unico[0] : null;
+  const de =
+    motivo === "data"
+      ? n === 1 ? "de outra data" : "de outras datas"
+      : motivo === "produto"
+        ? "pelo filtro de produto"
+        : motivo === "unicos"
+          ? n === 1 ? "que não é único" : "que não são únicos"
+          : motivo === "mistos"
+            ? "pelo Filtro Mistos"
+            : "fora do filtro";
+  return `${n} ${ped} ${de} ${volt} pra fila.`;
 }
