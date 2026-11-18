@@ -39,12 +39,25 @@ import {
 import { gerarMistosPdf } from "../lib/mistosPdf";
 import { printPdfBase64 } from "../lib/printer";
 import { folhaDosReservados, separarFolha, textoCarimbo, textoForaDaFolha, textoReservados, type ReservaMistosResultado } from "../lib/reservaMistos";
+import { QUEUES } from "../lib/filas";
+import { ORDEM_TAMANHOS } from "../lib/tamanhos";
+import {
+  acharGlobal,
+  chaveGlobal,
+  diffGlobal,
+  selDeTermos,
+  tamanhoParaEnvio,
+  temSel,
+  TODOS_TAMANHOS,
+  type SelGlobal,
+} from "../lib/exclusaoGlobalTamanho";
 import {
   adicionarExclusaoGlobal,
+  ehExclusaoNaoPermitida,
+  MSG_SO_QUEM_TIROU_DEVOLVE,
   MSG_SO_SUPERVISAO_EXCLUSAO,
   getExclusoesGlobais,
   removerExclusaoGlobal,
-  termosGlobais,
   type ExclusoesGlobais,
 } from "../services/exclusoesGlobais";
 import { getLabelPrinter } from "../services/printerConfig";
@@ -181,8 +194,10 @@ export function PickingFiltersModal({ filters, queue, lote, abaInicial = "exclus
   const [abaSel, setAba] = useState<Aba>(abaInicial);
   // Exclusão do galpão (servidor). `globais === null` = nexus antigo / ainda carregando.
   const [globais, setGlobais] = useState<ExclusoesGlobais | null>(null);
-  const [globalSel, setGlobalSel] = useState<string[]>([]);
-  const [globalBase, setGlobalBase] = useState<string[]>([]);
+  const [globalSel, setGlobalSel] = useState<SelGlobal[]>([]);
+  const [globalBase, setGlobalBase] = useState<SelGlobal[]>([]);
+  // Seletor de tamanho aberto ao excluir no galpão (só com `aceitaTamanho`).
+  const [escolha, setEscolha] = useState<SelGlobal | null>(null);
   const [modoGlobal, setModoGlobal] = useState<boolean>(() => {
     try {
       return localStorage.getItem(GLOBAL_KEY) !== "0";
@@ -228,7 +243,7 @@ export function PickingFiltersModal({ filters, queue, lote, abaInicial = "exclus
     getExclusoesGlobais()
       .then((g) => {
         if (!alive || !g) return;
-        const termos = termosGlobais(g);
+        const termos = selDeTermos(g.termos);
         setGlobais(g);
         setGlobalSel(termos);
         setGlobalBase(termos);
@@ -293,18 +308,38 @@ export function PickingFiltersModal({ filters, queue, lote, abaInicial = "exclus
   }, [queue, daFila, doLote]);
 
   const comGlobal = globais !== null;
+  const aceitaTamanho = globais?.aceitaTamanho === true;
   // Só a supervisão edita a lista do galpão (`podeEditar === false`): a lista segue visível, sem controles.
   const globalSoLeitura = globais?.podeEditar === false;
   const modoGlobalEfetivo = modoGlobal && !globalSoLeitura;
-  const globalLower = useMemo(() => new Set(globalSel.map((t) => t.toLowerCase())), [globalSel]);
+  /** Item do galpão que esta estação pode tirar. Nexus com tamanho: `podeRemover` por item; antigo: tudo ou nada. */
+  const podeTirar = (x: SelGlobal): boolean => {
+    if (!aceitaTamanho) return !globalSoLeitura;
+    const g = globais ? acharGlobal(globais.termos, x.produto, x.tamanho) : undefined;
+    return g?.podeRemover !== false;
+  };
+  const globalNomes = useMemo(() => {
+    const vistos = new Set<string>();
+    return globalSel.map((x) => x.produto).filter((t) => !vistos.has(t.toLowerCase()) && !!vistos.add(t.toLowerCase()));
+  }, [globalSel]);
+  const globalLower = useMemo(() => new Set(globalNomes.map((t) => t.toLowerCase())), [globalNomes]);
   const selected = useMemo(
     () =>
       aba === "exclusao"
-        ? [...globalSel, ...exclude.filter((t) => !globalLower.has(t.toLowerCase()))]
+        ? [...globalNomes, ...exclude.filter((t) => !globalLower.has(t.toLowerCase()))]
         : include,
-    [aba, globalSel, exclude, include, globalLower],
+    [aba, globalNomes, exclude, include, globalLower],
   );
   const selectedLower = useMemo(() => new Set(selected.map((t) => t.toLowerCase())), [selected]);
+
+  /** A linha (produto + tamanho) está excluída? Na exclusão, exclusão por tamanho só marca o tamanho dela. */
+  const linhaMarcada = (p: QueueProduct): boolean => {
+    const k = p.nome.toLowerCase();
+    if (aba !== "exclusao") return selectedLower.has(k);
+    if (exclude.some((t) => t.toLowerCase() === k)) return true;
+    const tam = (p.tamanho ?? "").toUpperCase();
+    return globalSel.some((x) => x.produto.toLowerCase() === k && (x.tamanho === null || x.tamanho.toUpperCase() === tam));
+  };
 
   const filtered = useMemo(() => {
     if (!products) return [];
@@ -315,7 +350,14 @@ export function PickingFiltersModal({ filters, queue, lote, abaInicial = "exclus
     );
   }, [products, search]);
 
-  const toggle = (nome: string) => {
+  const tamanhoPadraoDaMesa = (): string | null => {
+    // Puros: o tamanho da mesa. Mistos não têm tamanho fixo: todos.
+    if (queue?.mode !== "normal") return null;
+    return (QUEUES as readonly string[]).includes(queue.size) ? queue.size : null;
+  };
+
+  /** `tamanho` undefined = qualquer tamanho do produto (chip de órfão). */
+  const toggle = (nome: string, tamanho?: string | null) => {
     const k = nome.toLowerCase();
     const sem = (l: string[]) => l.filter((t) => t.toLowerCase() !== k);
     const tem = (l: string[]) => l.some((t) => t.toLowerCase() === k);
@@ -323,16 +365,27 @@ export function PickingFiltersModal({ filters, queue, lote, abaInicial = "exclus
       setInclude((prev) => (tem(prev) ? sem(prev) : [...prev, nome]));
       return;
     }
+    const tam = (tamanho ?? "").toUpperCase();
+    const doItem = (x: SelGlobal) =>
+      x.produto.toLowerCase() === k && (tamanho === undefined || x.tamanho === null || x.tamanho.toUpperCase() === tam);
     // Exclusão: desmarcar tira da lista em que o item estiver; marcação nova vai pra do switch.
-    if (tem(globalSel) || tem(exclude)) {
-      // Desmarcar tira das duas (o item pode estar na global e na local); sem permissão, a global fica.
-      if (!globalSoLeitura) setGlobalSel(sem(globalSel));
+    if (globalSel.some(doItem) || tem(exclude)) {
+      // Desmarcar tira das duas (o item pode estar na global e na local); o que a estação não pode tirar do galpão fica.
+      setGlobalSel(globalSel.filter((x) => !doItem(x) || !podeTirar(x)));
       setExclude(sem(exclude));
-    } else if (comGlobal && modoGlobalEfetivo) setGlobalSel([...globalSel, nome]);
-    else setExclude([...exclude, nome]);
+    } else if (comGlobal && modoGlobalEfetivo) {
+      if (aceitaTamanho) setEscolha({ produto: nome, tamanho: tamanhoPadraoDaMesa() });
+      else setGlobalSel([...globalSel, { produto: nome, tamanho: null }]);
+    } else setExclude([...exclude, nome]);
   };
 
-  const nExcluidos = globalSel.length + exclude.filter((t) => !globalLower.has(t.toLowerCase())).length;
+  const confirmarEscolha = () => {
+    if (!escolha) return;
+    if (!temSel(globalSel, escolha.produto, escolha.tamanho)) setGlobalSel([...globalSel, escolha]);
+    setEscolha(null);
+  };
+
+  const nExcluidos = globalNomes.length + exclude.filter((t) => !globalLower.has(t.toLowerCase())).length;
 
   const mudarModoGlobal = () => {
     const v = !modoGlobal;
@@ -349,7 +402,7 @@ export function PickingFiltersModal({ filters, queue, lote, abaInicial = "exclus
     if (aba !== "exclusao" || !comGlobal) return null;
     const k = nome.toLowerCase();
     if (globalLower.has(k)) {
-      const g = globais?.termos.find((t) => t.termo.toLowerCase() === k);
+      const g = globais?.termos.find((t) => (t.produto ?? t.termo).toLowerCase() === k);
       const quando = g?.criadoEm ? fmtQuando(g.criadoEm) : null;
       return {
         chave: "galpao",
@@ -371,9 +424,8 @@ export function PickingFiltersModal({ filters, queue, lote, abaInicial = "exclus
   };
 
   const globalMudou = useMemo(() => {
-    const a = [...globalSel.map((t) => t.toLowerCase())].sort().join("\n");
-    const b = [...globalBase.map((t) => t.toLowerCase())].sort().join("\n");
-    return a !== b;
+    const d = diffGlobal(globalBase, globalSel);
+    return d.entraram.length > 0 || d.sairam.length > 0;
   }, [globalSel, globalBase]);
 
   // Termos marcados que NÃO estão na lista atual (persistidos de outra fila,
@@ -388,10 +440,11 @@ export function PickingFiltersModal({ filters, queue, lote, abaInicial = "exclus
     if (!products || selected.length === 0) return 0;
     const ids = new Set<string>();
     for (const p of products) {
-      if (selectedLower.has(p.nome.toLowerCase())) for (const id of p.orderIds) ids.add(id);
+      if (linhaMarcada(p)) for (const id of p.orderIds) ids.add(id);
     }
     return ids.size;
-  }, [products, selected, selectedLower]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [products, selected, selectedLower, globalSel, exclude, aba]);
 
   // ---- Filtro Mistos ----
   const pedidosMTodos = useMemo(
@@ -405,7 +458,11 @@ export function PickingFiltersModal({ filters, queue, lote, abaInicial = "exclus
   // ou a atual se o switch "Em todas as estações" está desligado) ∪ a local.
   // Sem isso o quadro prometia 58 e o servidor entregava 2 (Victor, 07/11).
   const exclusaoAtiva = useMemo(
-    () => [...(comGlobal ? (modoGlobalEfetivo ? globalSel : globalBase) : []), ...exclude],
+    // Exclusão por tamanho só o servidor aplica; o filtro local por nome só conhece as de todos os tamanhos.
+    () => [
+      ...(comGlobal ? (modoGlobalEfetivo ? globalSel : globalBase) : []).filter((x) => x.tamanho === null).map((x) => x.produto),
+      ...exclude,
+    ],
     [comGlobal, modoGlobalEfetivo, globalSel, globalBase, exclude],
   );
   const pedidosM = useMemo(
@@ -602,18 +659,17 @@ export function PickingFiltersModal({ filters, queue, lote, abaInicial = "exclus
       // Diff contra o que a tela carregou: só o que ESTA estação mudou vai pro
       // servidor, termo a termo — nunca "substitui a lista" (apagaria o que
       // outra estação pôs enquanto o modal estava aberto).
-      const baseK = new Set(globalBase.map((t) => t.toLowerCase()));
-      const selK = new Set(globalSel.map((t) => t.toLowerCase()));
-      const entraram = globalSel.filter((t) => !baseK.has(t.toLowerCase()));
-      const sairam = globalBase.filter((t) => !selK.has(t.toLowerCase()));
+      // A chave é termo + tamanho: "Moletom|P" entrar não toca em "Moletom|todos".
+      const { entraram, sairam } = diffGlobal(globalBase, globalSel);
       try {
         for (const t of entraram) {
-          const r = await adicionarExclusaoGlobal(t);
+          const tam = tamanhoParaEnvio(globais?.aceitaTamanho, t.tamanho);
+          const r = await (tam ? adicionarExclusaoGlobal(t.produto, tam) : adicionarExclusaoGlobal(t.produto));
           if (!r) throw new Error("o servidor ainda não aceita a exclusão do galpão");
           salvas = r;
         }
         for (const t of sairam) {
-          const id = globais?.termos.find((g) => g.termo.toLowerCase() === t.toLowerCase())?.id;
+          const id = globais ? acharGlobal(globais.termos, t.produto, t.tamanho)?.id : undefined;
           if (!id) continue;
           const r = await removerExclusaoGlobal(id);
           if (!r) throw new Error("o servidor ainda não aceita a exclusão do galpão");
@@ -625,14 +681,16 @@ export function PickingFiltersModal({ filters, queue, lote, abaInicial = "exclus
           const g = await getExclusoesGlobais();
           if (g) {
             setGlobais(g);
-            setGlobalBase(termosGlobais(g));
-            setGlobalSel(termosGlobais(g));
+            setGlobalBase(selDeTermos(g.termos));
+            setGlobalSel(selDeTermos(g.termos));
           }
         } catch {
           /* mantém o rascunho */
         }
         setErroSalvar(
-          e instanceof ApiError && e.status === 403
+          ehExclusaoNaoPermitida(e)
+            ? MSG_SO_QUEM_TIROU_DEVOLVE
+            : e instanceof ApiError && e.status === 403
             ? MSG_SO_SUPERVISAO_EXCLUSAO
             : `Não consegui salvar a exclusão do galpão: ${e instanceof Error ? e.message : String(e)}`,
         );
@@ -642,8 +700,8 @@ export function PickingFiltersModal({ filters, queue, lote, abaInicial = "exclus
       if (salvas) {
         // O modal pode seguir aberto (Imprimir e reservar): a base passa a ser o que o servidor tem.
         setGlobais(salvas);
-        setGlobalBase(termosGlobais(salvas));
-        setGlobalSel(termosGlobais(salvas));
+        setGlobalBase(selDeTermos(salvas.termos));
+        setGlobalSel(selDeTermos(salvas.termos));
       }
       setSalvando(false);
     }
@@ -734,6 +792,62 @@ export function PickingFiltersModal({ filters, queue, lote, abaInicial = "exclus
               Em todas as estações
             </button>
             <small style={mistosSmall}>o que você marcar vale pro galpão inteiro</small>
+          </div>
+        )}
+
+        {aba === "exclusao" && escolha && (
+          <div style={escolhaBox} data-testid="escolha-tamanho">
+            <span>
+              Excluir <strong>{escolha.produto}</strong> no galpão:
+            </span>
+            {[null, ...ORDEM_TAMANHOS].map((t) => (
+              <button
+                key={t ?? "todos"}
+                style={escolha.tamanho === t ? tamSelOn : tamSelOff}
+                onClick={() => setEscolha({ ...escolha, tamanho: t })}
+                aria-pressed={escolha.tamanho === t}
+              >
+                {t ?? TODOS_TAMANHOS}
+              </button>
+            ))}
+            <button style={limparBtn} onClick={() => setEscolha(null)}>
+              Cancelar
+            </button>
+            <button style={aplicarMini} onClick={confirmarEscolha}>
+              Excluir
+            </button>
+          </div>
+        )}
+        {aba === "exclusao" && comGlobal && aceitaTamanho && globalSel.length > 0 && (
+          <div style={galpaoLista} data-testid="lista-galpao">
+            {globalSel.map((x) => {
+              const g = globais ? acharGlobal(globais.termos, x.produto, x.tamanho) : undefined;
+              const travado = !podeTirar(x);
+              const quando = g?.criadoEm ? fmtQuando(g.criadoEm) : null;
+              return (
+                <div key={chaveGlobal(x.produto, x.tamanho)} style={galpaoItem}>
+                  <span style={{ flex: 1 }}>{x.produto}</span>
+                  {aceitaTamanho && <span style={tamChip}>{x.tamanho ?? "Todos"}</span>}
+                  <small style={mistosSmall}>
+                    {g ? `${g.criadoPor ?? "galpão"}${quando ? ` · ${quando}` : ""}` : "novo, ainda não salvo"}
+                    {g?.pedidosPresos ? ` · prende ${g.pedidosPresos.total} pedido${g.pedidosPresos.total === 1 ? "" : "s"}` : ""}
+                  </small>
+                  {travado ? (
+                    <small style={mistosSmall} title={MSG_SO_QUEM_TIROU_DEVOLVE} data-testid="item-travado">
+                      🔒 {MSG_SO_QUEM_TIROU_DEVOLVE}
+                    </small>
+                  ) : (
+                    <button
+                      style={limparBtn}
+                      onClick={() => setGlobalSel(globalSel.filter((y) => chaveGlobal(y.produto, y.tamanho) !== chaveGlobal(x.produto, x.tamanho)))}
+                      aria-label={`Tirar ${x.produto} ${x.tamanho ?? "todos os tamanhos"} do galpão`}
+                    >
+                      Tirar
+                    </button>
+                  )}
+                </div>
+              );
+            })}
           </div>
         )}
 
@@ -843,12 +957,12 @@ export function PickingFiltersModal({ filters, queue, lote, abaInicial = "exclus
               );
             })}
           {!emMistos && filtered.map((p) => {
-            const marcado = selectedLower.has(p.nome.toLowerCase());
+            const marcado = linhaMarcada(p);
             return (
               <button
                 key={`${p.nome}|${p.tamanho ?? ""}|${p.ean ?? ""}`}
                 style={marcado ? rowOn : row}
-                onClick={() => toggle(p.nome)}
+                onClick={() => toggle(p.nome, p.tamanho ?? null)}
               >
                 <span style={marcado ? checkOn : checkOff}>{marcado ? "✓" : ""}</span>
                 {p.imagemUrl ? (
@@ -940,7 +1054,7 @@ export function PickingFiltersModal({ filters, queue, lote, abaInicial = "exclus
                 <>
                   <strong style={{ color: "var(--danger-text)" }}>{selected.length}</strong>{" "}
                   marcado{selected.length === 1 ? "" : "s"}
-                  {comGlobal ? ` · ${globalSel.length} no galpão · ${selected.length - globalSel.length} só aqui` : ""} ·{" "}
+                  {comGlobal ? ` · ${globalNomes.length} no galpão · ${selected.length - globalNomes.length} só aqui` : ""} ·{" "}
                   <strong>{pedidosAfetados}</strong> pedido{pedidosAfetados === 1 ? "" : "s"}{" "}
                   ser{pedidosAfetados === 1 ? "á" : "ão"} ocultado{pedidosAfetados === 1 ? "" : "s"}
                 </>
@@ -959,7 +1073,11 @@ export function PickingFiltersModal({ filters, queue, lote, abaInicial = "exclus
             {emMistos ? "Limpar" : "Limpar tudo"}
           </button>
           {aba === "exclusao" && comGlobal && !globalSoLeitura && (
-            <button style={limparBtn} onClick={() => setGlobalSel([])} disabled={globalSel.length === 0}>
+            <button
+              style={limparBtn}
+              onClick={() => setGlobalSel(globalSel.filter((x) => !podeTirar(x)))}
+              disabled={!globalSel.some(podeTirar)}
+            >
               Limpar do galpão
             </button>
           )}
@@ -1487,6 +1605,35 @@ const swTrackOff: CSSProperties = { ...swTrack, background: "var(--border-strong
 const swKnob: CSSProperties = { position: "absolute", top: 2, width: 16, height: 16, borderRadius: "50%" };
 const swKnobOn: CSSProperties = { ...swKnob, right: 2, background: "#fff" };
 const swKnobOff: CSSProperties = { ...swKnob, left: 2, background: "var(--text-muted)" };
+
+const escolhaBox: CSSProperties = {
+  display: "flex",
+  alignItems: "center",
+  flexWrap: "wrap",
+  gap: 8,
+  padding: "8px 12px",
+  border: "1px solid var(--danger-border)",
+  borderRadius: 8,
+  background: "var(--danger-bg)",
+};
+const tamSelOff: CSSProperties = {
+  padding: "4px 10px",
+  borderRadius: 999,
+  border: "1px solid var(--border-strong)",
+  background: "var(--bg-input)",
+  color: "var(--text-secondary)",
+  cursor: "pointer",
+};
+const tamSelOn: CSSProperties = {
+  ...tamSelOff,
+  border: "1px solid var(--danger-border)",
+  background: "var(--danger-text)",
+  color: "#fff",
+  fontWeight: 700,
+};
+const aplicarMini: CSSProperties = { ...tamSelOn, borderRadius: 6 };
+const galpaoLista: CSSProperties = { display: "flex", flexDirection: "column", gap: 4, maxHeight: 140, overflowY: "auto" };
+const galpaoItem: CSSProperties = { display: "flex", alignItems: "center", gap: 8, fontSize: 13 };
 
 const galpaoChip: CSSProperties = {
   fontFamily: "var(--font-mono)",
