@@ -64,6 +64,7 @@ import { agoraDoServidor, resumoDosMeus, tamanhoInicial } from "../lib/pedirRepo
 import { useMeusPedidosReposicao } from "../lib/usePedidosReposicao";
 import { TAMANHOS_REPOSICAO, type TamanhoReposicao } from "../services/reposicaoPedidos";
 import { avisoDevolvidosPorFiltro, contarOcultos, diaDeEmissao, partesDosOcultos, passaNosFiltros, passaNosProdutos, pedidosDevolviveisPorFiltro, resumoDosOcultos, type OcultosPorMotivo } from "../lib/recorteLote";
+import { conhecidosDoLote, mesclarLote, podeSerParcial } from "../lib/loteParcial";
 import { mesclarFiltrosIniciais, type DataDaSelecao } from "../lib/dataDaSelecao";
 import { PickingFiltersModal, emptyFilters, loadFilters, saveFilters, type Aba } from "./PickingFiltersModal";
 import { chaveMisto, ordenarLoteMistos, pedidoMistoDoLote, produtosJaTirados } from "../lib/mistos";
@@ -637,6 +638,8 @@ export function SeparacaoRunner({
   }, []);
   /** Sequência dos `puxarLote`: só a resposta do mais recente é aplicada (evita resposta velha de fundo zerar a mesa). */
   const seqPuxarRef = useRef(0);
+  /** Quando chegou o último lote COMPLETO (0 = nunca): passado o intervalo, o próximo refresh pede tudo de novo. */
+  const ultimoLoteCompletoRef = useRef(0);
   /** A devolução da data escolhida na seleção das filas já rodou nesta mesa. */
   const entradaAjustadaRef = useRef(false);
   const trocarFiltroDevolvendoRef = useRef<() => void>(() => {});
@@ -719,20 +722,39 @@ export function SeparacaoRunner({
         // O servidor completa só a lista em montagem e devolve os ids dela em
         // `novos`; a lista impressa continua presa, igual.
         const presaEmLista = presaNaListaRef.current || loteRef.current.some((o) => !!o.listaEm);
-        const resposta =
-          presaEmLista && !opts?.novaLista
-            ? { ...(await getMeusPedidos()), fila: undefined, novos: undefined }
-            : await claimLote({
-                mode: queue.mode,
-                sizes: queue.sizes,
-                filters: locaisRef.current,
-                canal: queue.canal,
-                ...(opts?.novaLista ? { novaLista: true } : {}),
-                // Teto do lote só nos mistos; nos puros nunca vai.
-                ...(queue.mode === "total" && !semLimiteMistosRef.current && quantidadeMistosRef.current !== null
-                  ? { quantidade: quantidadeMistosRef.current }
-                  : {}),
-              });
+        // Lote em memória que a resposta parcial do nexus pode mesclar. O Runner
+        // é remontado por fila (`key` em Separacao.tsx), então nunca é de outra fila.
+        const loteAntes = loteRef.current;
+        const chamarClaim = (comConhecidos: boolean) =>
+          claimLote({
+            mode: queue.mode,
+            sizes: queue.sizes,
+            filters: locaisRef.current,
+            canal: queue.canal,
+            ...(opts?.novaLista ? { novaLista: true } : {}),
+            // Teto do lote só nos mistos; nos puros nunca vai.
+            ...(queue.mode === "total" && !semLimiteMistosRef.current && quantidadeMistosRef.current !== null
+              ? { quantidade: quantidadeMistosRef.current }
+              : {}),
+            ...(comConhecidos ? { conhecidos: conhecidosDoLote(loteAntes) } : {}),
+          });
+        // Parcial só com lote em memória e dentro da janela desde o último lote completo.
+        const pedirParcial = loteAntes.length > 0 && podeSerParcial(Date.now(), ultimoLoteCompletoRef.current);
+        let resposta: Awaited<ReturnType<typeof claimLote>>;
+        if (presaEmLista && !opts?.novaLista) {
+          resposta = { ...(await getMeusPedidos()), fila: undefined, novos: undefined };
+        } else {
+          resposta = await chamarClaim(pedirParcial);
+          // Resposta parcial que não fecha com o lote em memória: refaz completa, uma vez.
+          const mesclada = mesclarLote(loteAntes, resposta);
+          if (mesclada === null) {
+            resposta = await chamarClaim(false);
+            ultimoLoteCompletoRef.current = Date.now();
+          } else {
+            if (resposta.parcial !== true) ultimoLoteCompletoRef.current = Date.now();
+            resposta = { ...resposta, orders: mesclada };
+          }
+        }
         // Resposta velha (outro `puxarLote` começou depois) ou de fundo que
         // chegou com o complete em andamento: descarta, não mexe na mesa.
         if (!opts?.novaLista && (seq !== seqPuxarRef.current || (fundo && completingRef.current))) return undefined;

@@ -6,6 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ApiError } from "../src/lib/api";
 import type { Order } from "../src/services/orders";
 
+const eventosHandlers = vi.hoisted(() => [] as ((tipo: string) => void)[]);
 const claimLote = vi.fn();
 const getMe = vi.fn();
 const marcarListaImpressa = vi.fn();
@@ -48,7 +49,10 @@ vi.mock("../src/contexts/RfidContext", () => ({
 vi.mock("../src/lib/realtime", () => ({
   subscribeQueueChanged: () => () => {},
   subscribeExclusoesGlobaisChanged: () => () => {},
-  subscribeEventos: () => () => {},
+  subscribeEventos: (_tipos: string[], cb: (tipo: string) => void) => {
+    eventosHandlers.push(cb);
+    return () => {};
+  },
   subscribeEvento: () => () => {},
   subscribePrintJobsChanged: () => () => {},
 }));
@@ -212,4 +216,33 @@ describe("Tirar nova lista (mistos)", () => {
     fireEvent.click(screen.getByText("Todas"));
     expect(screen.getByText("#700002")).toBeTruthy();
   });
+});
+
+describe("Resposta parcial do lote (nexus com `conhecidos`)", () => {
+  beforeEach(() => {
+    localStorage.clear();
+    claimLote.mockReset().mockResolvedValue({ orders: LOTE, fila: { restantes: 10 } });
+    getMe.mockReset().mockResolvedValue({ actorId: "op-1", email: "operadora@berzerk.com.br", permissions: ["separacao:operate"], liberacaoSupervisorAtiva: false });
+  });
+  afterEach(() => cleanup());
+
+  it("manda conhecidos no refresh e mantém lista e pedido da mesa com resposta parcial", async () => {
+    const lote = [1, 2, 3].map((n) => pedido(n, null));
+    claimLote.mockResolvedValue({ orders: lote, fila: { restantes: 5 } });
+    eventosHandlers.length = 0; // handlers de montagens anteriores (desmontadas) ficam obsoletos
+    await montar();
+    expect(claimLote.mock.calls[0][0]).not.toHaveProperty("conhecidos");
+    expect(screen.getAllByText("#700001").length).toBeGreaterThan(0);
+
+    // Push do WS (queue.changed) dispara o refresh de fundo; o nexus responde parcial.
+    claimLote.mockResolvedValue({ orders: [pedido(4, null)], ids: ["ord-1", "ord-2", "ord-3", "ord-4"], parcial: true, fila: { restantes: 4 } });
+    eventosHandlers.forEach((cb) => cb("queue.changed"));
+    await act(async () => { await new Promise((r) => setTimeout(r, 3300)); });
+    const comConhecidos = claimLote.mock.calls.filter((c) => (c[0] as { conhecidos?: unknown }).conhecidos);
+    expect(comConhecidos.length).toBeGreaterThan(0); // mais de um handler de WS pode disparar refresh
+    expect((comConhecidos[0][0] as { conhecidos: { id: string }[] }).conhecidos.map((c) => c.id)).toEqual(["ord-1", "ord-2", "ord-3"]);
+    expect(screen.getAllByText("#700004").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("#700001").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("#700002").length).toBeGreaterThan(0);
+  }, 15000);
 });

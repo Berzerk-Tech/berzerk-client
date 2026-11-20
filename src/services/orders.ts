@@ -477,6 +477,14 @@ export type LoteResponse = {
    * Ausente = nexus anterior; nunca assumir que veio.
    */
   novos?: string[];
+  /**
+   * Resposta PARCIAL (nexus com `conhecidos`): `orders` traz só os pedidos novos
+   * ou que mudaram e `ids` é a lista COMPLETA e ORDENADA do lote. Ausente =
+   * nexus antigo (resposta completa, `orders` é o lote inteiro); nunca assumir
+   * que veio. Quem mescla é `mesclarLote` (`lib/loteParcial.ts`).
+   */
+  ids?: string[];
+  parcial?: boolean;
 };
 
 /**
@@ -518,6 +526,12 @@ export function claimLote(params: {
   quantidade?: number;
   /** Canal da fila (só enviado quando `mercado_livre`). */
   canal?: CanalSeparacao;
+  /**
+   * Pedidos que o app já tem em memória (`id` + `updatedAt`): o nexus responde
+   * PARCIAL, só com o que é novo ou mudou (mais `ids`/`parcial`). Só vai no
+   * body quando não vazio; nexus antigo ignora e responde o lote inteiro.
+   */
+  conhecidos?: { id: string; v: string }[];
 }): Promise<LoteResponse> {
   return comModo(params.mode, (mode) =>
     apiRequest<LoteResponse>("/separacao/lote", {
@@ -533,6 +547,7 @@ export function claimLote(params: {
           : {}),
         ...filtersBody(params.filters),
         ...(params.novaLista ? { novaLista: true } : {}),
+        ...(params.conhecidos?.length ? { conhecidos: params.conhecidos } : {}),
         ...canalBody(params.canal),
       },
     }),

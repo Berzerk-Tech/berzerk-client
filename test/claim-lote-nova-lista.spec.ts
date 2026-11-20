@@ -37,6 +37,17 @@ describe("claimLote novaLista", () => {
     expect(opts?.body).toEqual({ mode: "total", sizes: ["M"], canal: "ecommerce" });
   });
 
+  it("conhecidos só vai no body quando não vazio, e ids/parcial voltam tipados", async () => {
+    resposta = () => Promise.resolve({ orders: [], ids: ["a"], parcial: true, fila: { restantes: 0 } });
+    const r = await claimLote({ mode: "total", sizes: ["M"], conhecidos: [{ id: "a", v: "2026-01-01T00:00:00Z" }] });
+    expect(r.parcial).toBe(true);
+    expect(r.ids).toEqual(["a"]);
+    expect(chamadas[0][1]?.body).toMatchObject({ conhecidos: [{ id: "a", v: "2026-01-01T00:00:00Z" }] });
+    chamadas.length = 0;
+    await claimLote({ mode: "total", sizes: ["M"], conhecidos: [] });
+    expect(chamadas[0][1]?.body).not.toHaveProperty("conhecidos");
+  });
+
   it("com novaLista manda o campo e devolve novos", async () => {
     resposta = () => Promise.resolve({ orders: [], fila: { restantes: 0 }, novos: ["a", "b"] });
     const r = await claimLote({ mode: "total", sizes: ["M"], novaLista: true });
