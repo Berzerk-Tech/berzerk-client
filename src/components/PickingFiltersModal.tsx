@@ -374,15 +374,34 @@ export function PickingFiltersModal({ filters, queue, lote, abaInicial = "exclus
       // Desmarcar tira das duas (o item pode estar na global e na local); o que a estação não pode tirar do galpão fica.
       setGlobalSel(globalSel.filter((x) => !doItem(x) || !podeTirar(x)));
       setExclude(sem(exclude));
+      setEscolha(null);
     } else if (comGlobal && modoGlobalEfetivo) {
-      if (aceitaTamanho) setEscolha({ produto: nome, tamanho: tamanhoPadraoDaMesa() });
-      else setGlobalSel([...globalSel, { produto: nome, tamanho: null }]);
+      // O clique JÁ marca (no tamanho da mesa); a faixa de tamanhos é só ajuste.
+      // Antes o clique só abria a faixa e pedia um "Excluir" a mais: a linha
+      // ficava sem ✓ e a operadora clicava de novo sem parar (Stefhany, 23/11).
+      const novo: SelGlobal = { produto: nome, tamanho: aceitaTamanho ? tamanhoPadraoDaMesa() : null };
+      if (!temSel(globalSel, novo.produto, novo.tamanho)) setGlobalSel([...globalSel, novo]);
+      if (aceitaTamanho) setEscolha(novo);
     } else setExclude([...exclude, nome]);
   };
 
-  const confirmarEscolha = () => {
+  /** A marcação da faixa já existia no servidor quando a tela abriu? (essa a faixa não mexe) */
+  const escolhaJaSalva = (x: SelGlobal) => temSel(globalBase, x.produto, x.tamanho);
+  const semEscolha = (x: SelGlobal) =>
+    escolhaJaSalva(x) ? globalSel : globalSel.filter((y) => chaveGlobal(y.produto, y.tamanho) !== chaveGlobal(x.produto, x.tamanho));
+
+  /** Troca o tamanho da marcação recém-feita (a anterior sai, a nova entra). */
+  const trocarTamanhoDaEscolha = (t: string | null) => {
     if (!escolha) return;
-    if (!temSel(globalSel, escolha.produto, escolha.tamanho)) setGlobalSel([...globalSel, escolha]);
+    const novo: SelGlobal = { ...escolha, tamanho: t };
+    const resto = semEscolha(escolha);
+    setGlobalSel(temSel(resto, novo.produto, novo.tamanho) ? resto : [...resto, novo]);
+    setEscolha(novo);
+  };
+
+  const desfazerEscolha = () => {
+    if (!escolha) return;
+    setGlobalSel(semEscolha(escolha));
     setEscolha(null);
   };
 
@@ -799,24 +818,22 @@ export function PickingFiltersModal({ filters, queue, lote, abaInicial = "exclus
         {aba === "exclusao" && escolha && (
           <div style={escolhaBox} data-testid="escolha-tamanho">
             <span>
-              Excluir <strong>{escolha.produto}</strong> no galpão:
+              <strong>✓ {escolha.produto}</strong> marcada como em falta no galpão. Tamanho:
             </span>
             {[null, ...ORDEM_TAMANHOS].map((t) => (
               <button
                 key={t ?? "todos"}
                 style={escolha.tamanho === t ? tamSelOn : tamSelOff}
-                onClick={() => setEscolha({ ...escolha, tamanho: t })}
+                onClick={() => trocarTamanhoDaEscolha(t)}
                 aria-pressed={escolha.tamanho === t}
               >
                 {t ?? TODOS_TAMANHOS}
               </button>
             ))}
-            <button style={limparBtn} onClick={() => setEscolha(null)}>
-              Cancelar
+            <button style={limparBtn} onClick={desfazerEscolha}>
+              Desfazer
             </button>
-            <button style={aplicarMini} onClick={confirmarEscolha}>
-              Excluir
-            </button>
+            <small style={mistosSmall}>Vale depois de “Aplicar filtros”.</small>
           </div>
         )}
         {aba === "exclusao" && comGlobal && aceitaTamanho && globalSel.length > 0 && (
@@ -840,7 +857,10 @@ export function PickingFiltersModal({ filters, queue, lote, abaInicial = "exclus
                   ) : (
                     <button
                       style={limparBtn}
-                      onClick={() => setGlobalSel(globalSel.filter((y) => chaveGlobal(y.produto, y.tamanho) !== chaveGlobal(x.produto, x.tamanho)))}
+                      onClick={() => {
+                        setGlobalSel(globalSel.filter((y) => chaveGlobal(y.produto, y.tamanho) !== chaveGlobal(x.produto, x.tamanho)));
+                        if (escolha && chaveGlobal(escolha.produto, escolha.tamanho) === chaveGlobal(x.produto, x.tamanho)) setEscolha(null);
+                      }}
                       aria-label={`Tirar ${x.produto} ${x.tamanho ?? "todos os tamanhos"} do galpão`}
                     >
                       Tirar
@@ -1633,7 +1653,6 @@ const tamSelOn: CSSProperties = {
   color: "#fff",
   fontWeight: 700,
 };
-const aplicarMini: CSSProperties = { ...tamSelOn, borderRadius: 6 };
 const galpaoLista: CSSProperties = { display: "flex", flexDirection: "column", gap: 4, maxHeight: 140, overflowY: "auto" };
 const galpaoItem: CSSProperties = { display: "flex", alignItems: "center", gap: 8, fontSize: 13 };
 
