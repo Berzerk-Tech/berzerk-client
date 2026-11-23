@@ -45,6 +45,7 @@ import {
   type QueueProduct,
   type SeparationMode,
 } from "../services/orders";
+import { SeloVariante } from "./SeloVariante";
 
 /** Ordem das seções: as filas reais primeiro (régua única de `lib/tamanhos`), o resto em ordem alfabética. */
 function ordemDe(t: string): number {
@@ -566,7 +567,7 @@ export function PickingGeralModal({
                     <span style={{ ...mistoFoto, display: "grid", placeItems: "center", color: "var(--text-faint)", fontWeight: 700 }}>?</span>
                   )}
                   <div style={mistoMeio}>
-                    <span style={mistoNome}>{l.produto}</span>
+                    <span style={mistoNome}><SeloVariante nome={l.produto} tamanho="pequeno" style={{ marginRight: 6, verticalAlign: "middle" }} />{l.produto}</span>
                     <small style={mistoSub}>
                       em {l.pedidos} {l.pedidos === 1 ? "pedido" : "pedidos"}
                     </small>
@@ -635,7 +636,7 @@ export function PickingGeralModal({
                 {s.produtos.map((p) => (
                   <div key={`${p.nome}-${p.ean ?? ""}`} style={tdRow}>
                     <span style={tdSku}>{p.ean ?? "—"}</span>
-                    <span style={tdNome}>{p.nome}</span>
+                    <span style={tdNome}><SeloVariante nome={p.nome} tamanho="pequeno" style={{ marginRight: 6, verticalAlign: "middle" }} />{p.nome}</span>
                     <span style={tdQtd}>{p.quantidade}</span>
                   </div>
                 ))}

@@ -1,7 +1,7 @@
 import type { OrderItem } from "../services/orders";
 
 /** Tamanhos conhecidos pra extrair do nome quando o item vem sem `tamanho`. */
-const KNOWN_SIZES = new Set([
+export const KNOWN_SIZES = new Set([
   "PP", "P", "M", "G", "GG", "XG", "XXG", "G1", "G2", "G3", "XGG", "U",
 ]);
 
