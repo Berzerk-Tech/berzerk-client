@@ -1,5 +1,5 @@
 // Exclusão do galpão por tamanho: chave termo+tamanho, seletor só com `aceitaTamanho`, item travado.
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ApiError } from "../src/lib/api";
 import { diffGlobal, tamanhoParaEnvio } from "../src/lib/exclusaoGlobalTamanho";
@@ -104,7 +104,8 @@ describe("Filtro Exclusão do galpão por tamanho", () => {
     fireEvent.click(screen.getByText("Camiseta Zeus"));
     const box = await screen.findByTestId("escolha-tamanho");
     expect(box.querySelector('[aria-pressed="true"]')?.textContent).toBe("M");
-    fireEvent.click(screen.getByRole("button", { name: "Excluir" }));
+    // Um clique já marca: sem botão de confirmação.
+    expect(screen.queryByRole("button", { name: "Excluir" })).toBeNull();
     fireEvent.click(screen.getByRole("button", { name: "Aplicar filtros" }));
     await waitFor(() => expect(props.onApply).toHaveBeenCalledTimes(1));
     expect(adicionarExclusaoGlobal).toHaveBeenCalledWith("Camiseta Zeus", "M");
@@ -117,9 +118,32 @@ describe("Filtro Exclusão do galpão por tamanho", () => {
     fireEvent.click(await screen.findByText("Camiseta Zeus"));
     const box = await screen.findByTestId("escolha-tamanho");
     expect(box.querySelector('[aria-pressed="true"]')?.textContent).toBe("Todos os tamanhos");
-    fireEvent.click(screen.getByRole("button", { name: "Excluir" }));
     fireEvent.click(screen.getByRole("button", { name: "Aplicar filtros" }));
     await waitFor(() => expect(adicionarExclusaoGlobal).toHaveBeenCalledWith("Camiseta Zeus"));
+  });
+
+  it("trocar o tamanho na faixa substitui a marcação; Desfazer tira e nada vai pro servidor", async () => {
+    getExclusoesGlobais.mockResolvedValue({ termos: [], atualizadoEm: null, aceitaTamanho: true });
+    const { unmount } = render(<PickingFiltersModal {...props} />);
+    await waitFor(() => expect(screen.getByText("Em todas as estações")).toBeTruthy());
+    fireEvent.click(screen.getByText("Camiseta Zeus"));
+    const box = await screen.findByTestId("escolha-tamanho");
+    fireEvent.click(within(box).getByRole("button", { name: "G" }));
+    fireEvent.click(screen.getByRole("button", { name: "Aplicar filtros" }));
+    await waitFor(() => expect(props.onApply).toHaveBeenCalledTimes(1));
+    expect(adicionarExclusaoGlobal).toHaveBeenCalledTimes(1);
+    expect(adicionarExclusaoGlobal).toHaveBeenCalledWith("Camiseta Zeus", "G");
+    unmount();
+
+    adicionarExclusaoGlobal.mockClear();
+    render(<PickingFiltersModal {...props} />);
+    await waitFor(() => expect(screen.getByText("Em todas as estações")).toBeTruthy());
+    fireEvent.click(screen.getByText("Camiseta Zeus"));
+    fireEvent.click(await screen.findByRole("button", { name: "Desfazer" }));
+    expect(screen.queryByTestId("escolha-tamanho")).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Aplicar filtros" }));
+    await waitFor(() => expect(props.onApply).toHaveBeenCalledTimes(2));
+    expect(adicionarExclusaoGlobal).not.toHaveBeenCalled();
   });
 
   it("API velha (sem aceitaTamanho): sem seletor, marca direto, sem tamanho", async () => {
