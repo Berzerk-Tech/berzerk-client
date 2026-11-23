@@ -11,6 +11,7 @@
 
 import type { LeituraResolvida } from "./orders";
 import { apiRequest, ApiError } from "../lib/api";
+import { mesclarCandidatos } from "../lib/candidatosTag";
 import { getStationId } from "../lib/station";
 import { isExpedicaoSimulacao } from "./expedicaoMode";
 import type { PeriodoUnicos } from "../lib/unicosExpedicao";
@@ -90,7 +91,37 @@ export type EpcMatchResponse = {
   unmatchedEpcs: string[];
   /** EPCs de pedidos JÁ expedidos — avisar na tela. */
   jaExpedidos: JaExpedido[];
+  /**
+   * Peça lida que não está em nenhum pedido: pedidos separados com o mesmo
+   * produto e tamanho onde ela pode passar a valer (troca de tag). Opcional:
+   * Nexus antigo não manda e a mesa segue como sempre.
+   */
+  candidatos?: CandidatoTag[];
+  /** A troca de tag exige PIN de supervisor neste servidor. */
+  trocaTagExigePin?: boolean;
 };
+
+export type CandidatoPedido = {
+  order: ExpedicaoOrder;
+  /** Tag que o pedido tem hoje no lugar desta peça (a que será trocada). */
+  epcAtual: string | null;
+};
+
+export type CandidatoTag = {
+  epc: string;
+  nome: string | null;
+  tamanho: string | null;
+  ean: string | null;
+  sku: string | null;
+  pedidos: CandidatoPedido[];
+  /** Pedidos além dos listados. */
+  maisPedidos: number;
+};
+
+export type TrocaTagMotivo = "status_mudou" | "tag_ja_vinculada" | "tag_atual_mudou" | "produto_diferente";
+
+/** Liberação de supervisor (mesmo molde do `LiberacaoAwbColetado`). */
+export type LiberacaoTrocaTag = { supervisorId: string; pin: string; motivo: string };
 
 // ---------------------------------------------------------------------------
 // Documentos — DANFE em SNAKE_CASE (mesmo shape do posvenda/printDanfe.ts).
@@ -464,6 +495,8 @@ export async function epcMatch(epcs: string[]): Promise<EpcMatchResponse> {
   const lidasByOrder = new Map<string, Set<string>>();
   const unmatched = new Set<string>();
   const jaExpedidos = new Map<string, JaExpedido>();
+  const candidatosPorChunk: Array<CandidatoTag[] | undefined> = [];
+  let trocaTagExigePin = false;
 
   for (const chunk of chunks) {
     const res = await apiRequest<EpcMatchResponse>("/expedicao/epc-match", {
@@ -478,6 +511,8 @@ export async function epcMatch(epcs: string[]): Promise<EpcMatchResponse> {
     }
     for (const e of res.unmatchedEpcs ?? []) unmatched.add(e.toUpperCase());
     for (const j of res.jaExpedidos ?? []) jaExpedidos.set(j.epc.toUpperCase(), j);
+    candidatosPorChunk.push(res.candidatos);
+    if (res.trocaTagExigePin === true) trocaTagExigePin = true;
   }
 
   // Uma tag "unmatched" num chunk pode ter casado noutro — remove da lista final.
@@ -498,11 +533,49 @@ export async function epcMatch(epcs: string[]): Promise<EpcMatchResponse> {
   });
   matches.sort((a, b) => a.order.createdAt.localeCompare(b.order.createdAt));
 
+  // Candidato cuja peça casou com um pedido noutro chunk (ou já foi expedida) não vale.
+  const candidatos = mesclarCandidatos(candidatosPorChunk, new Set([...casadas, ...jaExpedidos.keys()]));
+
   return {
     matches,
     unmatchedEpcs: Array.from(unmatched).filter((t) => !casadas.has(t) && !jaExpedidos.has(t)),
     jaExpedidos: Array.from(jaExpedidos.values()),
+    // Só quando o servidor mandou: sem o campo, a resposta é a de sempre.
+    ...(candidatos.length > 0 ? { candidatos } : {}),
+    ...(trocaTagExigePin ? { trocaTagExigePin: true } : {}),
   };
+}
+
+/**
+ * Usa a peça lida (`epcLido`, fora de qualquer pedido) no pedido escolhido,
+ * trocando a tag que o pedido tinha (`epcAtual`). Devolve o `match` no mesmo
+ * formato do epc-match. Erros: 409 `troca_tag_recusada` (+ `motivo`) e 422
+ * `troca_tag_exige_pin` (reenviar com `liberacao`) — ver `lib/candidatosTag.ts`.
+ */
+export async function trocarTagDoPedido(
+  orderId: string,
+  body: { epcLido: string; epcAtual: string | null; liberacao?: LiberacaoTrocaTag },
+): Promise<{ match: EpcMatch }> {
+  if (isExpedicaoSimulacao()) {
+    const order = mockOrderFor([body.epcLido]);
+    return {
+      match: {
+        order: { ...order, id: orderId },
+        tagsLidas: [body.epcLido.toUpperCase()],
+        tagsFaltantes: [],
+        tagsMatched: 1,
+        tagsTotal: 1,
+      },
+    };
+  }
+  return apiRequest<{ match: EpcMatch }>(`/expedicao/orders/${orderId}/trocar-tag`, {
+    method: "POST",
+    body: {
+      epcLido: body.epcLido.toUpperCase(),
+      epcAtual: body.epcAtual ? body.epcAtual.toUpperCase() : null,
+      ...(body.liberacao ? { liberacao: body.liberacao } : {}),
+    },
+  });
 }
 
 // ---------------------------------------------------------------------------
