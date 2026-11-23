@@ -14,6 +14,8 @@ export type CapaTamanhoDoc = {
   comBump: number;
   /** Quem imprime (e-mail/nome do operador). */
   operador?: string | null;
+  /** Grade toda: "GRADE TODA · tamanho i de n" abaixo do cabeçalho. */
+  gradeToda?: { indice: number; total: number };
   /** Injetável nos testes. */
   quando?: Date;
 };
@@ -45,6 +47,7 @@ export function gerarCapaTamanhoPdf(doc: CapaTamanhoDoc): string {
   };
 
   bloco("CAPA · TAMANHO INTEIRO", 8, "bold", 1);
+  if (doc.gradeToda) bloco(`GRADE TODA · tamanho ${doc.gradeToda.indice} de ${doc.gradeToda.total}`, 7, "normal", 1);
   bloco(doc.estampa, 18, "bold", 2);
   if (doc.cor) bloco(doc.cor, 14, "normal", 1);
 

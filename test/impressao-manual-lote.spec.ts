@@ -1,19 +1,24 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import {
+  adicionarReserva,
   aplicarPausa,
   comBump,
   continuar,
+  feitosDoTamanho,
   indiceAtual,
   lerLoteEmCurso,
   limparLoteEmCurso,
   novoLote,
+  novoLoteVazio,
   paraLiberar,
   pedirPausa,
   proximoPedido,
   registrarConcluido,
   registrarErroConclusao,
   registrarPulo,
+  registrarTamanhoVazio,
   resumo,
+  resumoPorTamanho,
   salvarLoteEmCurso,
   terminou,
 } from "../src/lib/impressaoManualLote";
@@ -98,5 +103,62 @@ describe("impressão manual: máquina de estados do lote", () => {
     expect(lerLoteEmCurso()).toEqual({ loteId: "L9", orderIds: ["o2"] });
     limparLoteEmCurso();
     expect(lerLoteEmCurso()).toBeNull();
+  });
+});
+
+describe("impressão manual: grade toda (união de reservas)", () => {
+  beforeEach(() => localStorage.clear());
+
+  it("junta reservas por tamanho, cada pedido guarda a sua reserva e o seu tamanho", () => {
+    let l = novoLoteVazio();
+    l = adicionarReserva(l, "LP", "P", [ped(1), ped(2)]);
+    l = adicionarReserva(l, "LM", "M", [ped(3)]);
+    l = adicionarReserva(l, "LM2", "M", [ped(4)]);
+    expect(l.loteId).toBe("LP");
+    expect(l.loteIds).toEqual(["LP", "LM", "LM2"]);
+    expect(l.pedidos.map((p) => [p.orderId, p.loteId, p.tamanho])).toEqual([
+      ["o1", "LP", "P"],
+      ["o2", "LP", "P"],
+      ["o3", "LM", "M"],
+      ["o4", "LM2", "M"],
+    ]);
+    expect(proximoPedido(l)?.orderId).toBe("o1");
+    expect(feitosDoTamanho(registrarConcluido(l, "o1"), "P")).toBe(1);
+  });
+
+  it("resumo por tamanho em ordem canônica, com vazios registrados", () => {
+    let l = novoLoteVazio();
+    l = adicionarReserva(l, "LG", "G", [ped(5), ped(6)]);
+    l = adicionarReserva(l, "LP", "P", [ped(1), ped(2), ped(3)]);
+    l = registrarTamanhoVazio(registrarTamanhoVazio(l, "M"), "M");
+    l = registrarConcluido(l, "o1");
+    l = registrarPulo(l, l.pedidos[3], "sem etiqueta");
+    l = registrarErroConclusao(l, l.pedidos[4], { codigo: "x", mensagem: "falhou" });
+    l = registrarConcluido(l, "o5");
+    expect(l.tamanhosVazios).toEqual(["M"]);
+    expect(resumoPorTamanho(l)).toEqual([
+      { tamanho: "P", total: 3, expedidos: 1, pulados: 1, erros: 1, naoImpressos: 0 },
+      { tamanho: "G", total: 2, expedidos: 1, pulados: 0, erros: 0, naoImpressos: 1 },
+    ]);
+  });
+
+  it("persiste a união pendente (reservado e não expedido) com todos os ids de reserva", () => {
+    let l = novoLoteVazio();
+    l = adicionarReserva(l, "LP", "P", [ped(1), ped(2)]);
+    l = adicionarReserva(l, "LM", "M", [ped(3)]);
+    l = registrarConcluido(l, "o1");
+    salvarLoteEmCurso(l);
+    expect(lerLoteEmCurso()).toEqual({ loteId: "LP", loteIds: ["LP", "LM"], orderIds: ["o2", "o3"] });
+  });
+
+  it("lê lote salvo no formato antigo (sem loteIds) sem perder nada", () => {
+    localStorage.setItem("berzerk_unicos_impressao_manual_lote_v1", JSON.stringify({ loteId: "L9", orderIds: ["a", "b", 3] }));
+    expect(lerLoteEmCurso()).toEqual({ loteId: "L9", orderIds: ["a", "b"] });
+  });
+
+  it("novoLote antigo continua valendo (um tamanho só)", () => {
+    const l = novoLote("L1", [ped(1)], "G");
+    expect(l.loteIds).toEqual(["L1"]);
+    expect(l.pedidos[0]).toMatchObject({ loteId: "L1", tamanho: "G" });
   });
 });
