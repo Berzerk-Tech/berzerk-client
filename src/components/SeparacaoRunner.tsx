@@ -70,6 +70,8 @@ import { PickingFiltersModal, emptyFilters, loadFilters, saveFilters, type Aba }
 import { chaveMisto, ordenarLoteMistos, pedidoMistoDoLote, produtosJaTirados } from "../lib/mistos";
 import { motivoDaFalhaDoLote, prepararFiltroDaNovaLista, reservarComRollback, type ReservaMistosResultado } from "../lib/reservaMistos";
 import { ApiError } from "../lib/api";
+import { SeloVariante } from "./SeloVariante";
+import { varianteNumerada } from "../lib/varianteNumerada";
 import {
   avisoAwbColetado,
   claimLote,
@@ -3475,7 +3477,10 @@ function cardBodyHeight(cardW: number): number {
  */
 const MAX_COLS = 4;
 
-function useFitCards(nMain: number, nOff: number) {
+/** Altura a mais da faixa de tamanho quando o selo de variante (46px) entra nela. */
+const EXTRA_FAIXA_SELO = 28;
+
+function useFitCards(nMain: number, nOff: number, extraFaixa = 0) {
   const ref = useRef<HTMLDivElement | null>(null);
   const [fit, setFit] = useState<{ cardW: number; cols: number; fits: boolean }>({
     cardW: 310,
@@ -3512,7 +3517,7 @@ function useFitCards(nMain: number, nOff: number) {
       const wByWidth = Math.min((W - (cols - 1) * GAP) / cols, MAXW);
       const rowH = (H - SLACK - BANNER - (rowsFit - 1) * GAP) / rowsFit;
       // Foto QUADRADA (nunca cortar a estampa): altura do card = faixa + corpo + largura.
-      const wByHeight = rowH - cardBodyHeight(wByWidth);
+      const wByHeight = rowH - cardBodyHeight(wByWidth) - extraFaixa;
       const w = Math.floor(Math.min(wByWidth, wByHeight));
       const next = {
         cardW: Math.max(MINW, w),
@@ -3527,7 +3532,7 @@ function useFitCards(nMain: number, nOff: number) {
     const ro = new ResizeObserver(compute);
     ro.observe(el);
     return () => ro.disconnect();
-  }, [nMain, nOff]);
+  }, [nMain, nOff, extraFaixa]);
 
   return { ref, ...fit };
 }
@@ -3591,7 +3596,11 @@ function OrderView({
   const mainItems = ordenarPorTamanho(isMixed ? order.items.filter((it) => !differs(it)) : order.items, tamanhoDoCard);
   const offSizeItems = ordenarPorTamanho(isMixed ? order.items.filter(differs) : [], tamanhoDoCard);
 
-  const { ref: fitRef, cardW, cols } = useFitCards(mainItems.length, offSizeItems.length);
+  const { ref: fitRef, cardW, cols } = useFitCards(
+    mainItems.length,
+    offSizeItems.length,
+    order.items.some((it) => varianteNumerada(it.nome) != null) ? EXTRA_FAIXA_SELO : 0,
+  );
   const grid: CSSProperties = {
     ...cardsGrid,
     gridTemplateColumns: `repeat(auto-fit, ${cardW}px)`,
@@ -3756,6 +3765,7 @@ function ItemCard({
   const dense = cardW < 200;
   const ok = count >= item.quantidade && !excedido;
   const size = tamanhoDoCard(item);
+  const temVariante = varianteNumerada(item.nome) != null;
   return (
     <div
       style={{
@@ -3766,9 +3776,16 @@ function ItemCard({
         ...(excedido ? cardExcedido : null),
       }}
     >
-      {size && (
-        <div style={{ ...(destaque ? sizeHeaderMistos : offSize ? sizeHeaderOff : sizeHeader), ...(dense ? sizeHeaderDense : null) }}>
-          {offSize ? `↔ ${size}` : size}
+      {(size || temVariante) && (
+        <div
+          style={{
+            ...(destaque ? sizeHeaderMistos : offSize ? sizeHeaderOff : sizeHeader),
+            ...(dense ? sizeHeaderDense : null),
+            ...(temVariante ? sizeHeaderComSelo : null),
+          }}
+        >
+          <SeloVariante nome={item.nome} tamanho="grande" />
+          {size && <span>{offSize ? `↔ ${size}` : size}</span>}
         </div>
       )}
       <div style={cardImageWrap}>
@@ -3786,6 +3803,7 @@ function ItemCard({
         <span style={item.quantidade > 1 ? qtyBadgeMulti : qtyBadge}>x{item.quantidade}</span>
         <span style={checkRing(ok)}>{ok ? "✓" : excedido ? "!" : ""}</span>
         {destaque && <span style={faixaMistos}>FILTRO MISTOS</span>}
+        <SeloVariante nome={item.nome} tamanho="medio" style={destaque ? { ...seloNaFoto, bottom: 32 } : seloNaFoto} />
       </div>
       <div style={dense ? cardBodyDense : cardBody}>
         <span style={dense ? cardNameDense : cardName}>
@@ -4863,6 +4881,15 @@ const sizeHeader: CSSProperties = {
   lineHeight: "22px",
   textAlign: "center",
 };
+/** Faixa de tamanho com o selo de variante ao lado do tamanho. */
+const sizeHeaderComSelo: CSSProperties = {
+  display: "flex",
+  alignItems: "center",
+  justifyContent: "center",
+  gap: 10,
+};
+/** Selo médio no canto da foto (a foto é o que a separadora usa pra reconhecer a peça). */
+const seloNaFoto: CSSProperties = { position: "absolute", left: 6, bottom: 6, zIndex: 2 };
 const sizeHeaderDense: CSSProperties = { fontSize: 15, lineHeight: "18px", padding: "2px 6px" };
 
 /** Alerta de grade mista: banner de verdade, não texto solto — o operador

@@ -11,6 +11,7 @@
 import { useEffect, useMemo, useState, type CSSProperties } from "react";
 import { miniatura } from "../lib/imagens";
 import { criarRuptura, type Order, type OrderItem } from "../services/orders";
+import { SeloVariante } from "./SeloVariante";
 
 type Props = {
   order: Order;
@@ -135,7 +136,7 @@ export function ItensFaltantesModal({ order, lidos, onMarcado, onClose }: Props)
                   <div style={{ ...thumb, ...thumbVazia }} />
                 )}
                 <div style={infoWrap}>
-                  <span style={nomeItem}>{it.nome ?? it.ean ?? "item sem nome"}</span>
+                  <span style={nomeItem}><SeloVariante nome={it.nome} tamanho="pequeno" style={{ marginRight: 6, verticalAlign: "middle" }} />{it.nome ?? it.ean ?? "item sem nome"}</span>
                   <span style={metaItem}>
                     {it.tamanho ? `${it.tamanho} · ` : ""}
                     {it.quantidade} no pedido · {lido} lido{lido === 1 ? "" : "s"}

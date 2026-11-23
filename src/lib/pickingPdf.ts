@@ -15,6 +15,8 @@
 // do que em 13 dígitos. O SKU continua na tela do Picking Geral.
 
 import { jsPDF } from "jspdf";
+import { varianteNumerada } from "./varianteNumerada";
+import { desenharSeloPdf, RESPIRO_SELO_PDF } from "./seloVariantePdf";
 
 export type PickingLinha = {
   produto: string;
@@ -57,10 +59,14 @@ const PT_PRODUTO = 11;
 const PT_QTD = 14;
 
 /** Alturas de linha (mm) — nome de uma linha e nome quebrado em duas. */
+/** Lado (mm) do selo preto da variante numerada, à esquerda do nome. */
+const LADO_SELO = 4.6;
 const ALTURA_1 = 6.8;
 const ALTURA_2 = 11.4;
 
 type Linha = {
+  /** Número da variante ("Ganley 2" → 2), ou null. */
+  variante: number | null;
   /** Nome já quebrado (no máximo 2 linhas, a 2ª com reticências se sobrar). */
   nome: string[];
   qtd: number;
@@ -100,8 +106,9 @@ function paginar(pdf: jsPDF, doc: PickingDoc): Pagina[] {
 
   for (const secao of doc.secoes) {
     const linhas = secao.linhas.map<Linha>((l) => {
-      const nome = quebrarNome(pdf, l.produto);
-      return { nome, qtd: l.qtd, altura: nome.length > 1 ? ALTURA_2 : ALTURA_1 };
+      const variante = varianteNumerada(l.produto);
+      const nome = quebrarNome(pdf, l.produto, variante != null ? LARGURA_NOME - LADO_SELO - RESPIRO_SELO_PDF : LARGURA_NOME);
+      return { variante, nome, qtd: l.qtd, altura: nome.length > 1 ? ALTURA_2 : ALTURA_1 };
     });
 
     const daSecao: Linha[][] = [];
@@ -187,8 +194,10 @@ function desenhar(
   y += 5;
 
   for (const linha of pagina.linhas) {
-    texto(linha.nome[0] ?? "", M, y, PT_PRODUTO);
-    if (linha.nome[1]) texto(linha.nome[1], M, y + 4.6, PT_PRODUTO);
+    const xNome = linha.variante != null ? M + LADO_SELO + RESPIRO_SELO_PDF : M;
+    if (linha.variante != null) desenharSeloPdf(pdf, linha.variante, M, y - LADO_SELO + 0.8, LADO_SELO);
+    texto(linha.nome[0] ?? "", xNome, y, PT_PRODUTO);
+    if (linha.nome[1]) texto(linha.nome[1], xNome, y + 4.6, PT_PRODUTO);
     direita(String(linha.qtd), y + (linha.nome.length > 1 ? 2.3 : 0), PT_QTD, "bold");
     y += linha.altura;
     pdf.setDrawColor(205);
@@ -210,13 +219,13 @@ function alturaDoCabecalho(temObservacao: boolean): number {
 }
 
 /** Quebra o nome em no máximo 2 linhas na largura da coluna PRODUTO. */
-function quebrarNome(pdf: jsPDF, nome: string): string[] {
+function quebrarNome(pdf: jsPDF, nome: string, largura = LARGURA_NOME): string[] {
   pdf.setFont("helvetica", "normal");
   pdf.setFontSize(PT_PRODUTO);
-  const partes = pdf.splitTextToSize(nome || "—", LARGURA_NOME) as string[];
+  const partes = pdf.splitTextToSize(nome || "—", largura) as string[];
   if (partes.length <= 2) return partes.length > 0 ? partes : ["—"];
   let segunda = partes.slice(1).join(" ");
-  while (segunda.length > 1 && pdf.getTextWidth(`${segunda}…`) > LARGURA_NOME) {
+  while (segunda.length > 1 && pdf.getTextWidth(`${segunda}…`) > largura) {
     segunda = segunda.slice(0, -1);
   }
   return [partes[0] ?? "", `${segunda}…`];

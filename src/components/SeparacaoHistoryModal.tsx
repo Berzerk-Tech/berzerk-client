@@ -8,6 +8,7 @@ import { useEffect, useState, type CSSProperties } from "react";
 import { ApiError } from "../lib/api";
 import { miniatura } from "../lib/imagens";
 import { getHistory, type HistoryResponse } from "../services/orders";
+import { SeloVariante } from "./SeloVariante";
 
 const PAGE_SIZE = 20;
 
@@ -241,6 +242,7 @@ export function SeparacaoHistoryModal({ onClose }: { onClose: () => void }) {
                       )}
                       <div style={itemInfo}>
                         <span style={itemNome}>
+                          <SeloVariante nome={it.nome} tamanho="pequeno" style={{ marginRight: 6, verticalAlign: "middle" }} />
                           {it.nome ?? it.sku ?? "Item"}
                           {it.quantidade > 1 ? `  ×${it.quantidade}` : ""}
                         </span>

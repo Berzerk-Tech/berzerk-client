@@ -39,6 +39,7 @@ import {
   type MeusPedidosReposicao,
   type TamanhoReposicao,
 } from "../services/reposicaoPedidos";
+import { SeloVariante } from "./SeloVariante";
 
 export const INTERVALO_CATALOGO_MS = 20_000;
 const DESFAZER_MS = 8_000;
@@ -482,7 +483,7 @@ function ListaMeus({
       <div key={p.id} style={estilo}>
         {foto ? <img src={foto} alt="" style={thumb} loading="lazy" /> : <div style={{ ...thumb, ...thumbVazia }} />}
         <div style={cardInfo}>
-          <span style={cardNome}>{p.nome}</span>
+          <span style={cardNome}><SeloVariante nome={p.nome} tamanho="medio" style={{ marginRight: 6, verticalAlign: "middle" }} />{p.nome}</span>
           <span style={cardMeta}>
             {p.qtd} pç · {p.tamanho}
           </span>

@@ -9,6 +9,7 @@ import {
   type OrderBumpConfig,
   type OrderBumpProduto,
 } from "../../services/expedicao";
+import { SeloVariante } from "../SeloVariante";
 
 const MAX_PRODUTOS = 10;
 
@@ -102,7 +103,7 @@ export function OrderBumpModal({
             {achados.map((p) => (
               <button key={p.id} type="button" style={resultado} onClick={() => adicionar(p)}>
                 <Mini url={p.imagemUrl} />
-                <span>{p.nome}</span>
+                <span><SeloVariante nome={p.nome} tamanho="pequeno" style={{ marginRight: 6, verticalAlign: "middle" }} />{p.nome}</span>
               </button>
             ))}
           </div>
@@ -112,6 +113,7 @@ export function OrderBumpModal({
           {selecionados.map((p) => (
             <span key={p.id} style={chip}>
               <Mini url={p.imagemUrl} />
+              <SeloVariante nome={p.nome} tamanho="pequeno" />
               {p.nome}
               <button
                 type="button"

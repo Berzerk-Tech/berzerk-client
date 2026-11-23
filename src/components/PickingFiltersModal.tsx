@@ -71,6 +71,7 @@ import {
   type QueueProduct,
   type SeparationMode,
 } from "../services/orders";
+import { SeloVariante } from "./SeloVariante";
 
 // v1 era uma chave ÚNICA e GLOBAL — o filtro escolhido na fila "Único M"
 // continuava ativo ao entrar em "Misto XG", recortando o lote sem a
@@ -826,7 +827,7 @@ export function PickingFiltersModal({ filters, queue, lote, abaInicial = "exclus
               const quando = g?.criadoEm ? fmtQuando(g.criadoEm) : null;
               return (
                 <div key={chaveGlobal(x.produto, x.tamanho)} style={galpaoItem}>
-                  <span style={{ flex: 1 }}>{x.produto}</span>
+                  <span style={{ flex: 1 }}><SeloVariante nome={x.produto} tamanho="pequeno" style={{ marginRight: 6, verticalAlign: "middle" }} />{x.produto}</span>
                   {aceitaTamanho && <span style={tamChip}>{x.tamanho ?? "Todos"}</span>}
                   <small style={mistosSmall}>
                     {g ? `${g.criadoPor ?? "galpão"}${quando ? ` · ${quando}` : ""}` : "novo, ainda não salvo"}
@@ -925,7 +926,7 @@ export function PickingFiltersModal({ filters, queue, lote, abaInicial = "exclus
                     </span>
                   )}
                   <span style={mistosNomeCol}>
-                    <span style={mistosNome}>{x.produto}</span>
+                    <span style={mistosNome}><SeloVariante nome={x.produto} tamanho="pequeno" style={{ marginRight: 6, verticalAlign: "middle" }} />{x.produto}</span>
                     {listaN !== undefined && <small style={mistosSmall}>na Lista {listaN}</small>}
                     {marcado && meusReservadosSet.has(chaveMisto(x.produto)) && (
                       <small style={mistosSmall}>reservado pra você</small>
@@ -977,6 +978,7 @@ export function PickingFiltersModal({ filters, queue, lote, abaInicial = "exclus
                   <span style={thumbEmpty}>?</span>
                 )}
                 <span style={{ ...rowNome, ...(marcado && aba === "exclusao" ? rowNomeOff : null) }}>
+                  <SeloVariante nome={p.nome} tamanho="medio" style={{ marginRight: 6, verticalAlign: "middle" }} />
                   {p.nome}
                 </span>
                 {p.tamanho && <span style={tamChip}>{p.tamanho}</span>}

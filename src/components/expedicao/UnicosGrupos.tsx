@@ -4,6 +4,7 @@
 // Poll de 30 s (o servidor guarda 30 s de cache).
 
 import { useCallback, useEffect, useMemo, useState, type CSSProperties } from "react";
+import { SeloVariante } from "../SeloVariante";
 import { miniaturaLeve } from "../../lib/imagens";
 import {
   agruparPorEstampa,
@@ -407,7 +408,10 @@ function CardEstampa({ e, onClick, onChip, semBump, marcada }: { e: EstampaAgrup
       <div style={fotoBox}>{img ? <img src={img} alt="" style={foto} loading="lazy" /> : <span style={semFoto}>sem foto</span>}</div>
       <div style={cardCorpo}>
         <TiposLinha e={e} />
-        <div style={estampaTxt}>{e.estampa}</div>
+        <div style={estampaLinha}>
+          <SeloVariante nome={e.estampa} tamanho="medio" />
+          <span style={estampaTxt}>{e.estampa}</span>
+        </div>
         {e.cor && <div style={corTxt}>{e.cor}</div>}
         <div style={contagem}>
           {totalCard} pedido{totalCard === 1 ? "" : "s"}
@@ -477,7 +481,10 @@ function EscolherTamanho({
         <div style={fotoGrande}>{img ? <img src={img} alt="" style={foto} /> : <span style={semFoto}>sem foto</span>}</div>
         <div style={cardCorpo}>
           <TiposLinha e={e} />
-          <div style={estampaGrande}>{e.estampa}</div>
+          <div style={estampaLinha}>
+            <SeloVariante nome={e.estampa} tamanho="grande" />
+            <span style={estampaGrande}>{e.estampa}</span>
+          </div>
           {e.cor && <div style={corGrande}>{e.cor}</div>}
           <div style={contagem}>
             {e.pedidos} pedido{e.pedidos === 1 ? "" : "s"}
@@ -539,6 +546,7 @@ const fotoBox: CSSProperties = { width: 84, height: 112, flexShrink: 0, borderRa
 const foto: CSSProperties = { width: "100%", height: "100%", objectFit: "cover" };
 const semFoto: CSSProperties = { fontSize: 11, color: "var(--text-muted)" };
 const cardCorpo: CSSProperties = { display: "flex", flexDirection: "column", gap: 4, minWidth: 0 };
+const estampaLinha: CSSProperties = { display: "flex", alignItems: "center", gap: 8, minWidth: 0 };
 const estampaTxt: CSSProperties = { fontSize: 19, fontWeight: 800, lineHeight: 1.15, overflowWrap: "anywhere" };
 const corTxt: CSSProperties = { fontSize: 15, fontWeight: 700, color: "var(--text-secondary)", overflowWrap: "anywhere" };
 const corGrande: CSSProperties = { fontSize: 22, fontWeight: 700, color: "var(--text-secondary)", overflowWrap: "anywhere" };
