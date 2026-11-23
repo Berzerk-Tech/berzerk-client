@@ -90,6 +90,7 @@ import {
 import { conferir, type Conferencia } from "../lib/conferenciaExpedicao";
 import { fmtDataHora } from "../lib/datas";
 import { ApiError } from "../lib/api";
+import { SeloVariante } from "./SeloVariante";
 import {
   CODIGOS_DEFINITIVOS,
   classificarCodigoShip,
@@ -2209,9 +2210,13 @@ function ItemCard({ item, count }: { item: OrderItem; count: number }) {
         )}
         {item.quantidade > 1 && <span style={qtyBadge}>x{item.quantidade}</span>}
         <span style={{ ...checkRing, ...(ok ? checkRingOn : null) }}>{ok ? "✓" : ""}</span>
+        <SeloVariante nome={item.nome} tamanho="medio" style={{ position: "absolute", left: 6, bottom: 6 }} />
       </div>
       <div style={itemBody}>
-        <span style={itemName}>{item.nome ?? item.sku ?? item.ean ?? "Item"}</span>
+        <div style={itemNameRow}>
+          <SeloVariante nome={item.nome} tamanho="grande" />
+          <span style={itemName}>{item.nome ?? item.sku ?? item.ean ?? "Item"}</span>
+        </div>
         <div style={itemFooter}>
           <span style={itemEan}>{item.ean ?? item.sku ?? "—"}</span>
           <span style={{ ...itemCount, color: ok ? "var(--success-text)" : "var(--text)" }}>
@@ -2901,6 +2906,7 @@ const checkRing: CSSProperties = { position: "absolute", top: 6, right: 6, width
 const checkRingOn: CSSProperties = { background: "var(--success-dot)", borderColor: "var(--success-dot)" };
 const itemBody: CSSProperties = { display: "flex", flexDirection: "column", gap: 6, padding: "8px 10px" };
 const itemName: CSSProperties = { fontSize: 12, fontWeight: 600, color: "var(--text)", lineHeight: 1.25, display: "-webkit-box", WebkitLineClamp: 2, WebkitBoxOrient: "vertical", overflow: "hidden" };
+const itemNameRow: CSSProperties = { display: "flex", alignItems: "center", gap: 8, minWidth: 0 };
 const itemFooter: CSSProperties = { display: "flex", alignItems: "center", justifyContent: "space-between", gap: 6 };
 const itemEan: CSSProperties = { fontFamily: "var(--font-mono)", fontSize: 10, color: "var(--text-muted)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" };
 const itemCount: CSSProperties = { fontFamily: "var(--font-mono)", fontSize: 13, fontWeight: 700, flexShrink: 0 };

@@ -9,6 +9,8 @@
 
 import { jsPDF } from "jspdf";
 import { tamanhosDaLinha, type PickingMisto } from "./mistos";
+import { varianteNumerada } from "./varianteNumerada";
+import { desenharSeloPdf, RESPIRO_SELO_PDF } from "./seloVariantePdf";
 
 export type MistosDoc = {
   /** Tamanho da fila ("M"). */
@@ -35,6 +37,8 @@ const LADO_QUADRADO = 5;
 const LARGURA_NOME = LARGURA_UTIL - LADO_QUADRADO - 2 - LARGURA_TOTAL - 2;
 /** mm por linha de nome (14pt ≈ 4.9 mm + folga). */
 const LINHA_NOME = 5.6;
+/** Lado (mm) do selo preto da variante numerada, à esquerda do nome. */
+const LADO_SELO = 6;
 const ALTURA_CAIXA = 10;
 const PAD_PRODUTO = 2.2;
 /** Folga do rodapé "TOTAL Z peças" na última página. */
@@ -44,18 +48,23 @@ const fmt = (n: number) => Number(n || 0).toLocaleString("pt-BR");
 
 type Bloco = { linha: PickingMisto; nome: string[]; altura: number };
 
+/** Largura do nome, descontando o selo de variante quando o produto tem. */
+function larguraDoNome(produto: string): number {
+  return varianteNumerada(produto) != null ? LARGURA_NOME - LADO_SELO - RESPIRO_SELO_PDF : LARGURA_NOME;
+}
+
 function alturaDoCabecalho(consulta: boolean, reimpressao = false): number {
   // título (M+6) + linha + resumo (6) + consulta (4) + reimpressão (4)
   return M + 6 + 3 + 6 + (consulta ? 4 : 0) + (reimpressao ? 4 : 0) + 1;
 }
 
-function quebrarNome(pdf: jsPDF, nome: string): string[] {
+function quebrarNome(pdf: jsPDF, nome: string, largura = LARGURA_NOME): string[] {
   pdf.setFont("helvetica", "bold");
   pdf.setFontSize(PT_NOME);
-  const partes = pdf.splitTextToSize(nome || "—", LARGURA_NOME) as string[];
+  const partes = pdf.splitTextToSize(nome || "—", largura) as string[];
   if (partes.length <= 2) return partes.length > 0 ? partes : ["—"];
   let segunda = partes.slice(1).join(" ");
-  while (segunda.length > 1 && pdf.getTextWidth(`${segunda}…`) > LARGURA_NOME) segunda = segunda.slice(0, -1);
+  while (segunda.length > 1 && pdf.getTextWidth(`${segunda}…`) > largura) segunda = segunda.slice(0, -1);
   return [partes[0] ?? "", `${segunda}…`];
 }
 
@@ -67,7 +76,7 @@ function paginar(pdf: jsPDF, doc: MistosDoc): Bloco[][] {
   let atual: Bloco[] = [];
   let y = topo;
   for (const linha of doc.linhas) {
-    const nome = quebrarNome(pdf, linha.produto);
+    const nome = quebrarNome(pdf, linha.produto, larguraDoNome(linha.produto));
     const altura = PAD_PRODUTO + nome.length * LINHA_NOME + 1.5 + ALTURA_CAIXA + PAD_PRODUTO;
     if (atual.length > 0 && y + altura > limite) {
       paginas.push(atual);
@@ -131,7 +140,10 @@ export function gerarMistosPdf(doc: MistosDoc): string {
       pdf.setLineWidth(0.7);
       pdf.setLineDashPattern([], 0);
       pdf.rect(M, y + 0.6, LADO_QUADRADO, LADO_QUADRADO, "S");
-      b.nome.forEach((n, k) => texto(n, M + LADO_QUADRADO + 2, y + 4 + k * LINHA_NOME, PT_NOME, "bold"));
+      const variante = varianteNumerada(b.linha.produto);
+      const xNome = M + LADO_QUADRADO + 2 + (variante != null ? LADO_SELO + RESPIRO_SELO_PDF : 0);
+      if (variante != null) desenharSeloPdf(pdf, variante, M + LADO_QUADRADO + 2, y + 0.6, LADO_SELO);
+      b.nome.forEach((n, k) => texto(n, xNome, y + 4 + k * LINHA_NOME, PT_NOME, "bold"));
       texto(fmt(b.linha.total), W - M, y + 5.5, PT_TOTAL, "bold", "right");
       y = topoBloco + b.nome.length * LINHA_NOME + 1.5;
 

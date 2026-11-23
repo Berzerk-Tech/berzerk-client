@@ -4,6 +4,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import { miniaturaLeve } from "../../lib/imagens";
+import { SeloVariante } from "../SeloVariante";
 import { filtrarPorPeriodo, PERIODO_VAZIO, periodoVazio, rotuloPeriodo, type PeriodoUnicos, rotuloGrupo, rotuloTipo, selecaoAposRecarga, tipoBaseDoProduto, type GrupoEscolhido } from "../../lib/unicosExpedicao";
 import { getUnicosPedidos, type UnicoPedido } from "../../services/expedicao";
 
@@ -120,7 +121,10 @@ export function UnicosFila({
   return (
     <div style={wrap}>
       <div style={cabecalho}>
-        <div style={titulo}>{tituloGrupo}</div>
+        <div style={tituloComSelo}>
+          <SeloVariante nome={grupo.estampa} tamanho="grande" />
+          <span style={{ minWidth: 0 }}>{tituloGrupo}</span>
+        </div>
         {!periodoVazio(periodo) && <div style={sub}>📅 {rotuloPeriodo(periodo)}</div>}
         <div style={sub}>
           {pedidos ? `${pedidos.length} pedido${pedidos.length === 1 ? "" : "s"} na fila${comBump > 0 ? ` · ${comBump} com bump` : ""}` : "Carregando…"}
@@ -185,6 +189,7 @@ export function UnicosFila({
 const wrap: CSSProperties = { display: "flex", flexDirection: "column", gap: 8, flex: 1, minHeight: 0 };
 const cabecalho: CSSProperties = { display: "flex", flexDirection: "column", gap: 6, padding: "10px 12px", flexShrink: 0, background: "var(--bg-card)", border: "1px solid var(--border)", borderRadius: 14 };
 const titulo: CSSProperties = { fontSize: 26, fontWeight: 900, lineHeight: 1.05, letterSpacing: 0.5 };
+const tituloComSelo: CSSProperties = { ...titulo, display: "flex", alignItems: "center", gap: 10 };
 const sub: CSSProperties = { fontSize: 14, color: "var(--text-secondary)", fontWeight: 700 };
 const botoes: CSSProperties = { display: "flex", gap: 8 };
 const trocarBtn: CSSProperties = { flex: 1, padding: "10px 12px", background: "var(--bg-input)", border: "1px solid var(--border-strong)", borderRadius: 10, color: "var(--text)", fontWeight: 800, fontSize: 15, cursor: "pointer" };
