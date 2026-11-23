@@ -10,23 +10,33 @@ import { gerarCapaBumpPdf, gerarCapaTamanhoPdf, gerarEtiquetaSimuladaPdf } from 
 import { baixarArquivoPdf, montarPdfPilha, type FolhaResolvida } from "../../lib/montarPdfPilha";
 import { capasDeBumpPorPedido, nomeArquivoPilha, sequenciaDaPilha } from "../../lib/pilhaManual";
 import {
+  adicionarReserva,
   aplicarPausa,
   comBump,
   continuar,
   encerrar,
+  feitosDoTamanho,
   limparLoteEmCurso,
   novoLote,
+  novoLoteVazio,
   paraLiberar,
   pedirPausa,
   proximoPedido,
   registrarConcluido,
   registrarErroConclusao,
   registrarPulo,
+  registrarSobraNaFila,
+  registrarTamanhoVazio,
   resumo,
+  resumoPorTamanho,
   salvarLoteEmCurso,
   terminou,
   type LoteManual,
 } from "../../lib/impressaoManualLote";
+import { gravarConclusao } from "../../lib/impressaoManualHistorico";
+import { planoDaGrade, rotuloDaGrade, totalDaGrade, type GradeTamanho } from "../../lib/impressaoManualGrade";
+import type { ItemReimpressao } from "../../lib/reimprimirManual";
+import { ReimprimirLista } from "./ReimprimirLista";
 import { etiquetaEcommerceDoPedido, imprimirDocumentoDoPedido } from "../../lib/reimpressao";
 import { printEtiquetaUnica } from "../../lib/printer";
 import { rotuloDia, type GrupoEscolhido, type PeriodoUnicos } from "../../lib/unicosExpedicao";
@@ -66,6 +76,7 @@ type Fase = "lista" | "reservando" | "baixando" | "confirmarPdf" | "imprimindo" 
 
 export function ImpressaoManualDialog({
   grupo,
+  grade,
   periodo,
   totalNaFila,
   podeImprimir = true,
@@ -74,7 +85,10 @@ export function ImpressaoManualDialog({
   onFechar,
   onAtualizar,
 }: {
+  /** Em modo grade, `grupo.tamanho` é ignorado (só estampa e cor valem). */
   grupo: GrupoEscolhido;
+  /** Grade toda: os tamanhos do card (e quantos pedidos cada um). Sem isso, é o tamanho único de `grupo`. */
+  grade?: GradeTamanho[];
   periodo?: PeriodoUnicos | null;
   totalNaFila: number;
   /** Flag da impressão manual (`me.unicosImpressaoManual`); sem ela o diálogo só lista e devolve. */
@@ -99,6 +113,14 @@ export function ImpressaoManualDialog({
   const [selecionados, setSelecionados] = useState<Set<string>>(new Set());
   const [devolvendo, setDevolvendo] = useState(false);
   const [info, setInfo] = useState<string | null>(null);
+  // Grade toda: plano (ordem canônica), fila de tamanhos ainda sem reserva e o tamanho em curso.
+  const modoGrade = grade !== undefined;
+  const plano = useMemo(() => planoDaGrade(grade ?? []), [grade]);
+  const totalGrade = totalDaGrade(plano);
+  const [tamanhoAtual, setTamanhoAtual] = useState<{ tamanho: string; esperado: number; indice: number } | null>(null);
+  const filaRef = useRef<GradeTamanho[]>([]);
+  const correnteRef = useRef<{ tamanho: string; esperado: number; parcial: boolean; restantes: number } | null>(null);
+  const rotuloTam = modoGrade ? "grade toda" : grupo.tamanho;
 
   const loteRef = useRef<LoteManual | null>(null);
   const rodandoRef = useRef(false);
@@ -107,6 +129,8 @@ export function ImpressaoManualDialog({
   const [progressoPdf, setProgressoPdf] = useState<{ i: number; n: number } | null>(null);
   const [arquivoPdf, setArquivoPdf] = useState<{ nome: string; bytes: Uint8Array; caminho: string | null } | null>(null);
   const fecharRef = useRef(false);
+  // "Pausar" mora num ref: o loop guarda cópias do lote durante awaits e gravaria por cima do `pausaPedida`.
+  const pausaRef = useRef(false);
   const periodoDe = periodo?.de ?? null;
   const periodoAte = periodo?.ate ?? null;
   const impressora = getLabelPrinter() || NOME_PADRAO;
@@ -117,13 +141,24 @@ export function ImpressaoManualDialog({
     getMe()
       .then((m) => vivo && setOperador(m.email))
       .catch(() => {});
-    getUnicosPedidos(grupo.estampa, grupo.tamanho, grupo.cor, { de: periodoDe, ate: periodoAte })
-      .then((p) => vivo && setPedidos(p))
-      .catch(() => vivo && setErro("Não consegui carregar os pedidos da fila."));
+    // Grade toda não lista pedido a pedido: mostra os tamanhos e as contagens do card.
+    if (!modoGrade) {
+      getUnicosPedidos(grupo.estampa, grupo.tamanho, grupo.cor, { de: periodoDe, ate: periodoAte })
+        .then((p) => vivo && setPedidos(p))
+        .catch(() => vivo && setErro("Não consegui carregar os pedidos da fila."));
+    }
     return () => {
       vivo = false;
     };
-  }, [grupo.estampa, grupo.tamanho, grupo.cor, periodoDe, periodoAte]);
+  }, [grupo.estampa, grupo.tamanho, grupo.cor, periodoDe, periodoAte, modoGrade]);
+
+  // Tela fechada/desmontada: o loop não reserva, imprime nem conclui mais nada.
+  useEffect(
+    () => () => {
+      fecharRef.current = true;
+    },
+    [],
+  );
 
   const atualizar = (l: LoteManual) => {
     loteRef.current = l;
@@ -148,6 +183,81 @@ export function ImpressaoManualDialog({
     onAtualizar();
   }, [onAtualizar]);
 
+  const chamarReservar = (tamanho: string) =>
+    reservarImpressaoManual({ estampa: grupo.estampa, tamanho, cor: grupo.cor ?? "", periodo: { de: periodoDe, ate: periodoAte }, semOrderBump });
+
+  /** Capa do tamanho (mesmo layout de sempre; na grade ganha "GRADE TODA · tamanho i de n"). Lança se a impressão falhar. */
+  const imprimirCapa = async (tamanho: string, pedidosN: number, comBumpN: number, gradeToda?: { indice: number; total: number }) => {
+    if (isExpedicaoSimulacao()) {
+      await sleep(500);
+      return;
+    }
+    const capa = gerarCapaTamanhoPdf({ estampa: grupo.estampa, cor: grupo.cor, tamanho, pedidos: pedidosN, comBump: comBumpN, operador, ...(gradeToda ? { gradeToda } : {}) });
+    const out = await printEtiquetaUnica(capa, "pdf", { jobName: `CAPA ${nomeGrupo} ${tamanho}`, printer: getLabelPrinter() });
+    if (!out.ok) throw new Error(out.message ?? "impressão falhou");
+  };
+
+  /**
+   * Grade toda: reserva a próxima rodada (mais uma do mesmo tamanho se o servidor devolveu `parcial`; senão o
+   * próximo tamanho da fila), junta ao lote e, no tamanho novo, imprime a capa (`semCapa` no modo PDF).
+   * `mais` = há o que imprimir; `fim` = nada mais a reservar (ou abortou); `parar` = erro, lote pausado.
+   */
+  const avancarGrade = async (semCapa: boolean): Promise<"mais" | "fim" | "parar"> => {
+    let l = loteRef.current;
+    if (!l || fecharRef.current) return "fim";
+    const cur = correnteRef.current;
+    const continuaTamanho = !!cur && cur.parcial && cur.restantes > 0;
+    const alvo = continuaTamanho ? { tamanho: cur.tamanho, pedidos: cur.esperado } : filaRef.current[0];
+    if (!alvo) return "fim";
+    let r: ImpressaoManualReserva;
+    try {
+      r = await chamarReservar(alvo.tamanho);
+    } catch (e) {
+      if (codigoDoErro(e) === IMPRESSAO_MANUAL_ERR.NAO_LIBERADA) {
+        setAviso("Impressão manual não liberada para o seu cadastro.");
+        filaRef.current = [];
+        correnteRef.current = null;
+        atualizar(encerrar(l));
+        return "fim";
+      }
+      const msg = `Não consegui reservar o tamanho ${alvo.tamanho}: ${mensagemDoErro(e)}. Toque em Continuar para tentar de novo.`;
+      setAviso(msg);
+      atualizar({ ...l, pausado: true, interrompido: msg });
+      return "parar";
+    }
+    if (!continuaTamanho) filaRef.current = filaRef.current.slice(1);
+    if (r.pedidos.length === 0) {
+      // Rodada vazia, sem abortar a grade. Com `restantesNaFila` > 0 o servidor não entregou (ocupado): vira
+      // "ficaram na fila"; sem sobra, na 1ª rodada é "alguém pegou antes" e na extra não há mais nada.
+      const sobra = r.restantesNaFila > 0;
+      if (continuaTamanho) correnteRef.current = { ...cur, parcial: false };
+      else correnteRef.current = null;
+      if (sobra) atualizar(registrarSobraNaFila(loteRef.current ?? l, alvo.tamanho, r.restantesNaFila));
+      else if (!continuaTamanho) atualizar(registrarTamanhoVazio(loteRef.current ?? l, alvo.tamanho));
+      return "mais";
+    }
+    l = loteRef.current ?? l;
+    l = adicionarReserva(l, r.loteId, alvo.tamanho, r.pedidos);
+    const esperado = continuaTamanho ? cur.esperado : r.pedidos.length + (r.parcial ? r.restantesNaFila : 0);
+    correnteRef.current = { tamanho: alvo.tamanho, esperado, parcial: r.parcial, restantes: r.restantesNaFila };
+    atualizar(l);
+    const indice = plano.findIndex((t) => t.tamanho === alvo.tamanho) + 1;
+    setTamanhoAtual({ tamanho: alvo.tamanho, esperado, indice });
+    if (!continuaTamanho && !semCapa) {
+      try {
+        await imprimirCapa(alvo.tamanho, esperado, r.pedidos.filter((x) => x.comBump).length, { indice, total: plano.length });
+      } catch (e) {
+        // Sem capa não há como identificar a pilha: devolve tudo à fila (o que já saiu fica como está).
+        setAviso(`Falha ao imprimir a capa do tamanho ${alvo.tamanho}: ${mensagemDoErro(e)}. Os pedidos ainda não impressos voltam à fila.`);
+        filaRef.current = [];
+        correnteRef.current = null;
+        atualizar(encerrar(l));
+        return "fim";
+      }
+    }
+    return "mais";
+  };
+
   const rodar = useCallback(async () => {
     if (rodandoRef.current) return;
     rodandoRef.current = true;
@@ -160,6 +270,7 @@ export function ImpressaoManualDialog({
           atualizar(encerrar(l));
           break;
         }
+        if (pausaRef.current && !l.pausaPedida) l = pedirPausa(l);
         l = aplicarPausa(l);
         if (l.pausado) {
           atualizar(l);
@@ -167,6 +278,13 @@ export function ImpressaoManualDialog({
         }
         const p = proximoPedido(l);
         if (!p) {
+          if (modoGrade && !modoPdfRef.current && !l.encerrado && !l.interrompido) {
+            // Acabou o que estava reservado: reserva a próxima rodada/tamanho (só agora, pra não prender pedidos à toa).
+            const prox = await avancarGrade(false);
+            if (prox === "mais") continue;
+            if (prox === "parar") return;
+            l = loteRef.current ?? l;
+          }
           if (terminou(l)) atualizar(encerrar(l));
           else atualizar(l);
           break;
@@ -174,19 +292,25 @@ export function ImpressaoManualDialog({
         setSaindo(p);
         // Capa do bloco de order bump antes da 1ª etiqueta do bloco: sem ela, no papel não dá pra saber onde
         // começam. Falhar aqui não segura o lote; `capasBumpRef` evita reimprimir ao continuar depois de pausa.
-        const capaBump = modoPdfRef.current ? undefined : capasDeBumpPorPedido(l.pedidos).get(p.orderId);
+        const tamanhoDoPedido = p.tamanho ?? grupo.tamanho;
+        // Por tamanho: um bloco de bump nunca atravessa a fronteira entre dois tamanhos da grade.
+        const capaBump = modoPdfRef.current ? undefined : capasDeBumpPorPedido(l.pedidos.filter((x) => (x.tamanho ?? grupo.tamanho) === tamanhoDoPedido)).get(p.orderId);
         if (capaBump && !capasBumpRef.current.has(p.orderId)) {
           capasBumpRef.current.add(p.orderId);
           if (!sim) {
             try {
-              const folha = gerarCapaBumpPdf({ produtoNome: capaBump.produtoNome, tamanho: capaBump.tamanho, pedidos: capaBump.pedidos, numeros: capaBump.numeros, estampa: grupo.estampa, tamanhoGrupo: grupo.tamanho });
-              await printEtiquetaUnica(folha, "pdf", { jobName: `ORDER BUMP ${capaBump.tamanho ?? ""} ${grupo.tamanho}`, printer: getLabelPrinter() });
+              const folha = gerarCapaBumpPdf({ produtoNome: capaBump.produtoNome, tamanho: capaBump.tamanho, pedidos: capaBump.pedidos, numeros: capaBump.numeros, estampa: grupo.estampa, tamanhoGrupo: tamanhoDoPedido });
+              await printEtiquetaUnica(folha, "pdf", { jobName: `ORDER BUMP ${capaBump.tamanho ?? ""} ${tamanhoDoPedido}`, printer: getLabelPrinter() });
             } catch {
               /* segue sem a capa do bloco */
             }
           } else {
             await sleep(300);
           }
+        }
+        if (fecharRef.current) {
+          atualizar(encerrar(loteRef.current ?? l));
+          break;
         }
         let imprimiu = false;
         try {
@@ -210,7 +334,7 @@ export function ImpressaoManualDialog({
             // Falha de rede ou 5xx: a etiqueta já saiu, então insiste (o servidor é idempotente e retoma de onde parou).
             for (let tentativa = 0; ; tentativa += 1) {
               try {
-                await concluirImpressaoManual({ orderId: p.orderId, loteId: l.loteId });
+                await concluirImpressaoManual({ orderId: p.orderId, loteId: p.loteId ?? l.loteId });
                 break;
               } catch (e) {
                 const transitorio = !(e instanceof ApiError) || e.status >= 500;
@@ -219,6 +343,10 @@ export function ImpressaoManualDialog({
               }
             }
             l = registrarConcluido(l, p.orderId);
+            gravarConclusao(
+              { loteId: l.loteId, estampa: grupo.estampa, cor: grupo.cor ?? null },
+              { orderId: p.orderId, numero: p.numero, cliente: p.cliente, tracking: p.tracking, comBump: p.comBump, bump: p.bump ?? null, tamanho: tamanhoDoPedido },
+            );
           } catch (e) {
             l = registrarErroConclusao(l, p, {
               status: e instanceof ApiError ? e.status : undefined,
@@ -239,7 +367,7 @@ export function ImpressaoManualDialog({
     } finally {
       rodandoRef.current = false;
     }
-  }, [finalizar, grupo.estampa, grupo.tamanho]);
+  }, [finalizar, grupo.estampa, grupo.tamanho, grupo.cor, modoGrade]);
 
   const reservar = async (): Promise<ImpressaoManualReserva | null> => {
     setErro(null);
@@ -248,7 +376,7 @@ export function ImpressaoManualDialog({
     fecharRef.current = false;
     let r: ImpressaoManualReserva;
     try {
-      r = await reservarImpressaoManual({ estampa: grupo.estampa, tamanho: grupo.tamanho, cor: grupo.cor ?? "", periodo: { de: periodoDe, ate: periodoAte }, semOrderBump });
+      r = await chamarReservar(grupo.tamanho);
     } catch (e) {
       const cod = codigoDoErro(e);
       setErro(cod === IMPRESSAO_MANUAL_ERR.NAO_LIBERADA ? "Impressão manual não liberada para o seu cadastro." : `Não consegui reservar os pedidos: ${mensagemDoErro(e)}`);
@@ -267,27 +395,15 @@ export function ImpressaoManualDialog({
 
   const iniciar = async () => {
     modoPdfRef.current = false;
+    pausaRef.current = false;
     const r = await reservar();
     if (!r) return;
-    const l0 = novoLote(r.loteId, r.pedidos);
+    const l0 = novoLote(r.loteId, r.pedidos, grupo.tamanho);
     atualizar(l0);
     setFase("imprimindo");
     setSaindo(null);
     try {
-      if (!isExpedicaoSimulacao()) {
-        const capa = gerarCapaTamanhoPdf({
-          estampa: grupo.estampa,
-          cor: grupo.cor,
-          tamanho: grupo.tamanho,
-          pedidos: r.pedidos.length,
-          comBump: comBump(l0),
-          operador,
-        });
-        const out = await printEtiquetaUnica(capa, "pdf", { jobName: `CAPA ${nomeGrupo} ${grupo.tamanho}`, printer: getLabelPrinter() });
-        if (!out.ok) throw new Error(out.message ?? "impressão falhou");
-      } else {
-        await sleep(500);
-      }
+      await imprimirCapa(grupo.tamanho, r.pedidos.length, comBump(l0));
     } catch (e) {
       // Sem capa não há como identificar a pilha: devolve tudo à fila.
       setAviso(`Falha ao imprimir a capa: ${mensagemDoErro(e)}. Nenhum pedido foi expedido.`);
@@ -302,10 +418,14 @@ export function ImpressaoManualDialog({
   // do app e confirma. Pedido sem etiqueta/falha na busca fica fora do PDF (pulado, será liberado).
   const baixarPdf = async () => {
     modoPdfRef.current = true;
-    const r = await reservar();
-    if (!r) return;
-    let l = novoLote(r.loteId, r.pedidos);
-    atualizar(l);
+    let l: LoteManual;
+    {
+      const r0 = await reservar();
+      if (!r0) return;
+      l = novoLote(r0.loteId, r0.pedidos, grupo.tamanho);
+      atualizar(l);
+    }
+    const r = { pedidos: l.pedidos };
     setFase("baixando");
     setProgressoPdf({ i: 0, n: r.pedidos.length });
     try {
@@ -337,14 +457,23 @@ export function ImpressaoManualDialog({
       atualizar(l);
       const incluidos = r.pedidos.filter((p) => etiquetas.has(p.orderId));
       if (incluidos.length === 0) throw new Error("nenhum pedido com etiqueta disponível");
-      const folhas: FolhaResolvida[] = sequenciaDaPilha(incluidos).map((f): FolhaResolvida => {
-        if (f.tipo === "capa") {
-          return { tipo: "pdf", base64: gerarCapaTamanhoPdf({ estampa: grupo.estampa, cor: grupo.cor, tamanho: grupo.tamanho, pedidos: incluidos.length, comBump: incluidos.filter((x) => x.comBump).length, operador }) };
-        }
-        if (f.tipo === "capaBump") {
-          return { tipo: "pdf", base64: gerarCapaBumpPdf({ produtoNome: f.produtoNome, tamanho: f.tamanho, pedidos: f.pedidos, numeros: f.numeros, estampa: grupo.estampa, tamanhoGrupo: grupo.tamanho }) };
-        }
-        return etiquetas.get(f.pedido.orderId)!;
+      // Uma "pilha" por tamanho (capa do tamanho + etiquetas), na ordem em que foram reservados (canônica).
+      const tamanhosDoPdf: string[] = [];
+      for (const x of incluidos) {
+        const t = x.tamanho ?? grupo.tamanho;
+        if (!tamanhosDoPdf.includes(t)) tamanhosDoPdf.push(t);
+      }
+      const folhas: FolhaResolvida[] = tamanhosDoPdf.flatMap((tam) => {
+        const doTamanho = incluidos.filter((x) => (x.tamanho ?? grupo.tamanho) === tam);
+        return sequenciaDaPilha(doTamanho).map((f): FolhaResolvida => {
+          if (f.tipo === "capa") {
+            return { tipo: "pdf", base64: gerarCapaTamanhoPdf({ estampa: grupo.estampa, cor: grupo.cor, tamanho: tam, pedidos: doTamanho.length, comBump: doTamanho.filter((x) => x.comBump).length, operador }) };
+          }
+          if (f.tipo === "capaBump") {
+            return { tipo: "pdf", base64: gerarCapaBumpPdf({ produtoNome: f.produtoNome, tamanho: f.tamanho, pedidos: f.pedidos, numeros: f.numeros, estampa: grupo.estampa, tamanhoGrupo: tam }) };
+          }
+          return etiquetas.get(f.pedido.orderId)!;
+        });
       });
       const bytes = await montarPdfPilha(folhas);
       const nome = nomeArquivoPilha(grupo.estampa, grupo.tamanho);
@@ -356,6 +485,23 @@ export function ImpressaoManualDialog({
       atualizar(encerrar(l));
       await finalizar();
     }
+  };
+
+  // Grade toda, impressão direta: nada é reservado de antemão; `rodar` reserva tamanho a tamanho.
+  const iniciarGrade = () => {
+    modoPdfRef.current = false;
+    pausaRef.current = false;
+    setErro(null);
+    setAviso(null);
+    fecharRef.current = false;
+    filaRef.current = plano.slice();
+    correnteRef.current = null;
+    capasBumpRef.current = new Set();
+    setTamanhoAtual(null);
+    atualizar(novoLoteVazio());
+    setFase("imprimindo");
+    setSaindo(null);
+    void rodar();
   };
 
   const confirmarPdf = () => {
@@ -370,10 +516,12 @@ export function ImpressaoManualDialog({
   };
 
   const pausar = () => {
+    pausaRef.current = true;
     if (loteRef.current) atualizar(pedirPausa(loteRef.current));
   };
   const retomar = () => {
     if (!loteRef.current) return;
+    pausaRef.current = false;
     setAviso(null);
     atualizar(continuar(loteRef.current));
     void rodar();
@@ -392,6 +540,11 @@ export function ImpressaoManualDialog({
     // Em curso: o loop vê `fecharRef` depois da etiqueta atual e finaliza.
   };
 
+  const itensReimpressao: ItemReimpressao[] = lote
+    ? lote.pedidos
+        .filter((p) => lote.concluidos.includes(p.orderId))
+        .map((p) => ({ orderId: p.orderId, numero: p.numero, cliente: p.cliente, tracking: p.tracking, comBump: p.comBump, bump: p.bump ?? null, tamanho: p.tamanho ?? grupo.tamanho, estampa: grupo.estampa }))
+    : [];
   const proximasRodadas = reserva ? reserva.parcial || reserva.restantesNaFila > 0 : false;
   const res = lote ? resumo(lote) : null;
   const bloqueado = fase === "imprimindo" || fase === "reservando" || fase === "baixando" || fase === "confirmarPdf";
@@ -410,7 +563,7 @@ export function ImpressaoManualDialog({
   const itens = useMemo(() => pedidos ?? [], [pedidos]);
   const idsComBump = useMemo(() => itens.filter((p) => p.orderBump).map((p) => p.id), [itens]);
   // O que a impressão manual vai pegar: com "Sem order bump", só os sem bump.
-  const aImprimir = pedidos === null ? totalNaFila : semOrderBump ? itens.length - idsComBump.length : itens.length;
+  const aImprimir = modoGrade ? totalGrade : pedidos === null ? totalNaFila : semOrderBump ? itens.length - idsComBump.length : itens.length;
   const todosMarcados = itens.length > 0 && itens.every((p) => selecionados.has(p.id));
 
   const alternar = (id: string) =>
@@ -448,28 +601,39 @@ export function ImpressaoManualDialog({
         {(fase === "lista" || fase === "reservando") && (
           <>
             <div style={titulo}>
-              {nomeGrupo} · {grupo.tamanho} — {itens.length || totalNaFila} pedidos na fila
+              {nomeGrupo} · {rotuloTam} — {modoGrade ? totalGrade : itens.length || totalNaFila} pedidos na fila
             </div>
             {podeImprimir && (
             <div style={blocoImprimir}>
               <div style={blocoTopo}>
-                <b>Imprimir o tamanho inteiro</b>
+                <b>{modoGrade ? "Imprimir a grade toda" : "Imprimir o tamanho inteiro"}</b>
                 <span style={badge}>liberado pro seu cadastro</span>
               </div>
+              {modoGrade && (
+                <div style={grandeGrade} aria-label="Tamanhos da grade">
+                  {rotuloDaGrade(plano)}
+                </div>
+              )}
               <div style={texto}>
-                {semOrderBump
+                {modoGrade
+                  ? `Imprime um tamanho por vez, na ordem da grade: a capa do tamanho e uma etiqueta J&T por pedido. Os pedidos de cada tamanho só são reservados quando chega a vez dele.${semOrderBump ? ' "Sem order bump" ligado: os pedidos com bump ficam na fila.' : ""} Os pedidos ficam separados e expedidos sem bipar.`
+                  : semOrderBump
                   ? `Gera a capa e uma etiqueta J&T por pedido, na ordem da fila. "Sem order bump" ligado: os ${idsComBump.length} pedido(s) com bump ficam na fila. Os pedidos ficam separados e expedidos sem bipar.`
                   : "Gera a capa e uma etiqueta J&T por pedido, na ordem da fila (pedidos com order bump no fim, cada bloco depois da sua capa). Os pedidos ficam separados e expedidos sem bipar."}
               </div>
-              <button type="button" style={botaoPrimario} onClick={() => void iniciar()} disabled={fase === "reservando" || devolvendo || aImprimir === 0}>
-                {fase === "reservando" ? "Reservando…" : `Imprimir ${aImprimir} etiquetas + capa`}
+              <button type="button" style={botaoPrimario} onClick={() => (modoGrade ? iniciarGrade() : void iniciar())} disabled={fase === "reservando" || devolvendo || aImprimir === 0}>
+                {fase === "reservando" ? "Reservando…" : modoGrade ? `Imprimir grade toda (${aImprimir} etiquetas + ${plano.length} capas)` : `Imprimir ${aImprimir} etiquetas + capa`}
               </button>
-              <button type="button" style={botaoSecundario} onClick={() => void baixarPdf()} disabled={fase === "reservando" || devolvendo || aImprimir === 0}>
-                {`Baixar PDF (${aImprimir} etiquetas + capas)`}
-              </button>
+              {modoGrade ? (
+                <div style={texto}>Para PDF, imprima um tamanho por vez.</div>
+              ) : (
+                <button type="button" style={botaoSecundario} onClick={() => void baixarPdf()} disabled={fase === "reservando" || devolvendo || aImprimir === 0}>
+                  {`Baixar PDF (${aImprimir} etiquetas + capas)`}
+                </button>
+              )}
             </div>
             )}
-            {podeDevolver && (
+            {podeDevolver && !modoGrade && (
               <div style={barraDevolver}>
                 <button type="button" style={botao} onClick={() => setSelecionados(new Set(todosMarcados ? [] : itens.map((p) => p.id)))} disabled={itens.length === 0 || devolvendo}>
                   {todosMarcados ? "Desmarcar todos" : "Selecionar todos"}
@@ -486,6 +650,26 @@ export function ImpressaoManualDialog({
             )}
             {info && <div style={avisoOk}>{info}</div>}
             {erro && <div style={avisoErro}>{erro}</div>}
+            {modoGrade ? (
+              <div style={tabelaBox} className="thin-scroll">
+                <table style={tabela}>
+                  <thead>
+                    <tr>
+                      <th style={th}>Tamanho</th>
+                      <th style={th}>Pedidos</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {plano.map((t) => (
+                      <tr key={t.tamanho}>
+                        <td style={td}>{t.tamanho}</td>
+                        <td style={td}>{t.pedidos}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            ) : (
             <div style={tabelaBox} className="thin-scroll">
               <table style={tabela}>
                 <thead>
@@ -519,6 +703,7 @@ export function ImpressaoManualDialog({
               </table>
               {pedidos === null && !erro && <div style={vazio}>Carregando…</div>}
             </div>
+            )}
             <div style={rodape}>
               <button type="button" style={botao} onClick={onFechar} disabled={fase === "reservando"}>
                 Fechar
@@ -530,7 +715,7 @@ export function ImpressaoManualDialog({
         {fase === "baixando" && (
           <>
             <div style={titulo}>
-              {nomeGrupo} · {grupo.tamanho}
+              {nomeGrupo} · {rotuloTam}
             </div>
             <div style={barraBox}>
               <div style={{ ...barra, width: `${progressoPdf?.n ? (progressoPdf.i / progressoPdf.n) * 100 : 0}%` }} />
@@ -544,7 +729,7 @@ export function ImpressaoManualDialog({
         {fase === "confirmarPdf" && lote && (
           <>
             <div style={titulo}>
-              {nomeGrupo} · {grupo.tamanho}
+              {nomeGrupo} · {rotuloTam}
             </div>
             <div style={grande}>PDF salvo com {lote.pedidos.length - lote.pulados.length} etiquetas.</div>
             <div style={texto}>Imprima e confirme para marcar os pedidos como separados e expedidos. ({arquivoPdf?.nome})</div>
@@ -570,13 +755,22 @@ export function ImpressaoManualDialog({
         {fase === "imprimindo" && lote && (
           <>
             <div style={titulo}>
-              {impressora} · {grupo.estampa} {grupo.tamanho}
+              {impressora} · {grupo.estampa} {rotuloTam}
             </div>
-            <div style={barraBox} aria-label={`Progresso ${feitos} de ${totalLote}`}>
-              <div style={{ ...barra, width: `${totalLote ? (feitos / totalLote) * 100 : 0}%` }} />
+            <div style={barraBox} aria-label={`Progresso ${feitos} de ${modoGrade ? Math.max(totalGrade, totalLote) : totalLote}`}>
+              <div style={{ ...barra, width: `${(modoGrade ? Math.max(totalGrade, totalLote) : totalLote) ? (feitos / (modoGrade ? Math.max(totalGrade, totalLote) : totalLote)) * 100 : 0}%` }} />
             </div>
             <div style={progressoTxt}>
-              {feitos}/{totalLote}
+              {modoGrade ? (
+                <>
+                  {tamanhoAtual ? `${tamanhoAtual.tamanho} · ${feitosDoTamanho(lote, tamanhoAtual.tamanho)} de ${tamanhoAtual.esperado} · tamanho ${tamanhoAtual.indice} de ${plano.length} · ` : ""}
+                  {feitos} de {Math.max(totalGrade, totalLote)} no total
+                </>
+              ) : (
+                <>
+                  {feitos}/{totalLote}
+                </>
+              )}
             </div>
             <div style={grid2}>
               <div style={painel}>
@@ -588,7 +782,7 @@ export function ImpressaoManualDialog({
                     <div style={texto}>{saindo.cliente ?? ""}</div>
                   </>
                 ) : (
-                  <div style={texto}>{lote.pausado ? "Pausado." : modoPdfRef.current ? "Marcando como expedidos…" : "Imprimindo a capa…"}</div>
+                  <div style={texto}>{lote.pausado ? "Pausado." : modoPdfRef.current ? "Marcando como expedidos…" : modoGrade ? "Reservando o próximo tamanho…" : "Imprimindo a capa…"}</div>
                 )}
               </div>
               <div style={painel}>
@@ -620,7 +814,7 @@ export function ImpressaoManualDialog({
         {fase === "resumo" && res && (
           <>
             <div style={titulo}>
-              {nomeGrupo} · {grupo.tamanho} — resumo
+              {nomeGrupo} · {rotuloTam} — resumo
             </div>
             <div style={grande}>
               {res.expedidos} de {res.total} expedidos
@@ -628,6 +822,42 @@ export function ImpressaoManualDialog({
             {aviso && <div style={avisoErro}>{aviso}</div>}
             {liberarFalhou && <div style={avisoErro}>Não consegui devolver os reservados à fila agora; vou tentar de novo ao abrir a aba Únicos.</div>}
             {res.naoImpressos > 0 && <div style={texto}>{res.naoImpressos} não chegaram a ser impressos e voltaram à fila.</div>}
+            {lote && lote.tamanhosVazios.length > 0 && (
+              <div style={avisoErro}>
+                Sem pedidos disponíveis (alguém pegou antes): {lote.tamanhosVazios.join(", ")}. Esses tamanhos foram pulados.
+              </div>
+            )}
+            {lote && lote.sobrasNaFila.length > 0 && (
+              <div style={avisoErro}>
+                {lote.sobrasNaFila.map((x) => `${x.tamanho}: ${x.pedidos} pedido${x.pedidos === 1 ? "" : "s"} ficaram na fila (servidor ocupado), tente de novo`).join(". ")}.
+              </div>
+            )}
+            {lote && modoGrade && (
+              <div style={tabelaBox} className="thin-scroll">
+                <table style={tabela}>
+                  <thead>
+                    <tr>
+                      <th style={th}>Tamanho</th>
+                      <th style={th}>Impressos</th>
+                      <th style={th}>Pulados (sem etiqueta)</th>
+                      <th style={th}>Erros</th>
+                      <th style={th}>Voltaram à fila</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {resumoPorTamanho(lote).map((t) => (
+                      <tr key={t.tamanho}>
+                        <td style={td}>{t.tamanho}</td>
+                        <td style={td}>{t.expedidos}</td>
+                        <td style={td}>{t.pulados}</td>
+                        <td style={td}>{t.erros}</td>
+                        <td style={td}>{t.naoImpressos}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
             {(res.pulados.length > 0 || res.errosConclusao.length > 0) && (
               <div style={tabelaBox} className="thin-scroll">
                 <table style={tabela}>
@@ -650,8 +880,15 @@ export function ImpressaoManualDialog({
                 </table>
               </div>
             )}
+            {lote && itensReimpressao.length > 0 && (
+              <div style={blocoReimprimir}>
+                <b>Saiu errado? Reimprimir</b>
+                <div style={texto}>Reimprimir manda uma 2ª via pra impressora e não muda o status dos pedidos.</div>
+                <ReimprimirLista itens={itensReimpressao} />
+              </div>
+            )}
             <div style={rodape}>
-              {proximasRodadas && (
+              {!modoGrade && proximasRodadas && (
                 <button type="button" style={botaoPrimario} onClick={() => void iniciar()}>
                   Imprimir os próximos
                 </button>
@@ -671,6 +908,8 @@ const fundo: CSSProperties = { position: "fixed", inset: 0, background: "rgba(0,
 const caixa: CSSProperties = { width: "min(860px, 100%)", maxHeight: "100%", display: "flex", flexDirection: "column", gap: 12, padding: 20, background: "var(--bg-card)", border: "1px solid var(--border)", borderRadius: 14, color: "var(--text)", overflow: "hidden" };
 const titulo: CSSProperties = { fontSize: 20, fontWeight: 800, overflowWrap: "anywhere" };
 const blocoImprimir: CSSProperties = { display: "flex", flexDirection: "column", gap: 8, padding: 12, border: "1px solid var(--border-strong)", borderRadius: 10, background: "var(--bg-input)" };
+const blocoReimprimir: CSSProperties = { display: "flex", flexDirection: "column", gap: 6, padding: 12, border: "1px solid var(--border)", borderRadius: 10, background: "var(--bg-input)" };
+const grandeGrade: CSSProperties = { fontSize: 18, fontWeight: 800, overflowWrap: "anywhere" };
 const blocoTopo: CSSProperties = { display: "flex", alignItems: "center", gap: 10 };
 const badge: CSSProperties = { padding: "1px 8px", borderRadius: 999, background: "var(--info-bg, #dbeafe)", color: "var(--info-text, #1d4ed8)", fontSize: 11, fontWeight: 700 };
 const texto: CSSProperties = { fontSize: 13, color: "var(--text-secondary)" };

@@ -25,6 +25,9 @@ import { isExpedicaoSimulacao } from "../../services/expedicaoMode";
 import { getMe } from "../../services/orders";
 import { limparLoteEmCurso, lerLoteEmCurso } from "../../lib/impressaoManualLote";
 import { ImpressaoManualDialog } from "./ImpressaoManualDialog";
+import { ImpressoesRecentesDialog } from "./ImpressoesRecentesDialog";
+import { MenuPopover, type ItemMenu } from "../MenuPopover";
+import { planoDaGrade, rotuloPedidos, totalDaGrade, type GradeTamanho } from "../../lib/impressaoManualGrade";
 import { OrderBumpModal } from "./OrderBumpModal";
 import { lerSemOrderBump, pedidosSemBump, salvarSemOrderBump } from "../../lib/unicosSemBump";
 
@@ -61,7 +64,10 @@ export function UnicosGrupos({
   const [podeConfigurarBump, setPodeConfigurarBump] = useState(false);
   // Impressão manual do tamanho inteiro: só com `me.unicosImpressaoManual === true` (ausente = servidor antigo).
   const [impressaoManual, setImpressaoManual] = useState(() => isExpedicaoSimulacao());
-  const [chipAberto, setChipAberto] = useState<{ grupo: GrupoEscolhido; pedidos: number } | null>(null);
+  const [chipAberto, setChipAberto] = useState<{ grupo: GrupoEscolhido; pedidos: number; grade?: GradeTamanho[] } | null>(null);
+  const [recentesAberto, setRecentesAberto] = useState(false);
+  // Painel de tamanhos aberto pelo menu "Imprimir um tamanho…": o botão de tamanho abre a impressão, não a fila da mesa.
+  const [paraImprimir, setParaImprimir] = useState(false);
   // "Sem order bump" (14/11): contagem, lista e impressão manual ignoram os pedidos com bump. Só pra quem imprime.
   const [semBumpPref, setSemBumpPref] = useState(() => lerSemOrderBump());
   const semBump = impressaoManual && semBumpPref;
@@ -78,7 +84,11 @@ export function UnicosGrupos({
     const sobra = lerLoteEmCurso();
     if (sobra) {
       void liberarImpressaoManual(sobra.orderIds)
-        .then(() => limparLoteEmCurso())
+        .then(() => {
+          // Só apaga se o salvo ainda é a sobra liberada: um lote novo pode ter começado nesse intervalo.
+          const atual = lerLoteEmCurso();
+          if (atual && atual.loteId === sobra.loteId && atual.orderIds.join("|") === sobra.orderIds.join("|")) limparLoteEmCurso();
+        })
         .catch(() => {});
     }
     getMe()
@@ -124,7 +134,10 @@ export function UnicosGrupos({
   // Estampa aberta sumiu (acabaram os pedidos no poll) ou deixou de casar com a busca: volta pra grade.
   useEffect(() => {
     // Só depois do primeiro carregamento: antes disso `aberta` é null por falta de dados.
-    if (dados !== null && estampaAberta && !aberta) setEstampaAberta(null);
+    if (dados !== null && estampaAberta && !aberta) {
+      setEstampaAberta(null);
+      setParaImprimir(false);
+    }
   }, [dados, estampaAberta, aberta]);
 
   // "Devolver várias" (14/11, mutirão): os cards viram seleção e as estampas marcadas voltam inteiras pra separação.
@@ -176,11 +189,41 @@ export function UnicosGrupos({
     }
   };
 
+  /** Grade toda do card: tamanhos com pedido (descontando bump se "Sem order bump"), em ordem canônica. */
+  const gradeDoCard = (e: EstampaAgrupada): GradeTamanho[] =>
+    planoDaGrade(e.tamanhos.map((t) => ({ tamanho: t.tamanho, pedidos: semBump ? pedidosSemBump(t.pedidos, t.comOrderBump) : t.pedidos })));
+  const abrirGrade = (e: EstampaAgrupada) => {
+    const g = gradeDoCard(e);
+    if (g.length === 0) return;
+    setChipAberto({ grupo: { estampa: e.estampa, tamanho: g[0].tamanho, cor: e.cor }, pedidos: totalDaGrade(g), grade: g });
+  };
+  const menuDoCard = (e: EstampaAgrupada): ItemMenu[] | undefined => {
+    if (!impressaoManual || modoDevolver) return undefined;
+    const g = gradeDoCard(e);
+    const total = totalDaGrade(g);
+    if (total <= 0) return undefined;
+    if (g.length === 1) {
+      return [{ chave: "tamanho", rotulo: `Imprimir tamanho ${g[0].tamanho} (${rotuloPedidos(total)})`, onSelecionar: () => setChipAberto({ grupo: { estampa: e.estampa, tamanho: g[0].tamanho, cor: e.cor }, pedidos: total }) }];
+    }
+    return [
+      { chave: "grade", rotulo: `Imprimir grade toda (${rotuloPedidos(total)})`, onSelecionar: () => abrirGrade(e) },
+      {
+        chave: "tamanho",
+        rotulo: "Imprimir um tamanho…",
+        onSelecionar: () => {
+          setParaImprimir(true);
+          setEstampaAberta(e.chave);
+        },
+      },
+    ];
+  };
+
   const clicarEstampa = (e: EstampaAgrupada) => {
     if (modoDevolver) {
       alternarMarcada(e.chave);
       return;
     }
+    setParaImprimir(false);
     if (e.tamanhos.length === 1) onEscolher({ estampa: e.estampa, tamanho: e.tamanhos[0].tamanho, cor: e.cor });
     else setEstampaAberta(e.chave);
   };
@@ -210,8 +253,13 @@ export function UnicosGrupos({
             {semBump ? "Sem order bump: ligado" : "Sem order bump: desligado"}
           </button>
         )}
+        {impressaoManual && (
+          <button type="button" style={bumpBtn} onClick={() => setRecentesAberto(true)} title="Reimprimir etiquetas de impressões manuais dos últimos 3 dias">
+            Impressões recentes
+          </button>
+        )}
         {podeConfigurarBump && !modoDevolver && (
-          <button type="button" style={bumpBtn} onClick={() => { setMsgDevolver(null); setEstampaAberta(null); setModoDevolver(true); }} title="Marcar várias estampas e mandar os pedidos delas de volta pra separação">
+          <button type="button" style={bumpBtn} onClick={() => { setMsgDevolver(null); setEstampaAberta(null); setParaImprimir(false); setModoDevolver(true); }} title="Marcar várias estampas e mandar os pedidos delas de volta pra separação">
             ↩ Devolver à separação
           </button>
         )}
@@ -272,7 +320,24 @@ export function UnicosGrupos({
         <div style={vazio}>{busca.trim() ? "Nenhuma fila combina com a busca." : "Nenhum pedido único aguardando."}</div>
       )}
       {aberta ? (
-        <EscolherTamanho e={aberta} onVoltar={() => setEstampaAberta(null)} onEscolher={onEscolher} />
+        <EscolherTamanho
+          e={aberta}
+          onVoltar={() => {
+            setEstampaAberta(null);
+            setParaImprimir(false);
+          }}
+          onEscolher={
+            paraImprimir
+              ? (g) => {
+                  const t = aberta.tamanhos.find((x) => x.tamanho === g.tamanho);
+                  setChipAberto({ grupo: g, pedidos: t ? (semBump ? pedidosSemBump(t.pedidos, t.comOrderBump) : t.pedidos) : 0 });
+                }
+              : onEscolher
+          }
+          modoImprimir={paraImprimir}
+          semBump={semBump}
+          onGradeToda={impressaoManual ? () => abrirGrade(aberta) : undefined}
+        />
       ) : (
         <div style={grade} className="thin-scroll">
           {estampas.map((e) => (
@@ -282,14 +347,17 @@ export function UnicosGrupos({
               onClick={() => clicarEstampa(e)}
               semBump={semBump}
               marcada={modoDevolver ? marcadas.has(e.chave) : undefined}
+              menu={menuDoCard(e)}
               onChip={!modoDevolver && (impressaoManual || podeConfigurarBump) ? (t) => setChipAberto({ grupo: { estampa: e.estampa, tamanho: t.tamanho, cor: e.cor }, pedidos: t.pedidos }) : undefined}
             />
           ))}
         </div>
       )}
+      {recentesAberto && <ImpressoesRecentesDialog onFechar={() => setRecentesAberto(false)} />}
       {chipAberto && (
         <ImpressaoManualDialog
           grupo={chipAberto.grupo}
+          grade={chipAberto.grade}
           periodo={periodoEfetivo(periodo, suportado)}
           totalNaFila={chipAberto.pedidos}
           podeImprimir={impressaoManual}
@@ -384,7 +452,7 @@ function TiposLinha({ e }: { e: EstampaAgrupada }) {
   );
 }
 
-function CardEstampa({ e, onClick, onChip, semBump, marcada }: { e: EstampaAgrupada; onClick: () => void; onChip?: (t: EstampaAgrupada["tamanhos"][number]) => void; semBump?: boolean; /** Modo "Devolver várias": definido = card é seleção. */ marcada?: boolean }) {
+function CardEstampa({ e, onClick, onChip, semBump, marcada, menu }: { e: EstampaAgrupada; onClick: () => void; menu?: ItemMenu[]; onChip?: (t: EstampaAgrupada["tamanhos"][number]) => void; semBump?: boolean; /** Modo "Devolver várias": definido = card é seleção. */ marcada?: boolean }) {
   // Com "Sem order bump" os números mostram só os pedidos sem bump (o selo "N com bump" segue, fora da conta).
   const n = (pedidos: number, comBump: number | null | undefined) => (semBump && marcada === undefined ? pedidosSemBump(pedidos, comBump) : pedidos);
   const totalCard = n(e.pedidos, e.comOrderBump);
@@ -394,7 +462,7 @@ function CardEstampa({ e, onClick, onChip, semBump, marcada }: { e: EstampaAgrup
   return (
     <button
       type="button"
-      style={marcada ? { ...card, outline: "3px solid var(--warning-border, #f59e0b)", background: "var(--warning-bg)" } : card}
+      style={marcada ? { ...card, position: "relative", outline: "3px solid var(--warning-border, #f59e0b)", background: "var(--warning-bg)" } : { ...card, position: "relative" }}
       onClick={onClick}
       aria-pressed={marcada}
       title={marcada !== undefined ? `Marcar ${nome} para devolver` : unico ? `Escolher a fila ${nome} ${unico}` : `Abrir ${nome}`}
@@ -404,8 +472,9 @@ function CardEstampa({ e, onClick, onChip, semBump, marcada }: { e: EstampaAgrup
           {marcada ? "✓" : ""}
         </span>
       )}
+      {menu && menu.length > 0 && <MenuPopover rotuloAria={`Mais opções de ${nome}`} itens={menu} estiloGatilho={menuPos} />}
       <div style={fotoBox}>{img ? <img src={img} alt="" style={foto} loading="lazy" /> : <span style={semFoto}>sem foto</span>}</div>
-      <div style={cardCorpo}>
+      <div style={menu && menu.length > 0 ? { ...cardCorpo, paddingRight: 30 } : cardCorpo}>
         <TiposLinha e={e} />
         <div style={estampaTxt}>{e.estampa}</div>
         {e.cor && <div style={corTxt}>{e.cor}</div>}
@@ -454,11 +523,20 @@ function EscolherTamanho({
   e,
   onVoltar,
   onEscolher,
+  modoImprimir = false,
+  semBump = false,
+  onGradeToda,
 }: {
   e: EstampaAgrupada;
   onVoltar: () => void;
   onEscolher: (g: GrupoEscolhido) => void;
+  /** Aberto por "Imprimir um tamanho…": escolher um tamanho abre a impressão manual dele. */
+  modoImprimir?: boolean;
+  semBump?: boolean;
+  /** Só pra quem tem a flag da impressão manual. */
+  onGradeToda?: () => void;
 }) {
+  const totalGrade = totalDaGrade(planoDaGrade(e.tamanhos.map((t) => ({ tamanho: t.tamanho, pedidos: semBump ? pedidosSemBump(t.pedidos, t.comOrderBump) : t.pedidos }))));
   useEffect(() => {
     const h = (ev: KeyboardEvent) => {
       if (ev.key === "Escape") onVoltar();
@@ -486,6 +564,12 @@ function EscolherTamanho({
           </div>
         </div>
       </div>
+      {modoImprimir && <div style={avisoImprimir}>Escolha o tamanho que vai imprimir.</div>}
+      {onGradeToda && totalGrade > 0 && (
+        <button type="button" style={gradeTodaBtn} onClick={onGradeToda}>
+          Imprimir grade toda ({rotuloPedidos(totalGrade)})
+        </button>
+      )}
       <div style={botoes}>
         {e.tamanhos.map((g) => {
           const tipos = g.tipos ?? [];
@@ -533,6 +617,9 @@ const bumpBadge: CSSProperties = { padding: "1px 7px", borderRadius: 999, backgr
 const aviso: CSSProperties = { padding: "6px 12px", borderRadius: 8, background: "var(--warning-bg)", border: "1px solid var(--warning-border)", color: "var(--warning-text)", fontSize: 12 };
 const avisoErro: CSSProperties = { ...aviso };
 const vazio: CSSProperties = { flex: 1, display: "flex", alignItems: "center", justifyContent: "center", color: "var(--text-secondary)", fontSize: 18 };
+const menuPos: CSSProperties = { position: "absolute", top: 6, right: 6, zIndex: 1 };
+const avisoImprimir: CSSProperties = { fontSize: 15, fontWeight: 700, color: "var(--text-secondary)" };
+const gradeTodaBtn: CSSProperties = { alignSelf: "flex-start", padding: "12px 18px", background: "var(--accent, #2563eb)", color: "#fff", border: "1px solid transparent", borderRadius: 10, fontWeight: 800, fontSize: 15, cursor: "pointer" };
 const grade: CSSProperties = { flex: 1, minHeight: 0, overflowY: "auto", display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(230px, 1fr))", gap: 12, alignContent: "start" };
 const card: CSSProperties = { display: "flex", gap: 12, padding: 10, textAlign: "left", background: "var(--bg-card)", border: "1px solid var(--border)", borderRadius: 14, color: "var(--text)", cursor: "pointer" };
 const fotoBox: CSSProperties = { width: 84, height: 112, flexShrink: 0, borderRadius: 10, overflow: "hidden", background: "var(--bg-input)", display: "flex", alignItems: "center", justifyContent: "center" };
