@@ -53,6 +53,15 @@ import {
   type PeriodoUnicos,
 } from "../lib/unicosExpedicao";
 import { SupervisorModal } from "./SupervisorModal";
+import { CandidatosTag } from "./expedicao/CandidatosTag";
+import {
+  classificarErroTrocaTag,
+  decidirSemMatch,
+  candidatosParaFaltante,
+  mensagemTrocaTag,
+  prepararCandidatos,
+  restantesAposTroca,
+} from "../lib/candidatosTag";
 import {
   EXP_ERR,
   awbJaColetadoDetails,
@@ -71,7 +80,10 @@ import {
   separarUnico,
   UNICOS_ERR,
   shipOrder,
+  trocarTagDoPedido,
   type AwbJaColetadoDetails,
+  type CandidatoPedido,
+  type CandidatoTag,
   type Documentos,
   type EpcMatch,
   type ExpedicaoOrder,
@@ -132,7 +144,9 @@ type SessionEntry = { order: ExpedicaoOrder; at: Date; modo: ExpedicaoMode };
 type Flow =
   | { kind: "idle" }
   | { kind: "reading" }
-  | { kind: "choose"; matches: EpcMatch[] }
+  | { kind: "choose"; matches: EpcMatch[]; candidatos?: CandidatoTag[]; exigePin?: boolean }
+  /** Peça lida fora de qualquer pedido: escolher em qual pedido usá-la (troca de tag). */
+  | { kind: "candidatos"; candidatos: CandidatoTag[]; exigePin: boolean; posicao: number; total: number; faltante?: { match: EpcMatch; alheias: Set<string> } }
   | { kind: "identified"; order: ExpedicaoOrder }
   | { kind: "printing"; order: ExpedicaoOrder }
   | { kind: "packing"; order: ExpedicaoOrder; lidas: string[]; override?: string }
@@ -365,6 +379,15 @@ export function Expedicao({ onBack }: Props) {
   // (tag some/volta) e cada oscilação re-identificava o pedido, apitando de
   // novo a cada segundo e, se a tag sumisse, fechava o modal no meio da frase.
   const overrideOpenRef = useRef(false);
+  // Troca de tag (candidatos): chamada em voo e pedido aguardando o PIN do supervisor.
+  const [trocandoTag, setTrocandoTag] = useState(false);
+  const trocandoTagRef = useRef(false);
+  trocandoTagRef.current = trocandoTag;
+  const [pinTroca, setPinTroca] = useState<{ candidato: CandidatoTag; pedido: CandidatoPedido } | null>(null);
+  // Peças cujo "candidatos" a operadora cancelou: não reabrem a tela enquanto estiverem na mesa.
+  const ignorarCandidatosRef = useRef<Set<string>>(new Set());
+  const pinTrocaRef = useRef<typeof pinTroca>(null);
+  pinTrocaRef.current = pinTroca;
   overrideOpenRef.current = overrideOpen;
   // Timer ÚNICO do retry de "rastreio ausente" — sem ref, cada entrada no ramo
   // criava uma cadeia de 4 s independente (rajada no /documentos e risco de
@@ -488,6 +511,8 @@ export function Expedicao({ onBack }: Props) {
     setReadLog([]);
     setBufferSize(0);
     setOverrideOpen(false);
+    setPinTroca(null);
+    ignorarCandidatosRef.current = new Set();
     setFlow({ kind: "idle" });
   }, []);
 
@@ -599,13 +624,20 @@ export function Expedicao({ onBack }: Props) {
     // vai pra impressão, que já ignora o leitor).
     if (overrideOpenRef.current) return;
     const epcs = Array.from(mesaRef.current).filter((e) => !processedRef.current.has(e));
-    const f0 = flowRef.current;
+    let f0 = flowRef.current;
+    // Candidatos: se a peça exibida saiu da mesa e não há troca/PIN em curso, sai sozinho e reavalia.
+    if (f0.kind === "candidatos" && !trocandoTagRef.current && pinTrocaRef.current === null && !mesaRef.current.has(f0.candidatos[0].epc)) {
+      setFlow({ kind: "idle" });
+      flowRef.current = { kind: "idle" };
+      f0 = flowRef.current;
+    }
     const k = f0.kind;
     const segurandoJaExpedido = f0.kind === "error" && f0.code === "ja_expedido";
     // Conjunto vazio: se estava mostrando pedido/escolha/erro, volta pra PRONTO.
     // Exceção: "já foi expedido" fica na tela até a operadora reimprimir/fechar.
     if (epcs.length === 0) {
-      if (!segurandoJaExpedido && (k === "reading" || k === "choose" || k === "identified" || k === "error")) setFlow({ kind: "idle" });
+      const trocaEmCurso = k === "candidatos" && (trocandoTagRef.current || pinTrocaRef.current !== null);
+      if (!segurandoJaExpedido && !trocaEmCurso && (k === "reading" || k === "choose" || k === "candidatos" || k === "identified" || k === "error")) setFlow({ kind: "idle" });
       lastSigRef.current = "";
       lastFailSigRef.current = "";
       failTentativasRef.current = 0;
@@ -616,6 +648,9 @@ export function Expedicao({ onBack }: Props) {
     if (segurandoJaExpedido && epcs.every((e) => jaExpedidoEpcsRef.current.has(e))) return;
     // Não interrompe impressão/embalagem/conclusão.
     if (k === "printing" || k === "packing" || k === "done") return;
+    // Tela de candidatos aberta: não troca a lista sob o dedo da operadora. Só
+    // sai por escolha, Cancelar ou mesa vazia (como o `ja_expedido`).
+    if (k === "candidatos") return;
 
     // Mesmo conjunto que acabou de falhar → retry automático SILENCIOSO (sem
     // piscar a tela nem repetir beep/aviso). Assim que o pedido ficar pronto no
@@ -645,9 +680,13 @@ export function Expedicao({ onBack }: Props) {
         await resolverUnico(epcs, gen, retrying, scheduleRetry, sigNow);
         return;
       }
-      const { matches, unmatchedEpcs, jaExpedidos } = await epcMatch(epcs);
+      const { matches, unmatchedEpcs, jaExpedidos, candidatos, trocaTagExigePin } = await epcMatch(epcs);
       if (gen !== resolveGenRef.current) return; // mesa mudou no meio — resultado velho
       if (mesaOcupada()) return; // impressão/embalagem começou enquanto o epc-match voava
+      const preparados = prepararCandidatos(candidatos, {
+        ignorar: ignorarCandidatosRef.current,
+        pedidoDoCanal: (o) => pedidoDoCanal(o, canalRef.current),
+      });
       if (matches.length === 0) {
         if (!retrying) beepError();
         if (jaExpedidos.length > 0) {
@@ -663,6 +702,17 @@ export function Expedicao({ onBack }: Props) {
           });
           return;
         }
+        const decisao = decidirSemMatch({
+          jaExpedidos,
+          candidatos: preparados,
+          trocaTagExigePin,
+        });
+        if (decisao.tipo === "candidatos") {
+          // Estado definitivo até a operadora decidir: sem retry automático.
+          lastFailSigRef.current = sigNow;
+          setFlow({ kind: "candidatos", candidatos: decisao.candidatos, exigePin: decisao.exigePin, posicao: 1, total: decisao.candidatos.length });
+          return;
+        }
         if (!retrying)
           showNotice(
             unmatchedEpcs.length > 0
@@ -676,7 +726,7 @@ export function Expedicao({ onBack }: Props) {
       lastFailSigRef.current = "";
       if (matches.length > 1) {
         beepError();
-        setFlow({ kind: "choose", matches });
+        setFlow({ kind: "choose", matches, candidatos: preparados, exigePin: trocaTagExigePin === true });
         return;
       }
       const m = matches[0];
@@ -684,6 +734,14 @@ export function Expedicao({ onBack }: Props) {
         if (!retrying) beepError();
         setFlow(erroCanal(m.order, canalRef.current));
         scheduleRetry();
+        return;
+      }
+      // Pedido com peça faltando e peça lida fora de pedido que é candidata a ELE:
+      // oferece a troca antes de seguir (Cancelar volta ao "faltam peças").
+      const cf = candidatosParaFaltante(preparados, m);
+      if (cf.length > 0) {
+        beepError();
+        setFlow({ kind: "candidatos", candidatos: cf, exigePin: trocaTagExigePin === true, posicao: 1, total: cf.length, faltante: { match: m, alheias: alheiasDe(matches, m) } });
         return;
       }
       // Apita só quando o pedido MUDA (ou é o primeiro); re-identificar o
@@ -1558,6 +1616,7 @@ export function Expedicao({ onBack }: Props) {
       if (now - ts > ttl) presentRef.current.delete(e);
     }
     const present = Array.from(presentRef.current.keys());
+    for (const e of ignorarCandidatosRef.current) if (!presentRef.current.has(e)) ignorarCandidatosRef.current.delete(e);
     const presentSig = present.slice().sort().join(",");
     if (presentSig === lastPresentSigRef.current) return; // nada mudou
     lastPresentSigRef.current = presentSig;
@@ -1612,9 +1671,133 @@ export function Expedicao({ onBack }: Props) {
     onPresenceRef.current([e]);
   };
 
+  // ---- Candidatos (peça lida fora de qualquer pedido): usar a peça num pedido ----
+  /**
+   * Cancelar: volta ao PRONTO. As peças que tinham candidato não reabrem a tela
+   * enquanto estiverem na mesa (mas seguem valendo pra match real) e a mesa
+   * atual é reavaliada, pra não perder peça trocada durante a tela.
+   */
+  const cancelarCandidatos = () => {
+    const f = flowRef.current;
+    if (f.kind === "candidatos") for (const c of f.candidatos) ignorarCandidatosRef.current.add(c.epc.toUpperCase());
+    setPinTroca(null);
+    lastFailSigRef.current = "";
+    lastSigRef.current = "";
+    failTentativasRef.current = 0;
+    if (f.kind === "candidatos" && f.faltante) {
+      // Pedido já identificado: volta ao estado normal de "faltam peças".
+      const { match, alheias } = f.faltante;
+      const gen = ++resolveGenRef.current;
+      setFlow({ kind: "reading" });
+      flowRef.current = { kind: "reading" };
+      void identifica(match, alheias, gen).catch(handleResolveError);
+      return;
+    }
+    setFlow({ kind: "idle" });
+    flowRef.current = { kind: "idle" };
+    void doResolve();
+  };
+
+  /**
+   * Troca a tag do pedido escolhido. Sucesso: com outra peça na mesa que tem o
+   * MESMO pedido entre os candidatos, continua na tela pra ela ("2 de N"); senão
+   * segue como um match único normal. Com `liberacao` (PIN) os erros de PIN
+   * SOBEM pro `SupervisorModal` mostrar.
+   */
+  const usarPecaNoPedido = async (candidato: CandidatoTag, pedido: CandidatoPedido, liberacao?: LiberacaoSupervisor) => {
+    const f = flowRef.current;
+    if (f.kind !== "candidatos") {
+      setPinTroca(null);
+      return;
+    }
+    if (trocandoTagRef.current) return;
+    if (!liberacao && f.exigePin) {
+      setPinTroca({ candidato, pedido });
+      return;
+    }
+    setTrocandoTag(true);
+    trocandoTagRef.current = true;
+    try {
+      const { match } = await trocarTagDoPedido(pedido.order.id, {
+        epcLido: candidato.epc,
+        epcAtual: pedido.epcAtual,
+        ...(liberacao ? { liberacao: { supervisorId: liberacao.supervisorId, pin: liberacao.pin, motivo: liberacao.motivo } } : {}),
+      });
+      setPinTroca(null);
+      if (!pedidoDoCanal(match.order, canalRef.current)) {
+        beepError();
+        setFlow(erroCanal(match.order, canalRef.current));
+        return;
+      }
+      beepOk();
+      lastFailSigRef.current = "";
+      // Outras peças ainda na mesa que também são candidatas a ESTE pedido.
+      const restantes = restantesAposTroca(
+        f.candidatos.filter((c) => c.epc !== candidato.epc),
+        pedido.order.id,
+        mesaRef.current,
+        match.order.rfidTags ?? [],
+      );
+      if (restantes.length > 0) {
+        const prox: Flow = { kind: "candidatos", candidatos: restantes, exigePin: f.exigePin, posicao: f.posicao + 1, total: f.total, ...(f.faltante ? { faltante: f.faltante } : {}) };
+        setFlow(prox);
+        flowRef.current = prox;
+        return;
+      }
+      // Mesa esvaziou enquanto a troca voava: nada a identificar.
+      if (mesaRef.current.size === 0) {
+        setFlow({ kind: "idle" });
+        flowRef.current = { kind: "idle" };
+        return;
+      }
+      if (f.faltante) {
+        // Troca num pedido que já estava identificado: re-resolve a mesa inteira.
+        lastSigRef.current = "";
+        setFlow({ kind: "reading" });
+        flowRef.current = { kind: "reading" };
+        void doResolve();
+        return;
+      }
+      const gen = ++resolveGenRef.current;
+      setFlow({ kind: "reading" });
+      flowRef.current = { kind: "reading" };
+      await identifica(match, new Set<string>(), gen);
+    } catch (e) {
+      const ApiBody = e instanceof ApiError ? e.body : null;
+      const erro = classificarErroTrocaTag(ApiBody);
+      if (erro.tipo === "exige_pin" && !liberacao) {
+        setPinTroca({ candidato, pedido });
+        return;
+      }
+      if (erro.tipo === "recusada") {
+        // O Nexus mudou por baixo: avisa e relê a mesa (refaz o epc-match).
+        beepError();
+        setPinTroca(null);
+        showNotice(mensagemTrocaTag(erro.motivo), 9000);
+        lastFailSigRef.current = "";
+        failTentativasRef.current = 0;
+        setFlow({ kind: "reading" });
+        flowRef.current = { kind: "reading" };
+        void doResolve();
+        return;
+      }
+      if (liberacao) throw e; // PIN inválido etc.: o modal mostra e a pessoa tenta de novo.
+      beepError();
+      showNotice(e instanceof Error ? e.message : "Não foi possível usar esta peça neste pedido.", 9000);
+    } finally {
+      trocandoTagRef.current = false;
+      setTrocandoTag(false);
+    }
+  };
+
   const escolher = (m: EpcMatch) => {
     const f = flowRef.current;
     const alheias = f.kind === "choose" ? alheiasDe(f.matches, m) : new Set<string>();
+    const cf = f.kind === "choose" ? candidatosParaFaltante(f.candidatos, m) : [];
+    if (cf.length > 0) {
+      setFlow({ kind: "candidatos", candidatos: cf, exigePin: f.kind === "choose" && f.exigePin === true, posicao: 1, total: cf.length, faltante: { match: m, alheias } });
+      return;
+    }
     setFlow({ kind: "reading" });
     const gen = ++resolveGenRef.current;
     void identifica(m, alheias, gen).catch(handleResolveError);
@@ -1779,6 +1962,20 @@ export function Expedicao({ onBack }: Props) {
         />
       )}
 
+      {pinTroca && (
+        <SupervisorModal
+          faltantes={[]}
+          contexto={{
+            titulo: `Usar peça no pedido ${rotuloPedido(pinTroca.pedido.order.numero)}`,
+            descricao: "A peça lida não era deste pedido. Confirme com o supervisor antes de trocar a tag do pedido.",
+            motivosRapidos: ["Peça vizinha lida no lugar da certa", "Etiqueta da peça trocada na separação"],
+            botao: "Trocar com PIN",
+          }}
+          onCancel={() => setPinTroca(null)}
+          onConfirm={(lib) => usarPecaNoPedido(pinTroca.candidato, pinTroca.pedido, lib)}
+        />
+      )}
+
       <StepIndicator flow={flow} />
 
       <div style={layoutRow}>
@@ -1819,6 +2016,9 @@ export function Expedicao({ onBack }: Props) {
             packingProgress={packingProgress}
             autoPrint={autoPrint}
             onChoose={escolher}
+            trocandoTag={trocandoTag}
+            onUsarPeca={(c, p) => void usarPecaNoPedido(c, p)}
+            onCancelarCandidatos={cancelarCandidatos}
             onForce={() => setOverrideOpen(true)}
             onPrint={imprimirManual}
             onSeal={() => void concluirCiclo()}
@@ -1828,7 +2028,7 @@ export function Expedicao({ onBack }: Props) {
             canalMesa={canal}
             unicosGrupo={unicosAtivo ? grupoUnicos : null}
             itensGrandes={unicosAtivo}
-            orderBumpNome={modoFila === "unicos" && flow.kind !== "idle" && flow.kind !== "reading" && flow.kind !== "choose" && flow.kind !== "error" && bumpDoPedido?.orderId === flow.order.id ? bumpDoPedido.nome : null}
+            orderBumpNome={modoFila === "unicos" && flow.kind !== "idle" && flow.kind !== "reading" && flow.kind !== "choose" && flow.kind !== "candidatos" && flow.kind !== "error" && bumpDoPedido?.orderId === flow.order.id ? bumpDoPedido.nome : null}
             onTrocarFila={unicosAtivo ? trocarEstampa : () => escolherGrupo(null)}
           />
           )}
@@ -1901,6 +2101,9 @@ function StageCenter({
   packingProgress,
   autoPrint,
   onChoose,
+  trocandoTag,
+  onUsarPeca,
+  onCancelarCandidatos,
   onForce,
   onPrint,
   onSeal,
@@ -1926,6 +2129,9 @@ function StageCenter({
   /** Modo Únicos: pedido em cards grandes. */
   itensGrandes?: boolean;
   onChoose: (m: EpcMatch) => void;
+  trocandoTag: boolean;
+  onUsarPeca: (c: CandidatoTag, p: CandidatoPedido) => void;
+  onCancelarCandidatos: () => void;
   onForce: () => void;
   onPrint: () => void;
   onSeal: () => void;
@@ -1951,6 +2157,20 @@ function StageCenter({
         <h1 style={{ ...heroDisplay, fontSize: 72, color: "var(--info-text)" }}>LENDO</h1>
         <p style={heroHint}>Identificando o pedido pelas peças…</p>
       </div>
+    );
+  }
+  if (flow.kind === "candidatos") {
+    const c = flow.candidatos[0];
+    return (
+      <CandidatosTag
+        candidato={c}
+        posicao={flow.posicao}
+        total={flow.total}
+        modo={flow.faltante ? "faltante" : "sem_pedido"}
+        ocupado={trocandoTag}
+        onEscolher={(p) => onUsarPeca(c, p)}
+        onCancelar={onCancelarCandidatos}
+      />
     );
   }
   if (flow.kind === "choose") {
