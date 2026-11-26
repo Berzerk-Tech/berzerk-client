@@ -16,6 +16,7 @@ import {
   rotuloGrupo,
   rotuloTipo,
   rotuloTipos,
+  rotuloTiposCapa,
   tipoBaseDoProduto,
   tiposDaEstampa,
   setGrupoEscolhido,
@@ -344,5 +345,31 @@ describe("pedido selecionado e erros novos", () => {
     );
     expect(e.progresso).toBe("1/2");
     expect(e.orderBump).toEqual({ produtoNome: "Touca", imagemUrl: "https://x/t.jpg" });
+  });
+
+  describe("rotuloTiposCapa", () => {
+    const t = (produtoNome: string, pedidos: number, cor: string | null = null) => ({ produtoId: produtoNome + (cor ?? ""), produtoNome, cor, pedidos }) as never;
+    it("um tipo: sem contagem e sem cor", () => {
+      expect(rotuloTiposCapa([t("Poliamida Tech Running - Symbol", 5, "Azul")], "Symbol")).toBe("Poliamida Tech Running");
+    });
+    it("vários: do maior pro menor, com contagem; mesma base em cores soma", () => {
+      expect(rotuloTiposCapa([t("Poliamida Tech - Keep", 2), t("Oversized - Keep", 5, "Preto"), t("Oversized - Keep", 3, "Azul")], "Keep")).toBe("Oversized 8 · Poliamida Tech 2");
+    });
+    it("semContagem tira os números", () => {
+      expect(rotuloTiposCapa([t("Oversized - Keep", 5), t("Jersey - Keep", 2)], "Keep", true)).toBe("Oversized · Jersey");
+    });
+    it("planoDaGrade leva os tipos de cada tamanho", async () => {
+      const { planoDaGrade } = await import("../src/lib/impressaoManualGrade");
+      const p = planoDaGrade([
+        { tamanho: "M", pedidos: 3, tipos: [t("Oversized - Keep", 3)] },
+        { tamanho: "P", pedidos: 2, tipos: [t("Jersey - Keep", 2)] },
+        { tamanho: "G", pedidos: 1 },
+      ]);
+      expect(p.map((x) => [x.tamanho, x.tipos?.[0]?.produtoNome])).toEqual([["P", "Jersey - Keep"], ["M", "Oversized - Keep"], ["G", undefined]]);
+    });
+    it("sem tipos: vazio", () => {
+      expect(rotuloTiposCapa(undefined, "Keep")).toBe("");
+      expect(rotuloTiposCapa([], "Keep")).toBe("");
+    });
   });
 });

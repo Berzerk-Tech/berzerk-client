@@ -21,7 +21,7 @@
 // tamanhos); ficam na fila só os mistos cujas peças de outro tamanho são
 // todas desses produtos. A regra e os cálculos vivem em `lib/mistos.ts`.
 
-import { useCallback, useEffect, useMemo, useState, type CSSProperties } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import { ApiError } from "../lib/api";
 import { miniatura } from "../lib/imagens";
 import { agregarLote, mesclarProdutos } from "../lib/agregarLote";
@@ -44,7 +44,11 @@ import { ORDEM_TAMANHOS } from "../lib/tamanhos";
 import {
   acharGlobal,
   chaveGlobal,
+  contarFabrica,
   diffGlobal,
+  fundirComServidor,
+  nivelParaEnvio,
+  podeTirarItem,
   selDeTermos,
   tamanhoParaEnvio,
   temSel,
@@ -53,12 +57,18 @@ import {
 } from "../lib/exclusaoGlobalTamanho";
 import {
   adicionarExclusaoGlobal,
+  ehExclusaoNaoEncontrada,
   ehExclusaoNaoPermitida,
+  MSG_ITEM_JA_SAIU,
   MSG_SO_QUEM_TIROU_DEVOLVE,
   MSG_SO_SUPERVISAO_EXCLUSAO,
+  MSG_SO_SUPERVISAO_FABRICA,
   getExclusoesGlobais,
+  mudarNivel,
   removerExclusaoGlobal,
+  type ExclusaoGlobal,
   type ExclusoesGlobais,
+  type NivelExclusao,
 } from "../services/exclusoesGlobais";
 import { getLabelPrinter } from "../services/printerConfig";
 import {
@@ -84,6 +94,8 @@ import { SeloVariante } from "./SeloVariante";
 const STORAGE_KEY = "berzerk_picking_filters_v2";
 /** Preferência do switch "Em todas as estações" ("1"/"0"). */
 const GLOBAL_KEY = "berzerk_exclusao_global_v1";
+// Nível escolhido pela supervisão ao marcar no galpão ("fabrica" | "bancada").
+const NIVEL_KEY = "berzerk_exclusao_nivel_v1";
 
 function fmtQuando(iso: string): string | null {
   const d = new Date(iso);
@@ -206,6 +218,14 @@ export function PickingFiltersModal({ filters, queue, lote, abaInicial = "exclus
       return true;
     }
   });
+  const [nivelNovo, setNivelNovo] = useState<NivelExclusao>(() => {
+    try {
+      return localStorage.getItem(NIVEL_KEY) === "bancada" ? "bancada" : "fabrica";
+    } catch {
+      return "fabrica";
+    }
+  });
+  const [mudandoNivel, setMudandoNivel] = useState<string | null>(null);
   const [salvando, setSalvando] = useState(false);
   const [erroSalvar, setErroSalvar] = useState<string | null>(null);
   const [statusMistos, setStatusMistos] = useState<string | null>(null);
@@ -314,10 +334,57 @@ export function PickingFiltersModal({ filters, queue, lote, abaInicial = "exclus
   const globalSoLeitura = globais?.podeEditar === false;
   const modoGlobalEfetivo = modoGlobal && !globalSoLeitura;
   /** Item do galpão que esta estação pode tirar. Nexus com tamanho: `podeRemover` por item; antigo: tudo ou nada. */
-  const podeTirar = (x: SelGlobal): boolean => {
-    if (!aceitaTamanho) return !globalSoLeitura;
-    const g = globais ? acharGlobal(globais.termos, x.produto, x.tamanho) : undefined;
-    return g?.podeRemover !== false;
+  const podeTirar = (x: SelGlobal): boolean => podeTirarItem(globais, x, globalSoLeitura);
+  // Níveis (Nexus novo): bancada x fábrica. Sem `aceitaNivel` nada disso aparece.
+  const aceitaNivel = globais?.aceitaNivel === true;
+  const podeFabrica = aceitaNivel && globais?.podeMarcarFabrica === true;
+  const nFabrica = contarFabrica(globalSel, globais);
+  const escolherNivelNovo = (n: NivelExclusao) => {
+    setNivelNovo(n);
+    try {
+      localStorage.setItem(NIVEL_KEY, n);
+    } catch {
+      /* preferência só da sessão */
+    }
+  };
+  /** Base nova do servidor com o modal aberto: rascunho preservado (`fundirComServidor`), nada ressuscita. */
+  const globalBaseRef = useRef<SelGlobal[]>([]);
+  globalBaseRef.current = globalBase;
+  const trocarBase = (r: ExclusoesGlobais) => {
+    const velha = globalBaseRef.current;
+    globalBaseRef.current = selDeTermos(r.termos);
+    setGlobais(r);
+    setGlobalBase(selDeTermos(r.termos));
+    setGlobalSel((prev) => fundirComServidor(prev, velha, r.termos));
+  };
+  /** Promove/rebaixa um termo já salvo, na hora (um clique, sem esperar o "Aplicar"). */
+  const trocarNivel = async (g: ExclusaoGlobal, nivel: NivelExclusao) => {
+    if (mudandoNivel) return;
+    setMudandoNivel(g.id);
+    setErroSalvar(null);
+    try {
+      const r = await mudarNivel(g.id, nivel);
+      if (!r) throw new Error("o servidor ainda não aceita níveis");
+      trocarBase(r);
+    } catch (e) {
+      try {
+        const atual = await getExclusoesGlobais();
+        if (atual) trocarBase(atual);
+      } catch {
+        /* mantém o que está na tela */
+      }
+      setErroSalvar(
+        ehExclusaoNaoPermitida(e)
+          ? nivel === "fabrica"
+            ? MSG_SO_SUPERVISAO_FABRICA
+            : MSG_SO_QUEM_TIROU_DEVOLVE
+          : ehExclusaoNaoEncontrada(e)
+            ? MSG_ITEM_JA_SAIU
+            : `Não consegui mudar o nível: ${e instanceof Error ? e.message : String(e)}`,
+      );
+    } finally {
+      setMudandoNivel(null);
+    }
   };
   const globalNomes = useMemo(() => {
     const vistos = new Set<string>();
@@ -379,7 +446,8 @@ export function PickingFiltersModal({ filters, queue, lote, abaInicial = "exclus
       // O clique JÁ marca (no tamanho da mesa); a faixa de tamanhos é só ajuste.
       // Antes o clique só abria a faixa e pedia um "Excluir" a mais: a linha
       // ficava sem ✓ e a operadora clicava de novo sem parar (Stefhany, 23/11).
-      const novo: SelGlobal = { produto: nome, tamanho: aceitaTamanho ? tamanhoPadraoDaMesa() : null };
+      const nivel = nivelParaEnvio(globais, nivelNovo);
+      const novo: SelGlobal = { produto: nome, tamanho: aceitaTamanho ? tamanhoPadraoDaMesa() : null, ...(nivel ? { nivel } : null) };
       if (!temSel(globalSel, novo.produto, novo.tamanho)) setGlobalSel([...globalSel, novo]);
       if (aceitaTamanho) setEscolha(novo);
     } else setExclude([...exclude, nome]);
@@ -393,7 +461,7 @@ export function PickingFiltersModal({ filters, queue, lote, abaInicial = "exclus
   /** Troca o tamanho da marcação recém-feita (a anterior sai, a nova entra). */
   const trocarTamanhoDaEscolha = (t: string | null) => {
     if (!escolha) return;
-    const novo: SelGlobal = { ...escolha, tamanho: t };
+    const novo: SelGlobal = { ...escolha, tamanho: t }; // mantém o nível da marcação
     const resto = semEscolha(escolha);
     setGlobalSel(temSel(resto, novo.produto, novo.tamanho) ? resto : [...resto, novo]);
     setEscolha(novo);
@@ -681,13 +749,22 @@ export function PickingFiltersModal({ filters, queue, lote, abaInicial = "exclus
       // outra estação pôs enquanto o modal estava aberto).
       // A chave é termo + tamanho: "Moletom|P" entrar não toca em "Moletom|todos".
       const { entraram, sairam } = diffGlobal(globalBase, globalSel);
+      let removendo = false;
+      let enviandoFabrica = false;
       try {
         for (const t of entraram) {
           const tam = tamanhoParaEnvio(globais?.aceitaTamanho, t.tamanho);
-          const r = await (tam ? adicionarExclusaoGlobal(t.produto, tam) : adicionarExclusaoGlobal(t.produto));
+          const nivel = nivelParaEnvio(globais, t.nivel ?? "bancada");
+          enviandoFabrica = nivel === "fabrica";
+          const r = await (nivel
+            ? adicionarExclusaoGlobal(t.produto, tam, nivel)
+            : tam
+              ? adicionarExclusaoGlobal(t.produto, tam)
+              : adicionarExclusaoGlobal(t.produto));
           if (!r) throw new Error("o servidor ainda não aceita a exclusão do galpão");
           salvas = r;
         }
+        removendo = true;
         for (const t of sairam) {
           const id = globais ? acharGlobal(globais.termos, t.produto, t.tamanho)?.id : undefined;
           if (!id) continue;
@@ -699,17 +776,15 @@ export function PickingFiltersModal({ filters, queue, lote, abaInicial = "exclus
         // O que já salvou fica salvo: o rascunho passa a refletir o servidor.
         try {
           const g = await getExclusoesGlobais();
-          if (g) {
-            setGlobais(g);
-            setGlobalBase(selDeTermos(g.termos));
-            setGlobalSel(selDeTermos(g.termos));
-          }
+          if (g) trocarBase(g);
         } catch {
           /* mantém o rascunho */
         }
         setErroSalvar(
           ehExclusaoNaoPermitida(e)
-            ? MSG_SO_QUEM_TIROU_DEVOLVE
+            ? aceitaNivel && !removendo && enviandoFabrica
+              ? MSG_SO_SUPERVISAO_FABRICA
+              : MSG_SO_QUEM_TIROU_DEVOLVE
             : e instanceof ApiError && e.status === 403
             ? MSG_SO_SUPERVISAO_EXCLUSAO
             : `Não consegui salvar a exclusão do galpão: ${e instanceof Error ? e.message : String(e)}`,
@@ -719,9 +794,7 @@ export function PickingFiltersModal({ filters, queue, lote, abaInicial = "exclus
       }
       if (salvas) {
         // O modal pode seguir aberto (Imprimir e reservar): a base passa a ser o que o servidor tem.
-        setGlobais(salvas);
-        setGlobalBase(selDeTermos(salvas.termos));
-        setGlobalSel(selDeTermos(salvas.termos));
+        trocarBase(salvas);
       }
       setSalvando(false);
     }
@@ -747,7 +820,7 @@ export function PickingFiltersModal({ filters, queue, lote, abaInicial = "exclus
   };
 
   const aplicar = async () => {
-    if (salvando || imprimindoMistos) return;
+    if (salvando || imprimindoMistos || mudandoNivel !== null) return;
     const prep = await prepararFiltros();
     if (prep) onApply(prep.f, prep.extra);
   };
@@ -811,7 +884,23 @@ export function PickingFiltersModal({ filters, queue, lote, abaInicial = "exclus
               </span>
               Em todas as estações
             </button>
-            <small style={mistosSmall}>o que você marcar vale pro galpão inteiro</small>
+            {aceitaNivel && podeFabrica ? (
+              <span style={{ display: "inline-flex", gap: 4 }} role="group" aria-label="Nível da falta" data-testid="nivel-novo">
+                <button style={nivelNovo === "bancada" ? tamSelOn : tamSelOff} onClick={() => escolherNivelNovo("bancada")} aria-pressed={nivelNovo === "bancada"}>
+                  Falta na bancada
+                </button>
+                <button style={nivelNovo === "fabrica" ? tamSelOn : tamSelOff} onClick={() => escolherNivelNovo("fabrica")} aria-pressed={nivelNovo === "fabrica"}>
+                  Acabou na fábrica
+                </button>
+              </span>
+            ) : null}
+            <small style={mistosSmall}>
+              {!aceitaNivel
+                ? "o que você marcar vale pro galpão inteiro"
+                : podeFabrica && nivelNovo === "fabrica"
+                  ? "vale pro galpão inteiro até a supervisão tirar"
+                  : "vale pro galpão inteiro até a reposição atender ou até o fim do dia"}
+            </small>
           </div>
         )}
 
@@ -836,7 +925,7 @@ export function PickingFiltersModal({ filters, queue, lote, abaInicial = "exclus
             <small style={mistosSmall}>Vale depois de “Aplicar filtros”.</small>
           </div>
         )}
-        {aba === "exclusao" && comGlobal && aceitaTamanho && globalSel.length > 0 && (
+        {aba === "exclusao" && comGlobal && (aceitaTamanho || aceitaNivel) && globalSel.length > 0 && (
           <div style={galpaoLista} data-testid="lista-galpao">
             {globalSel.map((x) => {
               const g = globais ? acharGlobal(globais.termos, x.produto, x.tamanho) : undefined;
@@ -846,10 +935,30 @@ export function PickingFiltersModal({ filters, queue, lote, abaInicial = "exclus
                 <div key={chaveGlobal(x.produto, x.tamanho)} style={galpaoItem}>
                   <span style={{ flex: 1 }}><SeloVariante nome={x.produto} tamanho="pequeno" style={{ marginRight: 6, verticalAlign: "middle" }} />{x.produto}</span>
                   {aceitaTamanho && <span style={tamChip}>{x.tamanho ?? "Todos"}</span>}
+                  {aceitaNivel && (
+                    <span style={(g?.nivel ?? x.nivel) === "fabrica" ? nivelFabricaChip : nivelBancadaChip} data-testid="selo-nivel">
+                      {(g?.nivel ?? x.nivel) === "fabrica" ? "Fábrica" : "Bancada"}
+                    </span>
+                  )}
+                  {aceitaNivel && g?.semPecaEm && (
+                    <span style={nivelBancadaChip} title={g.semPecaPorNome ? `Repositor: ${g.semPecaPorNome}` : undefined} data-testid="selo-sem-peca">
+                      Repositor: não tem
+                    </span>
+                  )}
                   <small style={mistosSmall}>
                     {g ? `${g.criadoPor ?? "galpão"}${quando ? ` · ${quando}` : ""}` : "novo, ainda não salvo"}
                     {g?.pedidosPresos ? ` · prende ${g.pedidosPresos.total} pedido${g.pedidosPresos.total === 1 ? "" : "s"}` : ""}
                   </small>
+                  {aceitaNivel && g?.podeMudarNivel && (
+                    <button
+                      style={limparBtn}
+                      disabled={mudandoNivel !== null}
+                      onClick={() => void trocarNivel(g, g.nivel === "fabrica" ? "bancada" : "fabrica")}
+                      data-testid="mudar-nivel"
+                    >
+                      {g.nivel === "fabrica" ? "Voltar pra bancada" : "Acabou na fábrica"}
+                    </button>
+                  )}
                   {travado ? (
                     <small style={mistosSmall} title={MSG_SO_QUEM_TIROU_DEVOLVE} data-testid="item-travado">
                       🔒 {MSG_SO_QUEM_TIROU_DEVOLVE}
@@ -1076,7 +1185,7 @@ export function PickingFiltersModal({ filters, queue, lote, abaInicial = "exclus
                 <>
                   <strong style={{ color: "var(--danger-text)" }}>{selected.length}</strong>{" "}
                   marcado{selected.length === 1 ? "" : "s"}
-                  {comGlobal ? ` · ${globalNomes.length} no galpão · ${selected.length - globalNomes.length} só aqui` : ""} ·{" "}
+                  {comGlobal ? ` · ${globalNomes.length} no galpão${nFabrica > 0 ? ` (${nFabrica} fábrica)` : ""} · ${selected.length - globalNomes.length} só aqui` : ""} ·{" "}
                   <strong>{pedidosAfetados}</strong> pedido{pedidosAfetados === 1 ? "" : "s"}{" "}
                   ser{pedidosAfetados === 1 ? "á" : "ão"} ocultado{pedidosAfetados === 1 ? "" : "s"}
                 </>
@@ -1126,7 +1235,7 @@ export function PickingFiltersModal({ filters, queue, lote, abaInicial = "exclus
               🖨 Imprimir e reservar
             </button>
           )}
-          <button style={salvando ? { ...aplicarBtn, opacity: 0.6, cursor: "wait" } : aplicarBtn} onClick={() => void aplicar()} disabled={salvando || imprimindoMistos}>
+          <button style={salvando ? { ...aplicarBtn, opacity: 0.6, cursor: "wait" } : aplicarBtn} onClick={() => void aplicar()} disabled={salvando || imprimindoMistos || mudandoNivel !== null}>
             {salvando ? "Salvando…" : "Aplicar filtros"}
           </button>
         </div>
@@ -1655,6 +1764,30 @@ const tamSelOn: CSSProperties = {
 };
 const galpaoLista: CSSProperties = { display: "flex", flexDirection: "column", gap: 4, maxHeight: 140, overflowY: "auto" };
 const galpaoItem: CSSProperties = { display: "flex", alignItems: "center", gap: 8, fontSize: 13 };
+
+const nivelBancadaChip: CSSProperties = {
+  fontFamily: "var(--font-mono)",
+  fontSize: 10,
+  fontWeight: 700,
+  padding: "1px 8px",
+  borderRadius: 999,
+  background: "var(--bg-input)",
+  color: "var(--warning-text, var(--text))",
+  border: "1px solid var(--warning-border, var(--border-strong))",
+  flexShrink: 0,
+};
+
+const nivelFabricaChip: CSSProperties = {
+  fontFamily: "var(--font-mono)",
+  fontSize: 10,
+  fontWeight: 700,
+  padding: "1px 8px",
+  borderRadius: 999,
+  background: "var(--danger-bg)",
+  color: "var(--danger-text)",
+  border: "1px solid var(--danger-border)",
+  flexShrink: 0,
+};
 
 const galpaoChip: CSSProperties = {
   fontFamily: "var(--font-mono)",

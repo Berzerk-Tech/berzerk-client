@@ -11,6 +11,9 @@
 
 import { ApiError, apiRequest } from "../lib/api";
 
+/** `bancada` = a separadora não achou na bancada (cai quando a reposição atende ou na virada do dia); `fabrica` = acabou na fábrica, confirmado pela supervisão. */
+export type NivelExclusao = "bancada" | "fabrica";
+
 export type ExclusaoGlobal = {
   id: string;
   /** Texto legado de exibição (produto + " - " + tamanho, quando há). Não serve de chave. */
@@ -26,6 +29,13 @@ export type ExclusaoGlobal = {
   pedidosPresos?: { total: number; puros: number; mistos: number };
   /** `false` = só quem tirou ou a supervisão devolve. Ausente = pode. */
   podeRemover?: boolean;
+  /** Nexus com níveis (`aceitaNivel`). Ausente = nexus antigo. */
+  nivel?: NivelExclusao;
+  /** Quando o repositor respondeu "não tem" (ISO) e quem respondeu. */
+  semPecaEm?: string | null;
+  semPecaPorNome?: string | null;
+  /** O usuário pode promover/rebaixar este termo. */
+  podeMudarNivel?: boolean;
 };
 
 export type ExclusoesGlobais = {
@@ -35,7 +45,14 @@ export type ExclusoesGlobais = {
   podeEditar?: boolean;
   /** `true` = o nexus entende `tamanho` no POST (detector de suporte). Ausente = API velha, só termo. */
   aceitaTamanho?: boolean;
+  /** `true` = o nexus entende `nivel` (detector de suporte). Ausente = API velha, tudo como antes. */
+  aceitaNivel?: boolean;
+  /** O usuário é supervisor e pode marcar "acabou na fábrica". */
+  podeMarcarFabrica?: boolean;
 };
+
+/** Texto do 403 `exclusao_global_nao_permitida` ao marcar/mudar pra "fábrica" sem ser supervisor. */
+export const MSG_SO_SUPERVISAO_FABRICA = "Só a supervisão marca falta na fábrica.";
 
 /** Texto mostrado quando a estação não pode editar a lista do galpão (campo `podeEditar` ou 403 na escrita). */
 export const MSG_SO_SUPERVISAO_EXCLUSAO = "Só a supervisão altera os produtos em falta.";
@@ -74,11 +91,17 @@ function normalizar(raw: unknown): ExclusoesGlobais {
         tamanho: typeof t.tamanho === "string" && t.tamanho.trim() ? t.tamanho.trim().toUpperCase() : null,
         ...pedidosPresos(t.pedidosPresos),
         ...(typeof t.podeRemover === "boolean" ? { podeRemover: t.podeRemover } : null),
+        ...(t.nivel === "bancada" || t.nivel === "fabrica" ? { nivel: t.nivel } : null),
+        ...(typeof t.semPecaEm === "string" && t.semPecaEm ? { semPecaEm: t.semPecaEm } : null),
+        ...(typeof t.semPecaPorNome === "string" && t.semPecaPorNome.trim() ? { semPecaPorNome: t.semPecaPorNome.trim() } : null),
+        ...(typeof t.podeMudarNivel === "boolean" ? { podeMudarNivel: t.podeMudarNivel } : null),
       }))
       .filter((t) => t.termo.length > 0),
     atualizadoEm: typeof b.atualizadoEm === "string" ? b.atualizadoEm : null,
     ...(typeof b.podeEditar === "boolean" ? { podeEditar: b.podeEditar } : null),
     ...(typeof b.aceitaTamanho === "boolean" ? { aceitaTamanho: b.aceitaTamanho } : null),
+    ...(typeof b.aceitaNivel === "boolean" ? { aceitaNivel: b.aceitaNivel } : null),
+    ...(typeof b.podeMarcarFabrica === "boolean" ? { podeMarcarFabrica: b.podeMarcarFabrica } : null),
   };
 }
 
@@ -112,13 +135,15 @@ export async function getExclusoesGlobais(): Promise<ExclusoesGlobais | null> {
 export async function adicionarExclusaoGlobal(
   termo: string,
   tamanho?: string | null,
+  nivel?: NivelExclusao,
 ): Promise<ExclusoesGlobais | null> {
   try {
     return normalizar(
       await apiRequest<unknown>("/separacao/exclusoes-globais", {
         method: "POST",
         // `tamanho` só vai quando escolhido: sem ele o corpo é o de sempre (API velha não vê campo novo).
-        body: { termo: termo.trim(), ...(tamanho ? { tamanho } : null) },
+        // `nivel` só vai com nexus que o aceita (quem chama decide): sem ele o corpo é o de sempre.
+        body: { termo: termo.trim(), ...(tamanho ? { tamanho } : null), ...(nivel ? { nivel } : null) },
       }),
     );
   } catch (e) {
@@ -135,6 +160,31 @@ export async function removerExclusaoGlobal(id: string): Promise<ExclusoesGlobai
     );
   } catch (e) {
     if (e instanceof ApiError && e.status === 404) return null;
+    throw e;
+  }
+}
+
+/** 404 do TERMO (já removido no Nexus novo): `exclusao_global_nao_encontrada`. Não é rota ausente. */
+export function ehExclusaoNaoEncontrada(e: unknown): boolean {
+  if (!(e instanceof ApiError) || e.status !== 404) return false;
+  const b = e.body as { error?: unknown; code?: unknown } | null | undefined;
+  return b?.error === "exclusao_global_nao_encontrada" || b?.code === "exclusao_global_nao_encontrada" || e.message.includes("exclusao_global_nao_encontrada");
+}
+
+/** Texto quando o termo a mudar de nível já saiu do galpão. */
+export const MSG_ITEM_JA_SAIU = "Esse item já saiu do galpão.";
+
+/** Promove (`fabrica`) ou rebaixa (`bancada`) um termo. 404 da ROTA → null (nexus sem níveis); 404 do termo lança. */
+export async function mudarNivel(id: string, nivel: NivelExclusao): Promise<ExclusoesGlobais | null> {
+  try {
+    return normalizar(
+      await apiRequest<unknown>(`/separacao/exclusoes-globais/${encodeURIComponent(id)}/nivel`, {
+        method: "POST",
+        body: { nivel },
+      }),
+    );
+  } catch (e) {
+    if (e instanceof ApiError && e.status === 404 && !ehExclusaoNaoEncontrada(e)) return null;
     throw e;
   }
 }
