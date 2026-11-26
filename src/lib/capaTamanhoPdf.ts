@@ -9,6 +9,8 @@ export type CapaTamanhoDoc = {
   estampa: string;
   cor?: string | null;
   tamanho: string;
+  /** Tipo de peça do grupo, já formatado ("Oversized" ou "Oversized 8 · Poliamida Tech 2"). Ausente = sem a linha. */
+  tipo?: string | null;
   pedidos: number;
   /** Pedidos com order bump (saem no fim da pilha). */
   comBump: number;
@@ -29,6 +31,40 @@ function fmtDataHora(d: Date): string {
   return d.toLocaleString("pt-BR", { day: "2-digit", month: "2-digit", year: "numeric", hour: "2-digit", minute: "2-digit" });
 }
 
+/**
+ * Tipo de peça em negrito, nome inteiro (sem reticências): prefere 2 linhas a 14 pt (encolhendo até 10),
+ * aceita 3 linhas (até 8 pt). Se ainda não couber em 3, os tipos do fim viram "+N tipos".
+ * `avancar`/`atual` mexem no y do chamador.
+ */
+function blocoTipo(pdf: jsPDF, texto: string, util: number, centro: number, avancar: (dy: number) => number, atual: () => number): void {
+  pdf.setFont("helvetica", "bold");
+  const quebrar = (t: string, pt: number): string[] => {
+    pdf.setFontSize(pt);
+    return pdf.splitTextToSize(t, util) as string[];
+  };
+  const caber = (t: string): { pt: number; linhas: string[] } | null => {
+    for (const [max, min] of [[2, 10], [3, 8]] as const) {
+      for (let pt = 14; pt >= min; pt -= 1) {
+        const linhas = quebrar(t, pt);
+        if (linhas.length <= max) return { pt, linhas };
+      }
+    }
+    return null;
+  };
+  const itens = texto.split(" · ").filter(Boolean);
+  let res = caber(texto);
+  for (let n = itens.length - 1; !res && n >= 1; n -= 1) {
+    res = caber(`${itens.slice(0, n).join(" · ")} · +${itens.length - n} tipos`);
+  }
+  if (!res) res = { pt: 8, linhas: quebrar(texto, 8).slice(0, 3) };
+  pdf.setFontSize(res.pt);
+  for (const l of res.linhas) {
+    avancar(res.pt * 1.1);
+    pdf.text(l, centro, atual(), { align: "center" });
+  }
+  avancar(4);
+}
+
 export function gerarCapaTamanhoPdf(doc: CapaTamanhoDoc): string {
   const pdf = new jsPDF({ orientation: "portrait", unit: "pt", format: [CAPA_LARGURA_PT, CAPA_ALTURA_PT] });
   const util = CAPA_LARGURA_PT - 2 * MARGEM;
@@ -47,6 +83,7 @@ export function gerarCapaTamanhoPdf(doc: CapaTamanhoDoc): string {
   };
 
   bloco("CAPA · TAMANHO INTEIRO", 8, "bold", 1);
+  if (doc.tipo?.trim()) blocoTipo(pdf, doc.tipo.trim(), util, centro, (dy) => (y += dy), () => y);
   if (doc.gradeToda) bloco(`GRADE TODA · tamanho ${doc.gradeToda.indice} de ${doc.gradeToda.total}`, 7, "normal", 1);
   bloco(doc.estampa, 18, "bold", 2);
   if (doc.cor) bloco(doc.cor, 14, "normal", 1);
@@ -92,6 +129,8 @@ export function gerarCapaBumpPdf(doc: {
   tamanhoGrupo: string;
   /** Números dos pedidos do bloco, na ordem da pilha. */
   numeros?: string[];
+  /** Tipo de peça do grupo (ver `CapaTamanhoDoc.tipo`); ausente = como antes. */
+  tipo?: string | null;
 }): string {
   const pdf = new jsPDF({ orientation: "portrait", unit: "pt", format: [CAPA_LARGURA_PT, CAPA_ALTURA_PT] });
   const util = CAPA_LARGURA_PT - 2 * MARGEM;
@@ -109,6 +148,11 @@ export function gerarCapaBumpPdf(doc: {
   pdf.setTextColor(0, 0, 0);
 
   let topo = 56;
+  if (doc.tipo?.trim()) {
+    let yt = topo - 6;
+    blocoTipo(pdf, doc.tipo.trim(), util, centro, (dy) => (yt += dy), () => yt);
+    topo = yt + 6;
+  }
   pdf.setFont("helvetica", "normal");
   pdf.setFontSize(10);
   pdf.text(`${doc.estampa} ${tamGrupo}`.toUpperCase(), centro, topo, { align: "center", maxWidth: util });

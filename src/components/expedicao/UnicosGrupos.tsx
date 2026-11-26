@@ -21,7 +21,7 @@ import {
   type PeriodoUnicos,
   type GrupoEscolhido,
 } from "../../lib/unicosExpedicao";
-import { devolverUnicosGrupos, getUnicos, liberarImpressaoManual, type UnicosResponse } from "../../services/expedicao";
+import { devolverUnicosGrupos, getUnicos, liberarImpressaoManual, type UnicoTipo, type UnicosResponse } from "../../services/expedicao";
 import { isExpedicaoSimulacao } from "../../services/expedicaoMode";
 import { getMe } from "../../services/orders";
 import { limparLoteEmCurso, lerLoteEmCurso } from "../../lib/impressaoManualLote";
@@ -65,7 +65,7 @@ export function UnicosGrupos({
   const [podeConfigurarBump, setPodeConfigurarBump] = useState(false);
   // Impressão manual do tamanho inteiro: só com `me.unicosImpressaoManual === true` (ausente = servidor antigo).
   const [impressaoManual, setImpressaoManual] = useState(() => isExpedicaoSimulacao());
-  const [chipAberto, setChipAberto] = useState<{ grupo: GrupoEscolhido; pedidos: number; grade?: GradeTamanho[] } | null>(null);
+  const [chipAberto, setChipAberto] = useState<{ grupo: GrupoEscolhido; pedidos: number; grade?: GradeTamanho[]; tipos?: UnicoTipo[] } | null>(null);
   const [recentesAberto, setRecentesAberto] = useState(false);
   // Painel de tamanhos aberto pelo menu "Imprimir um tamanho…": o botão de tamanho abre a impressão, não a fila da mesa.
   const [paraImprimir, setParaImprimir] = useState(false);
@@ -192,7 +192,7 @@ export function UnicosGrupos({
 
   /** Grade toda do card: tamanhos com pedido (descontando bump se "Sem order bump"), em ordem canônica. */
   const gradeDoCard = (e: EstampaAgrupada): GradeTamanho[] =>
-    planoDaGrade(e.tamanhos.map((t) => ({ tamanho: t.tamanho, pedidos: semBump ? pedidosSemBump(t.pedidos, t.comOrderBump) : t.pedidos })));
+    planoDaGrade(e.tamanhos.map((t) => ({ tamanho: t.tamanho, pedidos: semBump ? pedidosSemBump(t.pedidos, t.comOrderBump) : t.pedidos, ...(t.tipos?.length ? { tipos: t.tipos } : null) })));
   const abrirGrade = (e: EstampaAgrupada) => {
     const g = gradeDoCard(e);
     if (g.length === 0) return;
@@ -204,7 +204,7 @@ export function UnicosGrupos({
     const total = totalDaGrade(g);
     if (total <= 0) return undefined;
     if (g.length === 1) {
-      return [{ chave: "tamanho", rotulo: `Imprimir tamanho ${g[0].tamanho} (${rotuloPedidos(total)})`, onSelecionar: () => setChipAberto({ grupo: { estampa: e.estampa, tamanho: g[0].tamanho, cor: e.cor }, pedidos: total }) }];
+      return [{ chave: "tamanho", rotulo: `Imprimir tamanho ${g[0].tamanho} (${rotuloPedidos(total)})`, onSelecionar: () => setChipAberto({ grupo: { estampa: e.estampa, tamanho: g[0].tamanho, cor: e.cor }, pedidos: total, tipos: tiposDoTamanho(e, g[0].tamanho) }) }];
     }
     return [
       { chave: "grade", rotulo: `Imprimir grade toda (${rotuloPedidos(total)})`, onSelecionar: () => abrirGrade(e) },
@@ -331,7 +331,7 @@ export function UnicosGrupos({
             paraImprimir
               ? (g) => {
                   const t = aberta.tamanhos.find((x) => x.tamanho === g.tamanho);
-                  setChipAberto({ grupo: g, pedidos: t ? (semBump ? pedidosSemBump(t.pedidos, t.comOrderBump) : t.pedidos) : 0 });
+                  setChipAberto({ grupo: g, pedidos: t ? (semBump ? pedidosSemBump(t.pedidos, t.comOrderBump) : t.pedidos) : 0, tipos: tiposDoTamanho(aberta, g.tamanho) });
                 }
               : onEscolher
           }
@@ -349,7 +349,7 @@ export function UnicosGrupos({
               semBump={semBump}
               marcada={modoDevolver ? marcadas.has(e.chave) : undefined}
               menu={menuDoCard(e)}
-              onChip={!modoDevolver && (impressaoManual || podeConfigurarBump) ? (t) => setChipAberto({ grupo: { estampa: e.estampa, tamanho: t.tamanho, cor: e.cor }, pedidos: t.pedidos }) : undefined}
+              onChip={!modoDevolver && (impressaoManual || podeConfigurarBump) ? (t) => setChipAberto({ grupo: { estampa: e.estampa, tamanho: t.tamanho, cor: e.cor }, pedidos: t.pedidos, tipos: t.tipos }) : undefined}
             />
           ))}
         </div>
@@ -359,6 +359,7 @@ export function UnicosGrupos({
         <ImpressaoManualDialog
           grupo={chipAberto.grupo}
           grade={chipAberto.grade}
+          tipos={chipAberto.tipos}
           periodo={periodoEfetivo(periodo, suportado)}
           totalNaFila={chipAberto.pedidos}
           podeImprimir={impressaoManual}
@@ -436,6 +437,11 @@ function Prioritarios({ n }: { n: number }) {
       {n} prioritário{n === 1 ? "" : "s"}
     </span>
   );
+}
+
+/** Tipos DO tamanho (API nova manda por grupo); sem eles, nada (nunca os do card inteiro). */
+function tiposDoTamanho(e: EstampaAgrupada, tamanho: string) {
+  return e.tamanhos.find((x) => x.tamanho === tamanho)?.tipos;
 }
 
 function ComBump({ n }: { n: number }) {

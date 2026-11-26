@@ -39,7 +39,7 @@ import type { ItemReimpressao } from "../../lib/reimprimirManual";
 import { ReimprimirLista } from "./ReimprimirLista";
 import { etiquetaEcommerceDoPedido, imprimirDocumentoDoPedido } from "../../lib/reimpressao";
 import { printEtiquetaUnica } from "../../lib/printer";
-import { rotuloDia, type GrupoEscolhido, type PeriodoUnicos } from "../../lib/unicosExpedicao";
+import { rotuloDia, rotuloTiposCapa, type GrupoEscolhido, type PeriodoUnicos } from "../../lib/unicosExpedicao";
 import {
   concluirImpressaoManual,
   devolverUnicosASeparacao,
@@ -51,6 +51,7 @@ import {
   type ImpressaoManualPedido,
   type ImpressaoManualReserva,
   type UnicoPedido,
+  type UnicoTipo,
 } from "../../services/expedicao";
 import { isExpedicaoSimulacao } from "../../services/expedicaoMode";
 import { getMe } from "../../services/orders";
@@ -77,6 +78,7 @@ type Fase = "lista" | "reservando" | "baixando" | "confirmarPdf" | "imprimindo" 
 export function ImpressaoManualDialog({
   grupo,
   grade,
+  tipos,
   periodo,
   totalNaFila,
   podeImprimir = true,
@@ -89,6 +91,8 @@ export function ImpressaoManualDialog({
   grupo: GrupoEscolhido;
   /** Grade toda: os tamanhos do card (e quantos pedidos cada um). Sem isso, é o tamanho único de `grupo`. */
   grade?: GradeTamanho[];
+  /** Tipos de peça do tamanho único (modo grade usa os de cada item da grade); ausente = capa sem a linha. */
+  tipos?: UnicoTipo[];
   periodo?: PeriodoUnicos | null;
   totalNaFila: number;
   /** Flag da impressão manual (`me.unicosImpressaoManual`); sem ela o diálogo só lista e devolve. */
@@ -120,6 +124,13 @@ export function ImpressaoManualDialog({
   const [tamanhoAtual, setTamanhoAtual] = useState<{ tamanho: string; esperado: number; indice: number } | null>(null);
   const filaRef = useRef<GradeTamanho[]>([]);
   const correnteRef = useRef<{ tamanho: string; esperado: number; parcial: boolean; restantes: number } | null>(null);
+  /** Linha de tipo da capa do tamanho: contagem só quando bate com o "N pedidos" da capa; `bump` nunca conta. */
+  const tipoDaCapa = (tam: string, pedidosN: number, bump = false): string => {
+    const fonte = modoGrade ? plano.find((x) => x.tamanho === tam)?.tipos : tipos;
+    if (!fonte?.length) return "";
+    const soma = fonte.reduce((n, t) => n + t.pedidos, 0);
+    return rotuloTiposCapa(fonte, grupo.estampa, bump || soma !== pedidosN);
+  };
   const rotuloTam = modoGrade ? "grade toda" : grupo.tamanho;
 
   const loteRef = useRef<LoteManual | null>(null);
@@ -192,7 +203,7 @@ export function ImpressaoManualDialog({
       await sleep(500);
       return;
     }
-    const capa = gerarCapaTamanhoPdf({ estampa: grupo.estampa, cor: grupo.cor, tamanho, pedidos: pedidosN, comBump: comBumpN, operador, ...(gradeToda ? { gradeToda } : {}) });
+    const capa = gerarCapaTamanhoPdf({ estampa: grupo.estampa, cor: grupo.cor, tipo: tipoDaCapa(tamanho, pedidosN), tamanho, pedidos: pedidosN, comBump: comBumpN, operador, ...(gradeToda ? { gradeToda } : {}) });
     const out = await printEtiquetaUnica(capa, "pdf", { jobName: `CAPA ${nomeGrupo} ${tamanho}`, printer: getLabelPrinter() });
     if (!out.ok) throw new Error(out.message ?? "impressão falhou");
   };
@@ -299,7 +310,7 @@ export function ImpressaoManualDialog({
           capasBumpRef.current.add(p.orderId);
           if (!sim) {
             try {
-              const folha = gerarCapaBumpPdf({ produtoNome: capaBump.produtoNome, tamanho: capaBump.tamanho, pedidos: capaBump.pedidos, numeros: capaBump.numeros, estampa: grupo.estampa, tamanhoGrupo: tamanhoDoPedido });
+              const folha = gerarCapaBumpPdf({ produtoNome: capaBump.produtoNome, tamanho: capaBump.tamanho, pedidos: capaBump.pedidos, numeros: capaBump.numeros, estampa: grupo.estampa, tipo: tipoDaCapa(tamanhoDoPedido, Number.NaN, true), tamanhoGrupo: tamanhoDoPedido });
               await printEtiquetaUnica(folha, "pdf", { jobName: `ORDER BUMP ${capaBump.tamanho ?? ""} ${tamanhoDoPedido}`, printer: getLabelPrinter() });
             } catch {
               /* segue sem a capa do bloco */
@@ -367,7 +378,7 @@ export function ImpressaoManualDialog({
     } finally {
       rodandoRef.current = false;
     }
-  }, [finalizar, grupo.estampa, grupo.tamanho, grupo.cor, modoGrade]);
+  }, [finalizar, grupo.estampa, grupo.tamanho, grupo.cor, modoGrade, tipos, plano]);
 
   const reservar = async (): Promise<ImpressaoManualReserva | null> => {
     setErro(null);
@@ -467,10 +478,10 @@ export function ImpressaoManualDialog({
         const doTamanho = incluidos.filter((x) => (x.tamanho ?? grupo.tamanho) === tam);
         return sequenciaDaPilha(doTamanho).map((f): FolhaResolvida => {
           if (f.tipo === "capa") {
-            return { tipo: "pdf", base64: gerarCapaTamanhoPdf({ estampa: grupo.estampa, cor: grupo.cor, tamanho: tam, pedidos: doTamanho.length, comBump: doTamanho.filter((x) => x.comBump).length, operador }) };
+            return { tipo: "pdf", base64: gerarCapaTamanhoPdf({ estampa: grupo.estampa, cor: grupo.cor, tipo: tipoDaCapa(tam, doTamanho.length), tamanho: tam, pedidos: doTamanho.length, comBump: doTamanho.filter((x) => x.comBump).length, operador }) };
           }
           if (f.tipo === "capaBump") {
-            return { tipo: "pdf", base64: gerarCapaBumpPdf({ produtoNome: f.produtoNome, tamanho: f.tamanho, pedidos: f.pedidos, numeros: f.numeros, estampa: grupo.estampa, tamanhoGrupo: tam }) };
+            return { tipo: "pdf", base64: gerarCapaBumpPdf({ produtoNome: f.produtoNome, tamanho: f.tamanho, pedidos: f.pedidos, numeros: f.numeros, estampa: grupo.estampa, tipo: tipoDaCapa(tam, Number.NaN, true), tamanhoGrupo: tam }) };
           }
           return etiquetas.get(f.pedido.orderId)!;
         });

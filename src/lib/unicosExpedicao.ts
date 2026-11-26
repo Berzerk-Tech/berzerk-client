@@ -310,6 +310,27 @@ export function rotuloTipos(tipos: UnicoTipo[], estampa: string): string {
   return tipos.map((t) => `${rotuloTipo(t, estampa)} ${t.pedidos}`).join(" · ");
 }
 
+/**
+ * Tipo de peça pra capa impressa: só o tipo base (sem cor), nome inteiro. Um tipo só → "Oversized";
+ * vários → "Oversized 8 · Poliamida Tech 2", do maior pro menor. Mesmo tipo em cores diferentes soma.
+ * Sem tipos → "" (a capa sai sem a linha).
+ */
+export function rotuloTiposCapa(tipos: UnicoTipo[] | undefined | null, estampa: string, semContagem = false): string {
+  if (!tipos?.length) return "";
+  const mapa = new Map<string, { nome: string; pedidos: number }>();
+  for (const t of tipos) {
+    const nome = tipoBaseDoProduto(t.produtoNome, estampa);
+    if (!nome) continue;
+    const chave = nome.toLowerCase();
+    const a = mapa.get(chave);
+    if (a) a.pedidos += t.pedidos;
+    else mapa.set(chave, { nome, pedidos: t.pedidos });
+  }
+  const lista = Array.from(mapa.values()).sort((a, b) => b.pedidos - a.pedidos || a.nome.localeCompare(b.nome, "pt-BR"));
+  if (lista.length <= 1) return lista[0]?.nome ?? "";
+  return lista.map((x) => (semContagem ? x.nome : `${x.nome} ${x.pedidos}`)).join(" · ");
+}
+
 /** Soma os tipos de vários grupos por produto + cor, mais pedidos primeiro. */
 export function somarTipos(grupos: UnicoGrupo[]): UnicoTipo[] {
   const mapa = new Map<string, UnicoTipo>();
